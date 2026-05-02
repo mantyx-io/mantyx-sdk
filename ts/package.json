@@ -1,0 +1,59 @@
+{
+  "name": "@mantyx/sdk",
+  "version": "0.1.0",
+  "description": "MANTYX as a hosted agent runtime: define ephemeral agents, mix server-side MANTYX tools with locally-executed tools, run them remotely.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "EXTRACT.md"
+  ],
+  "scripts": {
+    "sync-version": "node ../scripts/sync-version.mjs",
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap",
+    "dev": "tsup src/index.ts --format esm,cjs --dts --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "keywords": [
+    "mantyx",
+    "agent",
+    "llm",
+    "sdk",
+    "tool-use",
+    "agentic",
+    "ai"
+  ],
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}

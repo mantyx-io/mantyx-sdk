@@ -1,0 +1,49 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Go
+go/bin/
+*.exe
+*.test
+*.out
+vendor/
+coverage.out
+coverage.html
+*.coverprofile
+
+# Node / TypeScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+*.tsbuildinfo
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# Test / coverage
+coverage/
+.nyc_output/
+ts/node_modules/.vite/
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Misc
+*.log
+tmp/
+temp/

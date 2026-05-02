@@ -1,0 +1,130 @@
+# Publishes @mantyx/sdk to npm and pushes git tags for the Go module (monorepo path ./go).
+#
+# Prerequisites (once per repo):
+#   - GitHub Actions secret NPM_TOKEN: npm automation token with publish scope for @mantyx/sdk
+#
+# Maintainer flow:
+#   1. Bump repo root VERSION, run `cd ts && npm run sync-version`, commit and push to main.
+#   2. Run this workflow from the Actions tab (optionally enable dry_run first).
+#
+# Go consumers resolve versions via tags prefixed with the module directory: go/v0.1.0
+# npm uses package.json version (must match VERSION).
+
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "npm publish --dry-run only; do not push git tags"
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish npm + tag Go module
+    runs-on: ubuntu-latest
+    # Manual releases should run from the branch that contains the version bump.
+    if: github.ref_name == 'main' || github.ref_name == 'master'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require NPM_TOKEN (non–dry-run)
+        if: ${{ !inputs.dry_run }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN}" ]; then
+            echo "::error::Secret NPM_TOKEN is not set. Add an npm automation token in repo Settings → Secrets."
+            exit 1
+          fi
+
+      - name: Read VERSION
+        id: version
+        run: |
+          set -euo pipefail
+          V="$(tr -d '[:space:]' < VERSION)"
+          echo "value=${V}" >> "${GITHUB_OUTPUT}"
+          echo "Publishing version: ${V}"
+
+      - name: Verify version sync
+        run: node scripts/sync-version.mjs --check
+
+      - name: Tags must not exist yet
+        if: ${{ !inputs.dry_run }}
+        env:
+          V: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --quiet || true
+          if git rev-parse "refs/tags/v${V}" >/dev/null 2>&1; then
+            echo "::error::Git tag v${V} already exists. Bump VERSION or delete the tag."
+            exit 1
+          fi
+          if git rev-parse "refs/tags/go/v${V}" >/dev/null 2>&1; then
+            echo "::error::Git tag go/v${V} already exists."
+            exit 1
+          fi
+
+      - name: Go tests
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: go/go.sum
+
+      - name: Go test
+        working-directory: go
+        run: go test ./... -race -count=1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ts/package-lock.json
+          registry-url: https://registry.npmjs.org
+
+      - name: npm ci + verify
+        working-directory: ts
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: npm publish (dry run)
+        if: ${{ inputs.dry_run }}
+        working-directory: ts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --dry-run --access public
+
+      - name: npm publish
+        if: ${{ !inputs.dry_run }}
+        working-directory: ts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Push release tags
+        if: ${{ !inputs.dry_run }}
+        env:
+          V: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${V}" -m "Release v${V}"
+          git tag -a "go/v${V}" -m "Go module release v${V} (./go)"
+          git push origin "refs/tags/v${V}" "refs/tags/go/v${V}"
