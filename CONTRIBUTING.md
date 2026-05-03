@@ -125,11 +125,15 @@ That runs [`githooks/pre-commit`](./githooks/pre-commit) — same `--check` scri
 ## Local tooling
 
 ```bash
-# git-cliff (changelog generator)
-brew install git-cliff           # macOS
-cargo install git-cliff          # Rust
+# git-cliff — use the same major.minor as CI (see `.github/workflows/ci.yml` → taiki-e `tool:`).
+brew install git-cliff           # macOS (if version mismatches CI, use cargo or GIT_CLIFF_BIN)
+cargo install git-cliff --version 2.10.1 --locked
+
+# After cloning / before regenerating changelogs on a machine that never fetched tags:
+git fetch origin --tags
 
 # Then sanity-check from any branch:
+GIT_CLIFF_BIN=/path/to/git-cliff-2.10.1   # optional — avoids picking wrong binary when several exist
 node scripts/changelog.mjs --check
 ```
 

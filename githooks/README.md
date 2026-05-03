@@ -30,6 +30,6 @@ git config --unset core.hooksPath
 If `git-cliff` is not installed, the changelog step is **skipped** with a notice; fix drift before pushing or install git-cliff so the hook can catch it early:
 
 ```bash
-brew install git-cliff    # macOS
-cargo install git-cliff   # Rust toolchain
+brew install git-cliff    # macOS — pin to match CI: git-cliff 2.10.x (see ci.yml)
+cargo install git-cliff --version 2.10.1 --locked
 ```

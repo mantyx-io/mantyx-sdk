@@ -19,10 +19,8 @@
  *     `gh release create --notes-file -`. Defaults to a unified release body
  *     spanning all three SDKs when --package is omitted.
  *
- * Requires `git-cliff` on PATH. Install via:
- *   brew install git-cliff       (macOS)
- *   cargo install git-cliff      (Rust)
- *   GitHub Actions: taiki-e/install-action with tool=git-cliff
+ * Requires `git-cliff` on PATH, or set **GIT_CLIFF_BIN** to the full path (use
+ * the same version as CI — see `tool: git-cliff@…` in `.github/workflows/ci.yml`).
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -31,6 +29,23 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+
+/** Executable used for all git-cliff calls (matches CI when pointed at same binary). */
+function gitCliffExe() {
+  return process.env.GIT_CLIFF_BIN?.trim() || "git-cliff";
+}
+
+/** Normalize so CI (LF) and Windows checkouts (CRLF) compare equal; stable trailing newline. */
+function normalizeChangelog(text) {
+  let s = String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  s = s.trimEnd() + "\n";
+  return s;
+}
+
+function gitCliffVersion() {
+  const r = spawnSync(gitCliffExe(), ["--version"], { encoding: "utf8" });
+  return r.status === 0 ? r.stdout.trim() : "(unknown)";
+}
 
 /**
  * Per-package config — paths whose commits should be included in the
@@ -99,14 +114,15 @@ function printHelp() {
 }
 
 function ensureGitCliff() {
-  const r = spawnSync("git-cliff", ["--version"], { encoding: "utf8" });
+  const exe = gitCliffExe();
+  const r = spawnSync(exe, ["--version"], { encoding: "utf8" });
   if (r.error || r.status !== 0) {
     console.error(
       [
-        "git-cliff is not installed or not on PATH.",
+        `git-cliff is not installed or not runnable (${exe}).`,
         "  brew install git-cliff           (macOS)",
-        "  cargo install git-cliff          (Rust)",
-        "  Or CI: taiki-e/install-action@v2 with tool: git-cliff",
+        "  cargo install git-cliff --version 2.10.1 --locked   (match CI)",
+        "  Or set GIT_CLIFF_BIN=/path/to/git-cliff",
         "",
         "See https://git-cliff.org/docs/installation",
       ].join("\n"),
@@ -117,7 +133,7 @@ function ensureGitCliff() {
 
 function runGitCliff(extraArgs) {
   const args = ["--config", "cliff.toml", ...extraArgs];
-  const r = spawnSync("git-cliff", args, { cwd: repoRoot, encoding: "utf8" });
+  const r = spawnSync(gitCliffExe(), args, { cwd: repoRoot, encoding: "utf8" });
   if (r.status !== 0) {
     if (r.stderr) process.stderr.write(r.stderr);
     process.exit(r.status ?? 1);
@@ -140,30 +156,50 @@ function generateForPackage(pkg, { unreleasedOnly = false, version = null } = {}
 
 function modeWrite() {
   ensureGitCliff();
+  console.log(
+    `[changelog] ${gitCliffVersion()} (${gitCliffExe()}) — writing ${Object.keys(PACKAGES).length} files`,
+  );
   for (const [key, cfg] of Object.entries(PACKAGES)) {
-    const out = generateForPackage(key);
+    const raw = generateForPackage(key);
+    const out = normalizeChangelog(raw);
     const target = path.join(repoRoot, cfg.changelog);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, out);
-    console.log(`[changelog] wrote ${cfg.changelog}`);
+    fs.writeFileSync(target, out, "utf8");
+    console.log(`[changelog] wrote ${cfg.changelog} (${out.length} bytes)`);
   }
+  console.log("[changelog] done — stage files with: git add ts/CHANGELOG.md go/CHANGELOG.md python/CHANGELOG.md");
 }
 
 function modeCheck() {
   ensureGitCliff();
+  console.log(`[changelog] ${gitCliffVersion()} (${gitCliffExe()}) — comparing generated vs on-disk`);
   let drift = false;
   for (const [key, cfg] of Object.entries(PACKAGES)) {
-    const generated = generateForPackage(key);
+    const generated = normalizeChangelog(generateForPackage(key));
     const target = path.join(repoRoot, cfg.changelog);
-    const onDisk = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";
+    const onDisk = normalizeChangelog(
+      fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "",
+    );
     if (generated !== onDisk) {
       drift = true;
       console.error(
-        `::error file=${cfg.changelog}::CHANGELOG drift detected. Regenerate with: node scripts/changelog.mjs --write`,
+        `::error file=${cfg.changelog}::CHANGELOG drift (${generated.length} gen vs ${onDisk.length} disk). Regenerate: node scripts/changelog.mjs --write`,
       );
     }
   }
-  if (drift) process.exit(1);
+  if (drift) {
+    console.error(
+      [
+        "",
+        "Hints:",
+        "  • Pull latest and fetch tags:  git pull && git fetch origin --tags",
+        "  • Use the same git-cliff as CI (see .github/workflows/ci.yml `tool: git-cliff@…`).",
+        "     export GIT_CLIFF_BIN=/path/to/git-cliff   # optional",
+        "  • Run from repo root, then commit all three CHANGELOG.md files together.",
+      ].join("\n"),
+    );
+    process.exit(1);
+  }
   console.log("changelog check OK");
 }
 
