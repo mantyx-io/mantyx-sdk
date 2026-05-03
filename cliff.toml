@@ -37,16 +37,22 @@ body = """
 {% endfor %}\n
 """
 
-# Closing footer with version-comparison links. Rendered once.
+# Link references at bottom (Keep a Changelog style). When there is no prior tag
+# yet, `release.previous` is absent — do not reference `release.previous.version`.
 footer = """
 {% for release in releases -%}
     {% if release.version -%}
-        {% if release.previous.version -%}
+        {% if release.previous and release.previous.version -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
               https://github.com/mantyx-io/mantyx-sdk/compare/{{ release.previous.version }}..{{ release.version }}
+        {% else -%}
+            [{{ release.version | trim_start_matches(pat="v") }}]: \
+              https://github.com/mantyx-io/mantyx-sdk/releases/tag/{{ release.version }}
         {% endif -%}
     {% else -%}
+        {% if release.previous and release.previous.version -%}
         [unreleased]: https://github.com/mantyx-io/mantyx-sdk/compare/{{ release.previous.version }}..HEAD
+        {% endif -%}
     {% endif -%}
 {% endfor %}
 """
