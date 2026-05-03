@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# MANTYX SDK monorepo — run the same drift checks as CI before completing a commit.
+# Enable once per clone:  git config core.hooksPath githooks
+# Disable:                 git config --unset core.hooksPath
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "pre-commit: sync-version --check"
+node scripts/sync-version.mjs --check
+
+echo "pre-commit: sync-agent-runs-doc --check"
+node scripts/sync-agent-runs-doc.mjs --check
+
+if command -v git-cliff >/dev/null 2>&1; then
+  echo "pre-commit: changelog --check"
+  node scripts/changelog.mjs --check
+else
+  echo "pre-commit: skip changelog.mjs --check (git-cliff not on PATH — CI will still enforce)" >&2
+fi

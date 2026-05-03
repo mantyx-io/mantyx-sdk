@@ -112,6 +112,16 @@ git add docs go/docs python/docs ts/docs
 
 CI runs `node scripts/sync-agent-runs-doc.mjs --check` so drift fails the build.
 
+## Git hooks (optional)
+
+CI drift usually happens when only **half** of a mechanical fix is committed (for example `cliff.toml` without re-running `changelog.mjs --write`, or editing `docs/agent-runs-protocol.md` without syncing mirrors). To block those commits locally, enable the repo’s hooks once per clone:
+
+```bash
+git config core.hooksPath githooks
+```
+
+That runs [`githooks/pre-commit`](./githooks/pre-commit) — same `--check` scripts as CI (changelog check requires `git-cliff` on your `PATH`; see [`githooks/README.md`](./githooks/README.md)).
+
 ## Local tooling
 
 ```bash

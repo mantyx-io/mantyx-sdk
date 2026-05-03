@@ -9,4 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Python package & gh pages doc
 
+### Fixed
+
+- Changelog generation
+
 
