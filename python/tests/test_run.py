@@ -1,0 +1,143 @@
+"""Tests for ``run_agent`` and ``stream_agent``."""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import BaseModel
+
+from mantyx import (
+    MantyxClient,
+    MantyxRunError,
+    define_local_tool,
+    mantyx_plugin_tool,
+    mantyx_tool,
+)
+
+from .conftest import MockServer, RunScript, ScriptEvent
+
+
+def test_run_agent_success(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(kind="delta", data={"text": "hello "}),
+            ScriptEvent(kind="delta", data={"text": "world"}),
+            ScriptEvent(kind="result", data={"subtype": "success", "text": "hello world"}),
+        ]
+    )
+
+    deltas: list[str] = []
+    result = mantyx_client.run_agent(
+        system_prompt="You are a friendly assistant.",
+        prompt="Say hello.",
+        on_assistant_delta=lambda d: deltas.append(d),
+    )
+    assert result.text == "hello world"
+    assert deltas == ["hello ", "world"]
+    assert result.run_id.startswith("run_")
+    assert any(ev.type == "result" for ev in result.events)
+
+
+def test_run_agent_with_local_tool(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
+    class Args(BaseModel):
+        path: str
+
+    captured: list[Args] = []
+
+    def execute(args: Args) -> str:
+        captured.append(args)
+        return f"contents-of:{args.path}"
+
+    tool = define_local_tool(name="read_file", parameters=Args, execute=execute)
+
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="local_tool_call",
+                data={"toolUseId": "tu_1", "name": "read_file", "args": {"path": "/etc/host"}},
+                wait_for_result=True,
+            ),
+            ScriptEvent(kind="result", data={"subtype": "success", "text": "done"}),
+        ]
+    )
+
+    result = mantyx_client.run_agent(
+        system_prompt="You are an assistant.",
+        prompt="Read /etc/host.",
+        tools=[tool],
+    )
+    assert result.text == "done"
+    assert captured[0].path == "/etc/host"
+    assert mock_server.last_tool_result_body is not None
+    assert mock_server.last_tool_result_body["toolUseId"] == "tu_1"
+    assert mock_server.last_tool_result_body["result"] == "contents-of:/etc/host"
+
+
+def test_run_agent_error_terminates(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={"subtype": "error_max_tool_turns", "error": "too many tool turns"},
+            )
+        ]
+    )
+    with pytest.raises(MantyxRunError) as exc:
+        mantyx_client.run_agent(system_prompt="...", prompt="...")
+    assert exc.value.subtype == "error_max_tool_turns"
+
+
+def test_run_agent_serialises_tool_refs(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        tools=[
+            mantyx_tool("tool_abc"),
+            mantyx_plugin_tool("@web/search"),
+        ],
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    tools = body["tools"]
+    assert {"kind": "mantyx", "id": "tool_abc"} in tools
+    assert {"kind": "mantyx_plugin", "name": "@web/search"} in tools
+
+
+def test_run_agent_metadata(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        metadata={"customer": "acme", "env": "prod"},
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["metadata"] == {"customer": "acme", "env": "prod"}
+
+
+def test_run_agent_id_path(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
+    mantyx_client.run_agent(agent_id="agent_xyz", prompt="hi")
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["agentId"] == "agent_xyz"
+    assert "systemPrompt" not in body
+
+
+def test_run_agent_requires_agent_id_or_system_prompt(mantyx_client: MantyxClient) -> None:
+    from mantyx import MantyxError
+
+    with pytest.raises(MantyxError):
+        mantyx_client.run_agent(prompt="hi")
+
+
+def test_stream_agent_yields_events(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(kind="delta", data={"text": "tick"}),
+            ScriptEvent(kind="result", data={"subtype": "success", "text": "tick"}),
+        ]
+    )
+    events = list(mantyx_client.stream_agent(system_prompt="x", prompt="y"))
+    types = [ev.type for ev in events]
+    assert "assistant_delta" in types
+    assert types[-1] == "result"

@@ -1,0 +1,59 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap");
+@import "tailwindcss";
+@import "@astrojs/starlight-tailwind";
+
+/* Brand typography — DM Sans (mantyx.io) */
+:root {
+  --font-brand: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --mantyx-wordmark-light: #171717;
+  --mantyx-wordmark-dark: #fafafa;
+}
+
+/* Monochrome UI: black / white / grays only (no blue accent) */
+:root,
+:root[data-theme="dark"] {
+  --sl-color-accent-low: #262626;
+  --sl-color-accent: #e5e5e5;
+  --sl-color-accent-high: #fafafa;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #f5f5f5;
+  --sl-color-accent: #171717;
+  --sl-color-accent-high: #171717;
+}
+
+body {
+  font-family: var(--font-brand);
+}
+
+/* Public wordmark: Semibold, all caps, 0.12em tracking */
+.mantyx-wordmark {
+  font-family: var(--font-brand);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mantyx-wordmark-light);
+}
+
+:root[data-theme="dark"] .mantyx-wordmark {
+  color: var(--mantyx-wordmark-dark);
+}
+
+/* Nav bar wordmark beside logo */
+.mantyx-nav-wordmark {
+  font-size: clamp(var(--sl-text-base), 2.5vw, var(--sl-text-lg));
+}
+
+.mantyx-hero-bg {
+  background-color: var(--sl-color-bg);
+  background-image: radial-gradient(
+    ellipse 85% 55% at 50% -15%,
+    color-mix(in srgb, var(--sl-color-gray-5) 35%, transparent),
+    transparent 58%
+  );
+}
+
+.mantyx-hero-headline {
+  font-family: var(--font-brand);
+}

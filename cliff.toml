@@ -1,0 +1,97 @@
+# git-cliff config for the MANTYX SDK monorepo.
+#
+# Same config drives all per-SDK CHANGELOGs. The `scripts/changelog.mjs`
+# wrapper invokes git-cliff with different `--include-path` and
+# `--tag-pattern` arguments for each package (TypeScript / Go / Python),
+# so the per-SDK CHANGELOG only reflects commits that actually touched
+# that SDK's directory.
+#
+# Conventional Commit scopes recognised: ts, go, py, protocol, docs, site,
+# ci, repo. Unscoped commits land under "Repo".
+
+[changelog]
+# Header is preserved verbatim at the top of each CHANGELOG.
+header = """
+# Changelog
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+
+# Tera template rendered once per release section.
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] — {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first | trim }}\
+{% if commit.scope and commit.scope != "ts" and commit.scope != "go" and commit.scope != "py" %}\
+ _({{ commit.scope }})_\
+{% endif %}\
+{% endfor %}
+{% endfor %}\n
+"""
+
+# Closing footer with version-comparison links. Rendered once.
+footer = """
+{% for release in releases -%}
+    {% if release.version -%}
+        {% if release.previous.version -%}
+            [{{ release.version | trim_start_matches(pat="v") }}]: \
+              https://github.com/mantyx-io/mantyx-sdk/compare/{{ release.previous.version }}..{{ release.version }}
+        {% endif -%}
+    {% else -%}
+        [unreleased]: https://github.com/mantyx-io/mantyx-sdk/compare/{{ release.previous.version }}..HEAD
+    {% endif -%}
+{% endfor %}
+"""
+
+trim = true
+
+[git]
+# Conventional Commits — we keep the body of the rejected commits in the
+# changelog (`filter_unconventional = false`) so unscoped fixes still surface.
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "v[0-9].*"
+skip_tags = "alpha|beta|rc"
+ignore_tags = ""
+topo_order = false
+sort_commits = "newest"
+
+# Mapping conventional types → Keep-a-Changelog sections.
+commit_parsers = [
+    { message = "^feat", group = "Added" },
+    { message = "^add", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Changed" },
+    { message = "^revert", group = "Changed" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^style", skip = true },
+    { message = "^test", skip = true },
+    { message = "^chore", skip = true },
+    { message = "^ci", skip = true },
+    { message = "^build", skip = true },
+    { body = ".*BREAKING CHANGE.*", group = "Breaking" },
+]
+
+commit_preprocessors = [
+    # Trim a leading `<scope>: ` redundancy so messages read cleanly when the
+    # scope is also rendered in the bullet.
+    { pattern = '^([a-z]+)\(([^)]+)\): ', replace = "" },
+    { pattern = '^([a-z]+): ',            replace = "" },
+]
+
+# Linkify GH issue references like `#123` in commit subjects.
+link_parsers = [
+    { pattern = "#(\\d+)", href = "https://github.com/mantyx-io/mantyx-sdk/issues/$1" },
+]

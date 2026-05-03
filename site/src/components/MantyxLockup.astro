@@ -1,0 +1,34 @@
+---
+interface Props {
+  /** Visual size of the square mark */
+  markSize?: number;
+  /** Tailwind text size classes for the wordmark (cap height scales with this) */
+  wordmarkClass?: string;
+  /** Extra wrapper classes */
+  class?: string;
+}
+
+const {
+  markSize = 48,
+  wordmarkClass = "text-2xl sm:text-3xl",
+  class: className = "",
+} = Astro.props;
+---
+
+<div class:list={["mantyx-lockup flex flex-row flex-wrap items-center justify-center gap-3 sm:gap-4", className]}>
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 48 48"
+    width={markSize}
+    height={markSize}
+    class="shrink-0"
+    role="img"
+    aria-hidden="true"
+  >
+    <rect x="0" y="0" width="48" height="48" rx="11" fill="#0a0a0a" stroke="#404040" stroke-width="1"></rect>
+    <g transform="scale(1.5)">
+      <path fill="#fafafa" d="M9 21V11h2.4l3.1 5.4 3.1-5.4H20v10h-2.2v-5.6L15.3 19h-1.6l-2.5-3.6V21H9Z"></path>
+    </g>
+  </svg>
+  <span class:list={["mantyx-wordmark leading-none", wordmarkClass]}>MANTYX</span>
+</div>

@@ -1,0 +1,52 @@
+---
+import { LinkButton } from "@astrojs/starlight/components";
+
+/** Matches `@astrojs/starlight/constants` `PAGE_TITLE_ID` — skip navigation target */
+const PAGE_TITLE_ID = "_top";
+
+interface Props {
+  baseUrl: string;
+}
+
+const { baseUrl } = Astro.props;
+
+const title = Astro.locals.starlightRoute?.entry?.data?.title ?? "";
+---
+
+<section
+  class="mantyx-hero-bg relative overflow-hidden border-b border-(--sl-color-gray-5)"
+>
+  <div class="mx-auto max-w-6xl px-6 py-16 sm:py-20 lg:py-24">
+    <div class="flex flex-col text-center lg:text-left">
+      <h1
+        id={PAGE_TITLE_ID}
+        class="mantyx-hero-headline max-w-3xl text-3xl font-semibold tracking-tight text-[#171717] dark:text-[#fafafa] sm:mx-auto sm:text-4xl lg:mx-0 lg:max-w-3xl lg:text-5xl"
+      >
+        {title}
+      </h1>
+
+      <p
+        class="mt-5 max-w-3xl text-base leading-relaxed text-(--sl-color-gray-2) sm:mx-auto sm:text-lg lg:mx-0"
+      >
+        MANTYX runs the full agent loop, workspace tools, memory, and observability. These SDKs connect
+        your process to that runtime so you can mix
+        <strong class="text-(--sl-color-white)">remote</strong> tools with
+        <strong class="text-(--sl-color-white)">local</strong> handlers in one loop.
+      </p>
+
+      <div class="mt-8 flex flex-wrap items-center justify-center gap-3 lg:justify-start">
+        <LinkButton href={`${baseUrl}docs/getting-started/`} variant="primary" icon="right-arrow">
+          Get started
+        </LinkButton>
+        <LinkButton
+          href="https://github.com/mantyx-io/mantyx-sdk"
+          variant="secondary"
+          icon="external"
+          iconPlacement="end"
+        >
+          View on GitHub
+        </LinkButton>
+      </div>
+    </div>
+  </div>
+</section>

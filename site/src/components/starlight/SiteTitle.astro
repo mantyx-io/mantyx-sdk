@@ -1,0 +1,66 @@
+---
+/**
+ * Logo + MANTYX wordmark (brand typography via `.mantyx-wordmark`).
+ * Full site title stays available to screen readers only.
+ */
+import { logos } from "virtual:starlight/user-images";
+import config from "virtual:starlight/user-config";
+
+const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<a href={siteTitleHref} class="site-title sl-flex">
+  {
+    config.logo && logos.dark && (
+      <>
+        <img
+          class:list={{ "light:sl-hidden print:hidden": !("src" in config.logo) }}
+          alt=""
+          src={logos.dark.src}
+          width={logos.dark.width}
+          height={logos.dark.height}
+          aria-hidden="true"
+        />
+        {
+          !("src" in config.logo) && (
+            <img
+              class="dark:sl-hidden print:block"
+              alt=""
+              src={logos.light?.src}
+              width={logos.light?.width}
+              height={logos.light?.height}
+              aria-hidden="true"
+            />
+          )
+        }
+      </>
+    )
+  }
+  <span class="mantyx-wordmark mantyx-nav-wordmark" translate="no" aria-hidden="true">MANTYX</span>
+  <span class="sr-only">{siteTitle}</span>
+</a>
+
+<style>
+  @layer starlight.core {
+    .site-title {
+      align-items: center;
+      gap: var(--sl-nav-gap);
+      font-size: var(--sl-text-h4);
+      font-weight: 600;
+      color: var(--sl-color-text-accent);
+      text-decoration: none;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    span:not(.sr-only) {
+      overflow: hidden;
+    }
+    img {
+      height: calc(var(--sl-nav-height) - 2 * var(--sl-nav-pad-y));
+      width: auto;
+      max-width: 100%;
+      object-fit: contain;
+      object-position: 0 50%;
+    }
+  }
+</style>

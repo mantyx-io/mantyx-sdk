@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /**
  * Single source of truth: repo root VERSION.
- * Updates go/sdk-version.txt (Go embed), ts/package.json "version", and ts/src/version.ts.
+ * Updates:
+ *   - go/sdk-version.txt           (Go //go:embed)
+ *   - ts/package.json "version"    (npm)
+ *   - ts/src/version.ts            (TS const SDK_VERSION)
+ *   - python/sdk-version.txt       (parity with Go)
+ *   - python/src/mantyx/_version.py (hatchling reads this for `pip install`)
+ *
  * Usage: node scripts/sync-version.mjs [--check]
  */
 import fs from "node:fs";
@@ -14,6 +20,8 @@ const versionFile = path.join(root, "VERSION");
 const goEmbedPath = path.join(root, "go", "sdk-version.txt");
 const pkgPath = path.join(root, "ts", "package.json");
 const tsVersionPath = path.join(root, "ts", "src", "version.ts");
+const pyEmbedPath = path.join(root, "python", "sdk-version.txt");
+const pyVersionPath = path.join(root, "python", "src", "mantyx", "_version.py");
 
 function readRootVersion() {
   return fs.readFileSync(versionFile, "utf8").trim();
@@ -28,7 +36,15 @@ function tsVersionSource(v) {
   );
 }
 
-function goEmbedContents(v) {
+function pyVersionSource(v) {
+  return (
+    `"""Release version — synced from repo root VERSION (\`node scripts/sync-version.mjs\`)."""\n\n` +
+    `__version__ = ${JSON.stringify(v)}\n\n` +
+    `SDK_VERSION = __version__\n`
+  );
+}
+
+function plainVersion(v) {
   return `${v}\n`;
 }
 
@@ -42,7 +58,9 @@ function main() {
   const check = process.argv.includes("--check");
   const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
   const expectedTs = tsVersionSource(v);
-  const expectedGo = goEmbedContents(v);
+  const expectedGo = plainVersion(v);
+  const expectedPy = pyVersionSource(v);
+  const expectedPyEmbed = plainVersion(v);
 
   if (check) {
     if (pkg.version !== v) {
@@ -51,13 +69,39 @@ function main() {
     }
     const cur = fs.readFileSync(tsVersionPath, "utf8");
     if (cur !== expectedTs) {
-      console.error("ts/src/version.ts is out of sync; run: cd ts && npm run sync-version");
+      console.error("ts/src/version.ts is out of sync; run: node scripts/sync-version.mjs");
       process.exit(1);
     }
     const goCur = fs.readFileSync(goEmbedPath, "utf8");
     if (goCur !== expectedGo) {
       console.error(
-        "go/sdk-version.txt is out of sync with repo VERSION; run: cd ts && npm run sync-version",
+        "go/sdk-version.txt is out of sync with repo VERSION; run: node scripts/sync-version.mjs",
+      );
+      process.exit(1);
+    }
+    if (!fs.existsSync(pyVersionPath)) {
+      console.error(
+        `python/src/mantyx/_version.py does not exist; run: node scripts/sync-version.mjs`,
+      );
+      process.exit(1);
+    }
+    const pyCur = fs.readFileSync(pyVersionPath, "utf8");
+    if (pyCur !== expectedPy) {
+      console.error(
+        "python/src/mantyx/_version.py is out of sync; run: node scripts/sync-version.mjs",
+      );
+      process.exit(1);
+    }
+    if (!fs.existsSync(pyEmbedPath)) {
+      console.error(
+        `python/sdk-version.txt does not exist; run: node scripts/sync-version.mjs`,
+      );
+      process.exit(1);
+    }
+    const pyEmbedCur = fs.readFileSync(pyEmbedPath, "utf8");
+    if (pyEmbedCur !== expectedPyEmbed) {
+      console.error(
+        "python/sdk-version.txt is out of sync with repo VERSION; run: node scripts/sync-version.mjs",
       );
       process.exit(1);
     }
@@ -69,7 +113,10 @@ function main() {
   fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
   fs.writeFileSync(tsVersionPath, expectedTs);
   fs.writeFileSync(goEmbedPath, expectedGo);
-  console.log("synced Go embed, npm, and version.ts to", v);
+  fs.mkdirSync(path.dirname(pyVersionPath), { recursive: true });
+  fs.writeFileSync(pyVersionPath, expectedPy);
+  fs.writeFileSync(pyEmbedPath, expectedPyEmbed);
+  console.log("synced Go embed, npm, version.ts, and Python to", v);
 }
 
 main();

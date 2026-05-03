@@ -1,4 +1,4 @@
-module github.com/mantyx/mantyx-go-sdk
+module github.com/mantyx-io/mantyx-go-sdk
 
 go 1.22
 

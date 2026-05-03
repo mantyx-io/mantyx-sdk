@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mantyx-sdk-example-oneshot"
+version = "0.0.0"
+description = "Minimal one-shot run with a local tool."
+requires-python = ">=3.9"
+dependencies = ["mantyx-sdk"]
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+# When developing inside the monorepo we resolve `mantyx-sdk` against
+# ../../ instead of PyPI. After publishing, drop the [tool.uv.sources]
+# block (or the equivalent in your tool) and pin the published version
+# above.
+[tool.uv.sources]
+mantyx-sdk = { path = "../..", editable = true }

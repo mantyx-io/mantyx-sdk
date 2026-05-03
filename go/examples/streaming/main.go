@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	mantyx "github.com/mantyx/mantyx-go-sdk"
+	mantyx "github.com/mantyx-io/mantyx-go-sdk"
 )
 
 func main() {

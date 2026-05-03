@@ -32,8 +32,8 @@ out of the MANTYX monorepo into a public repository is a five-minute job:
    ```bash
    for d in examples/*/; do
      pushd "$d" >/dev/null
-     # remove the `replace github.com/mantyx/mantyx-go-sdk => ../..` line
-     go mod edit -dropreplace github.com/mantyx/mantyx-go-sdk
+     # remove the `replace github.com/mantyx-io/mantyx-go-sdk => ../..` line
+     go mod edit -dropreplace github.com/mantyx-io/mantyx-go-sdk
      go mod tidy
      popd >/dev/null
    done
@@ -49,7 +49,7 @@ out of the MANTYX monorepo into a public repository is a five-minute job:
 
 6. Push to a new GitHub repo. To enable Go module discovery, ensure the new
    repo path matches the module declaration in `go.mod` (default:
-   `github.com/mantyx/mantyx-go-sdk`). Update `go.mod` if you publish under
+   `github.com/mantyx-io/mantyx-go-sdk`). Update `go.mod` if you publish under
    a different path.
 
 ## What you can leave behind

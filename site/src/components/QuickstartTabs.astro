@@ -1,0 +1,120 @@
+---
+import { Tabs, TabItem, Code } from "@astrojs/starlight/components";
+
+const ts = `import { MantyxClient, defineLocalTool } from "@mantyx/sdk";
+import { z } from "zod";
+import { readFile } from "node:fs/promises";
+
+const client = new MantyxClient({
+  apiKey: process.env.MANTYX_API_KEY!,
+  workspaceSlug: "acme-corp",
+});
+
+const result = await client.runAgent({
+  systemPrompt: "You are a helpful filesystem assistant.",
+  prompt: "Read /etc/hostname and tell me what it says.",
+  tools: [
+    defineLocalTool({
+      name: "read_file",
+      parameters: z.object({ path: z.string() }),
+      execute: ({ path }) => readFile(path, "utf8"),
+    }),
+  ],
+});
+console.log(result.text);`;
+
+const go = `package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "os"
+
+    mantyx "github.com/mantyx-io/mantyx-go-sdk"
+)
+
+type readFileArgs struct {
+    Path string \`json:"path" jsonschema:"description=Path to read"\`
+}
+
+func main() {
+    client := mantyx.NewClient(mantyx.Options{
+        APIKey:        os.Getenv("MANTYX_API_KEY"),
+        WorkspaceSlug: "acme-corp",
+    })
+
+    tool := mantyx.LocalTool(mantyx.LocalToolSpec{
+        Name:       "read_file",
+        Parameters: &readFileArgs{},
+        Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
+            var args readFileArgs
+            if err := json.Unmarshal(raw, &args); err != nil {
+                return "", err
+            }
+            b, err := os.ReadFile(args.Path)
+            return string(b), err
+        },
+    })
+
+    result, err := client.RunAgent(context.Background(), mantyx.RunSpec{
+        SystemPrompt: "You are a helpful filesystem assistant.",
+        Prompt:       "Read /etc/hostname.",
+        Tools:        []mantyx.ToolRef{tool},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(result.Text)
+}`;
+
+const py = `import os
+from pathlib import Path
+from pydantic import BaseModel
+from mantyx import MantyxClient, define_local_tool
+
+class ReadFileArgs(BaseModel):
+    path: str
+
+client = MantyxClient(
+    api_key=os.environ["MANTYX_API_KEY"],
+    workspace_slug="acme-corp",
+)
+
+result = client.run_agent(
+    system_prompt="You are a helpful filesystem assistant.",
+    prompt="Read /etc/hostname and tell me what it says.",
+    tools=[
+        define_local_tool(
+            name="read_file",
+            parameters=ReadFileArgs,
+            execute=lambda args: Path(args.path).read_text(),
+        ),
+    ],
+)
+print(result.text)`;
+---
+
+<section class="mx-auto max-w-6xl px-6 py-16 sm:py-20">
+  <div class="mb-10 text-center">
+    <h2 class="text-2xl font-bold text-(--sl-color-white) sm:text-3xl">
+      A one-shot run, in any language
+    </h2>
+    <p class="mt-3 text-(--sl-color-gray-2)">
+      Same call shape across all three SDKs &mdash; pick the tab for your stack.
+    </p>
+  </div>
+
+  <Tabs syncKey="lang">
+    <TabItem label="TypeScript" icon="seti:typescript">
+      <Code code={ts} lang="ts" title="oneshot.ts" />
+    </TabItem>
+    <TabItem label="Go" icon="seti:go">
+      <Code code={go} lang="go" title="oneshot.go" />
+    </TabItem>
+    <TabItem label="Python" icon="seti:python">
+      <Code code={py} lang="python" title="oneshot.py" />
+    </TabItem>
+  </Tabs>
+</section>

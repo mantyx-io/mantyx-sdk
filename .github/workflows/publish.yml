@@ -1,14 +1,23 @@
-# Publishes @mantyx/sdk to npm and pushes git tags for the Go module (monorepo path ./go).
+# Publishes @mantyx/sdk to npm, mantyx-sdk to PyPI, and pushes git tags for
+# the Go module (monorepo path ./go).
 #
 # Prerequisites (once per repo):
-#   - GitHub Actions secret NPM_TOKEN: npm automation token with publish scope for @mantyx/sdk
+#   - GitHub Actions secret NPM_TOKEN: npm automation token with publish scope
+#     for @mantyx/sdk
+#   - PyPI Trusted Publisher configured for the `mantyx-sdk` project pointing
+#     at this repo + workflow file (see python/CONTRIBUTING.md). No secret
+#     needed; OIDC is used via id-token: write.
 #
 # Maintainer flow:
-#   1. Bump repo root VERSION, run `cd ts && npm run sync-version`, commit and push to main.
-#   2. Run this workflow from the Actions tab (optionally enable dry_run first).
+#   1. Bump repo root VERSION, run `node scripts/sync-version.mjs`,
+#      run `node scripts/changelog.mjs --write`, commit and push to main.
+#   2. Run this workflow from the Actions tab (optionally enable dry_run
+#      first to verify everything builds).
 #
-# Go consumers resolve versions via tags prefixed with the module directory: go/v0.1.0
+# Go consumers resolve versions via tags prefixed with the module directory:
+# go/v0.1.0
 # npm uses package.json version (must match VERSION).
+# PyPI uses pyproject.toml dynamic version (must match VERSION).
 
 name: Publish
 
@@ -16,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "npm publish --dry-run only; do not push git tags"
+        description: "Build + publish dry-run only; do not push tags or upload to npm/PyPI"
         type: boolean
         default: false
 
@@ -26,13 +35,17 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   publish:
-    name: Publish npm + tag Go module
+    name: Publish npm + PyPI + tag Go module
     runs-on: ubuntu-latest
     # Manual releases should run from the branch that contains the version bump.
     if: github.ref_name == 'main' || github.ref_name == 'master'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mantyx-sdk
 
     steps:
       - name: Checkout
@@ -61,6 +74,32 @@ jobs:
       - name: Verify version sync
         run: node scripts/sync-version.mjs --check
 
+      - name: Install git-cliff
+        uses: orhun/git-cliff-action@v3
+        with:
+          version: latest
+          args: --version
+
+      - name: Verify CHANGELOGs are in sync
+        run: node scripts/changelog.mjs --check
+
+      - name: Verify agent-runs protocol mirrors
+        run: node scripts/sync-agent-runs-doc.mjs --check
+
+      - name: Build release notes
+        env:
+          V: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release
+          node scripts/changelog.mjs --release-body --version="${V}" > .release/notes.md
+          node scripts/changelog.mjs --release-body --version="${V}" --package=ts > .release/notes-ts.md
+          node scripts/changelog.mjs --release-body --version="${V}" --package=go > .release/notes-go.md
+          node scripts/changelog.mjs --release-body --version="${V}" --package=py > .release/notes-py.md
+          echo "::group::Unified release notes"
+          cat .release/notes.md
+          echo "::endgroup::"
+
       - name: Tags must not exist yet
         if: ${{ !inputs.dry_run }}
         env:
@@ -68,16 +107,15 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin --tags --quiet || true
-          if git rev-parse "refs/tags/v${V}" >/dev/null 2>&1; then
-            echo "::error::Git tag v${V} already exists. Bump VERSION or delete the tag."
-            exit 1
-          fi
-          if git rev-parse "refs/tags/go/v${V}" >/dev/null 2>&1; then
-            echo "::error::Git tag go/v${V} already exists."
-            exit 1
-          fi
+          for ref in "v${V}" "go/v${V}" "python/v${V}"; do
+            if git rev-parse "refs/tags/${ref}" >/dev/null 2>&1; then
+              echo "::error::Git tag ${ref} already exists. Bump VERSION or delete the tag."
+              exit 1
+            fi
+          done
 
-      - name: Go tests
+      # ----- Go ---------------------------------------------------------
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
@@ -87,6 +125,7 @@ jobs:
         working-directory: go
         run: go test ./... -race -count=1
 
+      # ----- TypeScript / npm ------------------------------------------
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -117,6 +156,34 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
 
+      # ----- Python / PyPI ---------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Python distribution
+        working-directory: python
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install -e ".[dev]"
+          pytest -q
+          python -m build
+
+      - name: Publish to PyPI (dry run)
+        if: ${{ inputs.dry_run }}
+        working-directory: python
+        run: |
+          python -m pip install twine
+          python -m twine check dist/*
+
+      - name: Publish to PyPI
+        if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
+
+      # ----- Tags + GitHub Releases ------------------------------------
       - name: Push release tags
         if: ${{ !inputs.dry_run }}
         env:
@@ -125,6 +192,18 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${V}" -m "Release v${V}"
-          git tag -a "go/v${V}" -m "Go module release v${V} (./go)"
-          git push origin "refs/tags/v${V}" "refs/tags/go/v${V}"
+          git tag -a "v${V}"        -m "Release v${V} (TypeScript SDK + monorepo)"
+          git tag -a "go/v${V}"     -m "Go module release v${V} (./go)"
+          git tag -a "python/v${V}" -m "Python SDK release v${V} (./python)"
+          git push origin "refs/tags/v${V}" "refs/tags/go/v${V}" "refs/tags/python/v${V}"
+
+      - name: Create GitHub Releases
+        if: ${{ !inputs.dry_run }}
+        env:
+          V: ${{ steps.version.outputs.value }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "v${V}"        --title "v${V}"            --notes-file .release/notes-ts.md
+          gh release create "go/v${V}"     --title "go/v${V}"         --notes-file .release/notes-go.md
+          gh release create "python/v${V}" --title "python/v${V}"     --notes-file .release/notes-py.md

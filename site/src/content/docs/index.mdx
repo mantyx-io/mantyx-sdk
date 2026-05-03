@@ -1,0 +1,21 @@
+---
+title: Drive MANTYX agents from your code.
+description: Official client SDKs for the MANTYX agent runtime. TypeScript, Go, and Python.
+template: splash
+# Satisfies Starlight's `hero` branch so we don't render a duplicate `<PageTitle />` `<h1>`;
+# the visible hero lives in `components/Hero.astro`. Shell suppressed via `EmptyHero` override.
+hero: {}
+pagefind: false
+---
+
+import Hero from "../../components/Hero.astro";
+import InstallCards from "../../components/InstallCards.astro";
+import QuickstartTabs from "../../components/QuickstartTabs.astro";
+import CTA from "../../components/CTA.astro";
+
+export const baseUrl = import.meta.env.BASE_URL;
+
+<Hero baseUrl={baseUrl} />
+<InstallCards baseUrl={baseUrl} />
+<QuickstartTabs />
+<CTA baseUrl={baseUrl} />

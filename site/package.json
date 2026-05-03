@@ -1,0 +1,29 @@
+{
+  "name": "@mantyx/sdk-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Landing page and SDK documentation for the MANTYX SDKs (Astro Starlight). Deployed to GitHub Pages.",
+  "scripts": {
+    "sync-shared": "node scripts/sync-shared.mjs",
+    "predev": "node scripts/sync-shared.mjs",
+    "prebuild": "node scripts/sync-shared.mjs",
+    "prebuild:nocheck": "node scripts/sync-shared.mjs",
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro check && astro build",
+    "build:nocheck": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.9.4",
+    "@astrojs/starlight": "^0.36.3",
+    "@astrojs/starlight-tailwind": "^4.0.2",
+    "@tailwindcss/vite": "^4.2.4",
+    "astro": "^5.18.1",
+    "sharp": "^0.34.5",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^5.6.0"
+  }
+}

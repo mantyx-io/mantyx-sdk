@@ -10,4 +10,4 @@ go run .
 ```
 
 To copy this example out of the monorepo, delete the `replace` directive from
-`go.mod` and run `go get github.com/mantyx/mantyx-go-sdk@latest`.
+`go.mod` and run `go get github.com/mantyx-io/mantyx-go-sdk@latest`.

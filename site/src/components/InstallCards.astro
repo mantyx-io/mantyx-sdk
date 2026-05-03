@@ -1,0 +1,114 @@
+---
+import { Code } from "@astrojs/starlight/components";
+import logoTypeScript from "../assets/logos/typescript.svg?raw";
+import logoGo from "../assets/logos/go.svg?raw";
+import logoPython from "../assets/logos/python.svg?raw";
+
+const cards = [
+  {
+    label: "TypeScript",
+    logo: logoTypeScript,
+    pkg: "@mantyx/sdk",
+    install: "npm install @mantyx/sdk zod",
+    runtime: "Node.js 18.17+",
+    docsHref: "docs/reference/typescript/",
+  },
+  {
+    label: "Go",
+    logo: logoGo,
+    pkg: "github.com/mantyx-io/mantyx-go-sdk",
+    install: "go get github.com/mantyx-io/mantyx-go-sdk",
+    runtime: "Go 1.22+",
+    docsHref: "docs/reference/go/",
+  },
+  {
+    label: "Python",
+    logo: logoPython,
+    pkg: "mantyx-sdk",
+    install: "pip install mantyx-sdk",
+    runtime: "Python 3.9+",
+    docsHref: "docs/reference/python/",
+  },
+];
+
+interface Props {
+  baseUrl: string;
+  /** When true, omit outer section padding — used beside the hero in a two-column layout */
+  embedded?: boolean;
+}
+
+const { baseUrl, embedded = false } = Astro.props;
+
+const sectionClass = embedded
+  ? "w-full"
+  : "mx-auto max-w-6xl px-6 py-16 sm:py-20";
+
+const headingWrapClass = embedded ? "mb-6 text-left" : "mb-10 text-center";
+
+const gridClass = embedded
+  ? "grid grid-cols-1 gap-3"
+  : "grid grid-cols-1 gap-5 md:grid-cols-3";
+
+const cardClass = embedded
+  ? "group relative flex flex-col overflow-hidden rounded-xl border border-(--sl-color-gray-5) bg-(--sl-color-bg-nav) p-4 no-underline transition hover:border-(--sl-color-text-accent) hover:shadow-lg"
+  : "group relative flex flex-col overflow-hidden rounded-2xl border border-(--sl-color-gray-5) bg-(--sl-color-bg-nav) p-6 no-underline transition hover:border-(--sl-color-text-accent) hover:shadow-lg";
+---
+
+<section class={sectionClass} data-install-cards={embedded ? "embedded" : undefined}>
+  <div class:list={[headingWrapClass]}>
+    <h2
+      class:list={[
+        "font-bold text-(--sl-color-white)",
+        embedded ? "m-0 text-xl sm:text-2xl" : "text-2xl sm:text-3xl",
+      ]}
+    >
+      Pick your stack
+    </h2>
+    <p
+      class:list={[
+        "text-(--sl-color-gray-2)",
+        embedded ? "mt-2 text-sm" : "mt-3",
+      ]}
+    >
+      {
+        embedded
+          ? "Same wire protocol — three official SDKs."
+          : "Same wire protocol, three first-party clients."
+      }
+    </p>
+  </div>
+
+  <div class:list={[gridClass]}>
+    {
+      cards.map((c) => (
+        <a href={`${baseUrl}${c.docsHref}`} class={cardClass}>
+          <div class:list={["flex items-center justify-between", embedded ? "mb-3" : "mb-4"]}>
+            <h3 class:list={["m-0 font-semibold text-(--sl-color-white)", embedded ? "text-base" : "text-lg"]}>
+              {c.label}
+            </h3>
+            <span
+              class:list={[
+                "inline-flex shrink-0 items-center justify-center rounded-lg border border-(--sl-color-gray-5) bg-(--sl-color-gray-6) text-(--sl-color-gray-2) opacity-90 group-hover:text-(--sl-color-white) group-hover:opacity-100 dark:bg-(--sl-color-gray-5)",
+                embedded ? "size-7" : "size-8",
+              ]}
+              aria-hidden="true"
+            >
+              <span
+                class:list={["block", embedded ? "size-[1.125rem]" : "size-5"]}
+                set:html={c.logo}
+              />
+            </span>
+          </div>
+          <p class="mb-2 font-mono text-xs text-(--sl-color-gray-3)">{c.pkg}</p>
+          <div class:list={["-mx-1", embedded ? "mb-2" : "mb-4"]}>
+            <Code code={c.install} lang="bash" />
+          </div>
+          <p class="mt-auto text-xs text-(--sl-color-gray-3)">Runtime: {c.runtime}</p>
+          <span class="mt-4 inline-flex items-center gap-1 text-sm font-medium text-(--sl-color-text-accent)">
+            Reference <span aria-hidden="true">&rarr;</span>
+          </span>
+        </a>
+      ))
+    }
+  </div>
+</section>

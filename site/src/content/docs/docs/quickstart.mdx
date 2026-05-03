@@ -1,0 +1,146 @@
+---
+title: Quickstart
+description: Run your first ephemeral agent end-to-end in under a minute.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem, Code, Aside } from "@astrojs/starlight/components";
+
+The same example, in all three SDKs. It defines an ephemeral agent that has access to one local tool (`read_file`) and asks the agent to read a file from your filesystem.
+
+## 1. Install
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript" icon="seti:typescript">
+    <Code code={`npm install @mantyx/sdk zod`} lang="bash" />
+  </TabItem>
+  <TabItem label="Go" icon="seti:go">
+    <Code code={`go get github.com/mantyx-io/mantyx-go-sdk`} lang="bash" />
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+    <Code code={`pip install mantyx-sdk`} lang="bash" />
+  </TabItem>
+</Tabs>
+
+## 2. Set the environment
+
+```bash
+export MANTYX_API_KEY=mtx_live_...
+export MANTYX_WORKSPACE_SLUG=acme-corp
+```
+
+## 3. Run an agent
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript" icon="seti:typescript">
+    <Code code={`import { MantyxClient, defineLocalTool } from "@mantyx/sdk";
+import { z } from "zod";
+import { readFile } from "node:fs/promises";
+
+const client = new MantyxClient({
+  apiKey: process.env.MANTYX_API_KEY!,
+  workspaceSlug: process.env.MANTYX_WORKSPACE_SLUG!,
+});
+
+const result = await client.runAgent({
+  systemPrompt: "You are a helpful filesystem assistant.",
+  prompt: "Read /etc/hostname and tell me what it says.",
+  tools: [
+    defineLocalTool({
+      name: "read_file",
+      description: "Read a UTF-8 file from the local filesystem.",
+      parameters: z.object({ path: z.string() }),
+      execute: ({ path }) => readFile(path, "utf8"),
+    }),
+  ],
+});
+console.log(result.text);`} lang="ts" title="oneshot.ts" />
+  </TabItem>
+  <TabItem label="Go" icon="seti:go">
+    <Code code={`package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "os"
+
+    mantyx "github.com/mantyx-io/mantyx-go-sdk"
+)
+
+type readFileArgs struct {
+    Path string \`json:"path" jsonschema:"description=Path to read"\`
+}
+
+func main() {
+    client := mantyx.NewClient(mantyx.Options{
+        APIKey:        os.Getenv("MANTYX_API_KEY"),
+        WorkspaceSlug: os.Getenv("MANTYX_WORKSPACE_SLUG"),
+    })
+
+    tool := mantyx.LocalTool(mantyx.LocalToolSpec{
+        Name:        "read_file",
+        Description: "Read a UTF-8 file from the local filesystem.",
+        Parameters:  &readFileArgs{},
+        Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
+            var args readFileArgs
+            if err := json.Unmarshal(raw, &args); err != nil {
+                return "", err
+            }
+            b, err := os.ReadFile(args.Path)
+            return string(b), err
+        },
+    })
+
+    result, err := client.RunAgent(context.Background(), mantyx.RunSpec{
+        SystemPrompt: "You are a helpful filesystem assistant.",
+        Prompt:       "Read /etc/hostname and tell me what it says.",
+        Tools:        []mantyx.ToolRef{tool},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println(result.Text)
+}`} lang="go" title="oneshot.go" />
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+    <Code code={`import os
+from pathlib import Path
+from pydantic import BaseModel
+from mantyx import MantyxClient, define_local_tool
+
+class ReadFileArgs(BaseModel):
+    path: str
+
+client = MantyxClient(
+    api_key=os.environ["MANTYX_API_KEY"],
+    workspace_slug=os.environ["MANTYX_WORKSPACE_SLUG"],
+)
+
+result = client.run_agent(
+    system_prompt="You are a helpful filesystem assistant.",
+    prompt="Read /etc/hostname and tell me what it says.",
+    tools=[
+        define_local_tool(
+            name="read_file",
+            description="Read a UTF-8 file from the local filesystem.",
+            parameters=ReadFileArgs,
+            execute=lambda args: Path(args.path).read_text(),
+        ),
+    ],
+)
+print(result.text)`} lang="python" title="oneshot.py" />
+  </TabItem>
+</Tabs>
+
+<Aside type="tip" title="What just happened?">
+The SDK created a one-shot run, opened an SSE stream, ran the local `read_file` handler in your process when the model called it, posted the result back, and resolved with the final assistant text. All in one call.
+</Aside>
+
+## Next steps
+
+- [Streaming](/docs/streaming/) — get tokens as they arrive instead of one final string.
+- [Sessions](/docs/agents/sessions/) — multi-turn conversations with persisted history.
+- [Persisted agents](/docs/agents/persisted/) — point at an existing workspace agent by id.

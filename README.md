@@ -12,21 +12,28 @@ the agent loop.
 ```
 packages/mantyx-sdk/
 ├── README.md         ← you are here
-├── ts/               ← @mantyx/sdk           (npm, TypeScript / Node.js)
-└── go/               ← github.com/mantyx/mantyx-go-sdk (Go module)
+├── ts/               ← @mantyx/sdk                       (npm, TypeScript / Node.js)
+├── go/               ← github.com/mantyx-io/mantyx-go-sdk   (Go module)
+├── python/           ← mantyx-sdk                        (PyPI, Python ≥ 3.9)
+└── site/             ← landing page + docs (Astro Starlight, deployed to GitHub Pages)
 ```
 
-Both implementations target the same wire protocol and feature set; pick the
-one that matches your stack.
+All three implementations target the same wire protocol and feature set; pick
+the one that matches your stack.
 
-| | TypeScript | Go |
-| --- | --- | --- |
-| Source | [`ts/`](./ts) | [`go/`](./go) |
-| Package | `@mantyx/sdk` | `github.com/mantyx/mantyx-go-sdk` |
-| Install | `npm install @mantyx/sdk zod` | `go get github.com/mantyx/mantyx-go-sdk` |
-| Min runtime | Node.js 18.17+ | Go 1.22+ |
-| Local tool params | Zod schema | tagged Go struct (via `invopop/jsonschema`) |
-| Examples | [`ts/examples/`](./ts/examples) | [`go/examples/`](./go/examples) |
+| | TypeScript | Go | Python |
+| --- | --- | --- | --- |
+| Source | [`ts/`](./ts) | [`go/`](./go) | [`python/`](./python) |
+| Package | `@mantyx/sdk` | `github.com/mantyx-io/mantyx-go-sdk` | `mantyx-sdk` |
+| Install | `npm install @mantyx/sdk zod` | `go get github.com/mantyx-io/mantyx-go-sdk` | `pip install mantyx-sdk` |
+| Import | `import { MantyxClient } from "@mantyx/sdk"` | `import mantyx "github.com/mantyx-io/mantyx-go-sdk"` | `import mantyx` |
+| Min runtime | Node.js 18.17+ | Go 1.22+ | Python 3.9+ |
+| Local tool params | Zod schema | tagged Go struct (via `invopop/jsonschema`) | Pydantic v2 model |
+| Async client | native `Promise` | `context.Context` | `AsyncMantyxClient` (httpx) |
+| Examples | [`ts/examples/`](./ts/examples) | [`go/examples/`](./go/examples) | [`python/examples/`](./python/examples) |
+
+The hosted landing page + docs site is built from [`site/`](./site) and lives
+at <https://mantyx-io.github.io/mantyx-sdk/>.
 
 ## What you can do with the SDKs
 
@@ -56,12 +63,11 @@ a workspace slug; the SDKs send it as `Authorization: Bearer <key>`.
 
 ## Wire protocol
 
-Both SDKs talk the same HTTP + SSE protocol. The full specification lives in
-[`docs/agent-runs-protocol.md`](./docs/agent-runs-protocol.md) (a copy is
-also kept under each SDK's `docs/` for the standalone OSS extracts).
+All three SDKs talk the same HTTP + SSE protocol. The specification is maintained once at
+[`docs/agent-runs-protocol.md`](./docs/agent-runs-protocol.md); identical copies are synced into each SDK's `docs/` folder (`scripts/sync-agent-runs-doc.mjs`) so packages and extracts ship with the spec beside the code.
 
 If you want to write a third-party SDK or call the surface directly with
-`curl`, the protocol doc is the source of truth.
+`curl`, use that document as the contract.
 
 ## Quickstart
 
@@ -105,7 +111,7 @@ import (
     "log"
     "os"
 
-    mantyx "github.com/mantyx/mantyx-go-sdk"
+    mantyx "github.com/mantyx-io/mantyx-go-sdk"
 )
 
 type readFileArgs struct {
@@ -145,6 +151,41 @@ func main() {
 
 See [`go/README.md`](./go/README.md) for the full reference.
 
+### Python
+
+```python
+import os
+from pydantic import BaseModel
+from mantyx import MantyxClient, define_local_tool
+
+
+class ReadFileArgs(BaseModel):
+    path: str
+
+
+client = MantyxClient(
+    api_key=os.environ["MANTYX_API_KEY"],
+    workspace_slug="acme-corp",
+)
+
+result = client.run_agent(
+    system_prompt="You are a helpful filesystem assistant.",
+    prompt="Read /etc/hostname and tell me what it says.",
+    tools=[
+        define_local_tool(
+            name="read_file",
+            parameters=ReadFileArgs,
+            execute=lambda args: open(args.path).read(),
+        ),
+    ],
+)
+print(result.text)
+```
+
+The async equivalent uses `AsyncMantyxClient` with `async with` and
+`async for event in client.stream_agent(...)`. See
+[`python/README.md`](./python/README.md) for the full reference.
+
 ## Triggering a persisted MANTYX agent
 
 Pass `agentId` (TS) / `AgentID` (Go) to run an agent that already exists in
@@ -167,26 +208,46 @@ agent (an empty `agentIds` allowlist on the key counts as "all agents").
 
 ## Repository layout
 
-This directory is the unified source for both SDKs in the MANTYX monorepo.
-Each subfolder is **self-contained** and is what gets published to npm /
-shipped as a Go module:
+This directory is the unified source for the MANTYX SDK monorepo. Each SDK
+subfolder is **self-contained** and is what gets published to npm / shipped as
+a Go module / uploaded to PyPI:
 
 - [`ts/`](./ts) — TypeScript SDK (`@mantyx/sdk`) + Vitest tests + 6
   self-contained example projects under `ts/examples/`.
-- [`go/`](./go) — Go SDK (`github.com/mantyx/mantyx-go-sdk`) + `httptest`
+- [`go/`](./go) — Go SDK (`github.com/mantyx-io/mantyx-go-sdk`) + `httptest`
   tests + 6 example modules under `go/examples/`, each with its own
   `go.mod` and a `replace` directive that points back at this folder for
   in-tree builds.
+- [`python/`](./python) — Python SDK (`mantyx-sdk` on PyPI, imported as
+  `import mantyx`) — sync + async clients on `httpx`, Pydantic v2 for local
+  tool parameters, `pytest` suite under `python/tests/`, and 6 example
+  projects under `python/examples/`.
+- [`site/`](./site) — Astro Starlight landing page + documentation site;
+  deployed to GitHub Pages via [`.github/workflows/docs.yml`](./.github/workflows/docs.yml).
+  Run locally with `cd site && npm install && npm run dev`.
 
-Both ship under **Apache-2.0** and follow [Keep a Changelog](https://keepachangelog.com)
-([`ts/CHANGELOG.md`](./ts/CHANGELOG.md), [`go/CHANGELOG.md`](./go/CHANGELOG.md))
+All three SDKs ship under **Apache-2.0** and follow
+[Keep a Changelog](https://keepachangelog.com)
+([`ts/CHANGELOG.md`](./ts/CHANGELOG.md),
+[`go/CHANGELOG.md`](./go/CHANGELOG.md),
+[`python/CHANGELOG.md`](./python/CHANGELOG.md))
 plus per-SDK contributing guides
 ([`ts/CONTRIBUTING.md`](./ts/CONTRIBUTING.md),
-[`go/CONTRIBUTING.md`](./go/CONTRIBUTING.md)) and OSS-extraction notes
-([`ts/EXTRACT.md`](./ts/EXTRACT.md), [`go/EXTRACT.md`](./go/EXTRACT.md)).
+[`go/CONTRIBUTING.md`](./go/CONTRIBUTING.md),
+[`python/CONTRIBUTING.md`](./python/CONTRIBUTING.md))
+and OSS-extraction notes
+([`ts/EXTRACT.md`](./ts/EXTRACT.md),
+[`go/EXTRACT.md`](./go/EXTRACT.md),
+[`python/EXTRACT.md`](./python/EXTRACT.md)).
+The repo-root [`CONTRIBUTING.md`](./CONTRIBUTING.md) documents the
+Conventional Commits format that drives the auto-generated CHANGELOGs and
+release notes (via [`cliff.toml`](./cliff.toml) +
+[`scripts/changelog.mjs`](./scripts/changelog.mjs)).
 
 ## Documentation
 
+- Hosted docs site: <https://mantyx-io.github.io/mantyx-sdk/>
+  (source in [`site/`](./site)).
 - [`docs/agent-runs-protocol.md`](./docs/agent-runs-protocol.md) — wire protocol
   spec (HTTP routes, SSE event schema, error codes, agent spec).
 - Server-side overview lives in the parent repo at
@@ -195,10 +256,12 @@ plus per-SDK contributing guides
 
 ## Contributing
 
-Open the SDK directory you care about for development setup. Both packages
-have their own test suites (`pnpm test` for TypeScript, `go test ./...` for
-Go), and the repo's CI runs them on every PR.
+Open the SDK directory you care about for development setup. Each package
+has its own test suite — `npm test` for TypeScript, `go test ./...` for Go,
+`pytest` for Python — and the repo's CI runs them all on every PR. See the
+top-level [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the Conventional
+Commits convention shared across the monorepo.
 
 ## License
 
-Apache-2.0. See [`ts/LICENSE`](./ts/LICENSE) and [`go/LICENSE`](./go/LICENSE).
+Apache-2.0. See [`LICENSE`](./LICENSE).

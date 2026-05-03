@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="MANTYX">
+  <rect x="0" y="0" width="48" height="48" rx="11" fill="#0a0a0a" stroke="#404040" stroke-width="1"/>
+  <g transform="scale(1.5)">
+    <path fill="#fafafa" d="M9 21V11h2.4l3.1 5.4 3.1-5.4H20v10h-2.2v-5.6L15.3 19h-1.6l-2.5-3.6V21H9Z"/>
+  </g>
+</svg>

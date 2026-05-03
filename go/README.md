@@ -17,7 +17,7 @@ For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md
 ## Install
 
 ```bash
-go get github.com/mantyx/mantyx-go-sdk@latest
+go get github.com/mantyx-io/mantyx-go-sdk@latest
 ```
 
 Requires Go 1.22+. The only third-party dependency is
@@ -37,7 +37,7 @@ import (
     "log"
     "os"
 
-    mantyx "github.com/mantyx/mantyx-go-sdk"
+    mantyx "github.com/mantyx-io/mantyx-go-sdk"
 )
 
 type readFileArgs struct {
@@ -327,4 +327,4 @@ its own public repository.
 
 ## License
 
-[Apache-2.0](./LICENSE)
+[Apache-2.0](../LICENSE)

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mantyx-sdk-example-list-models"
+version = "0.0.0"
+description = "List the workspace model catalog and run on the default."
+requires-python = ">=3.9"
+dependencies = ["mantyx-sdk"]
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.uv.sources]
+mantyx-sdk = { path = "../..", editable = true }
