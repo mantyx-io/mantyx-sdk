@@ -90,12 +90,10 @@ commit_parsers = [
     { body = ".*BREAKING CHANGE.*", group = "Breaking" },
 ]
 
-commit_preprocessors = [
-    # Trim a leading `<scope>: ` redundancy so messages read cleanly when the
-    # scope is also rendered in the bullet.
-    { pattern = '^([a-z]+)\(([^)]+)\): ', replace = "" },
-    { pattern = '^([a-z]+): ',            replace = "" },
-]
+# Do not strip `feat:` / `fix:` prefixes here — `commit_parsers` match on the
+# leading conventional type (`^feat`, `^fix`, …). Stripping them would leave
+# no match and drop commits from the rendered CHANGELOG.
+commit_preprocessors = []
 
 # Linkify GH issue references like `#123` in commit subjects.
 link_parsers = [
