@@ -10,7 +10,8 @@
 #
 # Maintainer flow:
 #   1. Bump repo root VERSION, run `node scripts/sync-version.mjs`,
-#      run `node scripts/changelog.mjs --write`, commit and push to main.
+#      commit and push to main (CHANGELOGs may still show [Unreleased] until
+#      tags exist — this workflow regenerates and pushes them after tagging).
 #   2. Run this workflow from the Actions tab (optionally enable dry_run
 #      first to verify everything builds).
 #
@@ -196,6 +197,23 @@ jobs:
           git tag -a "go/v${V}"     -m "Go module release v${V} (./go)"
           git tag -a "python/v${V}" -m "Python SDK release v${V} (./python)"
           git push origin "refs/tags/v${V}" "refs/tags/go/v${V}" "refs/tags/python/v${V}"
+
+      - name: Regenerate CHANGELOGs and push to default branch
+        if: ${{ !inputs.dry_run }}
+        env:
+          V: ${{ steps.version.outputs.value }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          node scripts/changelog.mjs --write
+          if git diff --quiet HEAD -- ts/CHANGELOG.md go/CHANGELOG.md python/CHANGELOG.md; then
+            echo "No CHANGELOG edits after tagging — skipping commit."
+            exit 0
+          fi
+          git add ts/CHANGELOG.md go/CHANGELOG.md python/CHANGELOG.md
+          git commit -m "chore(repo): sync CHANGELOGs after v${V} release"
+          git pull --rebase origin "${BRANCH}"
+          git push origin "HEAD:${BRANCH}"
 
       - name: Create GitHub Releases
         if: ${{ !inputs.dry_run }}
