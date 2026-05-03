@@ -22,7 +22,7 @@
  * Requires `git-cliff` on PATH. Install via:
  *   brew install git-cliff       (macOS)
  *   cargo install git-cliff      (Rust)
- *   GitHub Actions: orhun/git-cliff-action@v3
+ *   GitHub Actions: taiki-e/install-action with tool=git-cliff
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -106,7 +106,7 @@ function ensureGitCliff() {
         "git-cliff is not installed or not on PATH.",
         "  brew install git-cliff           (macOS)",
         "  cargo install git-cliff          (Rust)",
-        "  Or use orhun/git-cliff-action@v3 in CI.",
+        "  Or CI: taiki-e/install-action@v2 with tool: git-cliff",
         "",
         "See https://git-cliff.org/docs/installation",
       ].join("\n"),

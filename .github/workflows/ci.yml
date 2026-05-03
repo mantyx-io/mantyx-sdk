@@ -146,10 +146,9 @@ jobs:
           node-version: "20"
 
       - name: Install git-cliff
-        uses: orhun/git-cliff-action@v3
+        uses: taiki-e/install-action@v2
         with:
-          version: latest
-          args: --version
+          tool: git-cliff
 
       - name: Check CHANGELOGs are in sync with git history
         run: node scripts/changelog.mjs --check
