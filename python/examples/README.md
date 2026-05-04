@@ -17,7 +17,7 @@ All examples read configuration from environment variables:
 export MANTYX_API_KEY="mtx_live_..."
 export MANTYX_WORKSPACE_SLUG="acme-corp"
 # Optional:
-export MANTYX_BASE_URL="https://api.mantyx.com"     # self-hosted? override here
+export MANTYX_BASE_URL="https://app.mantyx.io"     # self-hosted? override here
 ```
 
 To run any example:

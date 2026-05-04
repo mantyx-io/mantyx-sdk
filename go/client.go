@@ -12,7 +12,7 @@ import (
 )
 
 // DefaultBaseURL points at the public MANTYX API. Override via Options.BaseURL.
-const DefaultBaseURL = "https://api.mantyx.com"
+const DefaultBaseURL = "https://app.mantyx.io"
 
 // Options configures a Client.
 type Options struct {

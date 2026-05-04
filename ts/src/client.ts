@@ -13,12 +13,12 @@ import type { LocalTool, ToolRef } from "./tools.js";
 import { isLocalTool } from "./tools.js";
 import { toToolParametersWire } from "./zod-to-json-schema.js";
 
-export const DEFAULT_BASE_URL = "https://api.mantyx.com";
+export const DEFAULT_BASE_URL = "https://app.mantyx.io";
 
 export interface MantyxClientOptions {
   apiKey: string;
   workspaceSlug: string;
-  /** Defaults to `https://api.mantyx.com`. Override for self-hosted instances. */
+  /** Defaults to `https://app.mantyx.io`. Override for self-hosted instances. */
   baseUrl?: string;
   /** Optional `fetch` override (e.g. node-fetch wrapper, or a custom HTTP client). */
   fetch?: typeof fetch;

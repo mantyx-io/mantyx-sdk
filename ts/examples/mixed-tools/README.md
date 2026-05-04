@@ -15,6 +15,6 @@ export MANTYX_WORKSPACE_SLUG="acme-corp"
 export MANTYX_TOOL_ID="tool_abc"
 export MANTYX_PLUGIN_TOOL_NAME="@some-plugin/some_tool"
 
-pnpm install
-pnpm start
+npm install
+npm start
 ```

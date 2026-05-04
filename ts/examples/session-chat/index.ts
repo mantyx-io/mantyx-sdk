@@ -1,6 +1,6 @@
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { defineLocalTool, MantyxClient } from "@mantyx/sdk";
+import { defineLocalTool, MantyxClient, mantyxPluginTool, mantyxTool } from "@mantyx/sdk";
 import { z } from "zod";
 
 const apiKey = required("MANTYX_API_KEY");
@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   const session = await client.createSession({
     name: "repl",
     systemPrompt: "You are a friendly chat assistant. Keep replies concise.",
-    tools: [randomOddTool],
+    tools: [randomOddTool, mantyxPluginTool("@zendesk/list-tickets")],
     // Tag every run in this session so they can be filtered in the MANTYX
     // dashboard (Agent runs → Sessions, "metadata" filter).
     metadata: {

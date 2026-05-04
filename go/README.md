@@ -249,7 +249,7 @@ session, err := client.ResumeSession(ctx, sessionID, []mantyx.ToolRef{
 type Options struct {
     APIKey        string
     WorkspaceSlug string
-    BaseURL       string        // default: https://api.mantyx.com
+    BaseURL       string        // default: https://app.mantyx.io
     HTTPClient    *http.Client  // default: &http.Client{Timeout: 5 * time.Minute}
 }
 

@@ -36,7 +36,7 @@ import { MantyxClient, defineLocalTool, mantyxTool } from "@mantyx/sdk";
 const client = new MantyxClient({
   apiKey: process.env.MANTYX_API_KEY!,
   workspaceSlug: process.env.MANTYX_WORKSPACE_SLUG!,
-  // baseUrl: "https://api.mantyx.com", // override for self-hosted
+  // baseUrl: "https://app.mantyx.io", // override for self-hosted
 });
 
 const result = await client.runAgent({
@@ -228,7 +228,7 @@ const session = await client.resumeSession(sessionId, {
 interface MantyxClientOptions {
   apiKey: string;
   workspaceSlug: string;
-  baseUrl?: string;       // default: https://api.mantyx.com
+  baseUrl?: string;       // default: https://app.mantyx.io
   fetch?: typeof fetch;
   timeoutMs?: number;     // default: 60_000
 }

@@ -8,6 +8,6 @@ event so you can see the timeline.
 export MANTYX_API_KEY="mk_..."
 export MANTYX_WORKSPACE_SLUG="acme-corp"
 
-pnpm install
-pnpm start
+npm install
+npm start
 ```

@@ -7,7 +7,7 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "@mantyx/sdk": "workspace:*"
+    "@mantyx/sdk": "file:../.."
   },
   "devDependencies": {
     "tsx": "^4.19.0",

@@ -11,10 +11,10 @@ export MANTYX_WORKSPACE_SLUG="acme-corp"
 export MANTYX_AGENT_ID="agent_cm6abc123"
 
 # Optional, for self-hosted MANTYX:
-# export MANTYX_BASE_URL="https://api.mantyx.com"
+# export MANTYX_BASE_URL="https://app.mantyx.io"
 
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
 ## What it shows

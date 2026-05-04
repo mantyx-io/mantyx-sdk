@@ -39,7 +39,7 @@ from .tools import (
     serialize_tool_refs,
 )
 
-DEFAULT_BASE_URL = "https://api.mantyx.com"
+DEFAULT_BASE_URL = "https://app.mantyx.io"
 DEFAULT_TIMEOUT_S = 60.0
 
 

@@ -37,7 +37,7 @@ def main() -> None:
     client = MantyxClient(
         api_key=required_env("MANTYX_API_KEY"),
         workspace_slug=required_env("MANTYX_WORKSPACE_SLUG"),
-        base_url=os.environ.get("MANTYX_BASE_URL", "https://api.mantyx.com"),
+        base_url=os.environ.get("MANTYX_BASE_URL", "https://app.mantyx.io"),
     )
 
     tool = define_local_tool(

@@ -20,22 +20,23 @@ All examples read configuration from environment variables:
 export MANTYX_API_KEY="mk_..."
 export MANTYX_WORKSPACE_SLUG="acme-corp"
 # Optional:
-export MANTYX_BASE_URL="https://api.mantyx.com"     # self-hosted? override here
+export MANTYX_BASE_URL="https://app.mantyx.io"     # self-hosted? override here
 ```
 
-To run from inside this repo:
+Each example depends on the SDK via a local path (`"@mantyx/sdk": "file:../.."`),
+so you can run them straight from the monorepo without publishing or linking:
 
 ```bash
-cd packages/mantyx-sdk/ts/examples/oneshot-local-tool
-pnpm install
-pnpm start
+cd ts/examples/oneshot-local-tool
+npm install
+npm start
 ```
 
 To run after copying an example out of this repo:
 
 ```bash
 cd ./oneshot-local-tool
-# Edit package.json: replace "@mantyx/sdk": "workspace:*" with the published version.
+# Edit package.json: replace "@mantyx/sdk": "file:../.." with the published version.
 npm install
 npm start
 ```

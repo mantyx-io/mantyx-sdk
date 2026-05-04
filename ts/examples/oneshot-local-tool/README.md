@@ -8,9 +8,10 @@ on the server with the tool's output.
 export MANTYX_API_KEY="mk_..."
 export MANTYX_WORKSPACE_SLUG="acme-corp"
 
-pnpm install
-pnpm start
+npm install
+npm start
 ```
 
-Once published, replace `"@mantyx/sdk": "workspace:*"` in `package.json` with
-the latest release version (e.g. `"^0.1.0"`) and run `npm install && npm start`.
+The example depends on the SDK via a local path (`"@mantyx/sdk": "file:../.."`).
+If you copy this directory out of the monorepo, replace that with the published
+version (e.g. `"^0.1.0"`) before running `npm install`.

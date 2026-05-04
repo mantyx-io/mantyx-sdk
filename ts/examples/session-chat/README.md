@@ -7,8 +7,8 @@ type is sent as a user turn; the assistant's reply is streamed back.
 export MANTYX_API_KEY="mk_..."
 export MANTYX_WORKSPACE_SLUG="acme-corp"
 
-pnpm install
-pnpm start
+npm install
+npm start
 > hello
 > what was the last thing I asked?
 ```

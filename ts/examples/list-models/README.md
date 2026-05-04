@@ -7,6 +7,6 @@ first one.
 export MANTYX_API_KEY="mk_..."
 export MANTYX_WORKSPACE_SLUG="acme-corp"
 
-pnpm install
-pnpm start
+npm install
+npm start
 ```

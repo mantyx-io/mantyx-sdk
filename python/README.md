@@ -38,7 +38,7 @@ class ReadFileArgs(BaseModel):
 client = MantyxClient(
     api_key=os.environ["MANTYX_API_KEY"],
     workspace_slug=os.environ["MANTYX_WORKSPACE_SLUG"],
-    # base_url="https://api.mantyx.com",  # override for self-hosted
+    # base_url="https://app.mantyx.io",  # override for self-hosted
 )
 
 result = client.run_agent(
@@ -252,7 +252,7 @@ class MantyxClient:
         *,
         api_key: str,
         workspace_slug: str,
-        base_url: str = "https://api.mantyx.com",
+        base_url: str = "https://app.mantyx.io",
         timeout: float = 60.0,
         http_client: httpx.Client | None = None,
     ): ...
