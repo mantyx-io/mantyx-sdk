@@ -115,6 +115,12 @@ type RunSpec struct {
 	Tools        []ToolRef
 	Prompt       string
 	Messages     []Message
+	// ReasoningLevel controls provider thinking strength on reasoning models.
+	// Build one with ReasoningOff/Low/Medium/High or ReasoningEffort(n) where
+	// n ∈ [0, 100]. Nil leaves the field unset (the server then falls back to
+	// the agent's default — off for ephemeral specs, the persisted value for
+	// AgentID-backed specs). See docs/agent-runs-protocol.md §4.4.
+	ReasoningLevel *ReasoningLevel
 	// Metadata is a flat string→string KV carried alongside the run for
 	// observability. Visible (and filterable) in the MANTYX dashboard. Keys
 	// must match `[A-Za-z0-9._-]{1,64}`, values are strings ≤ 256 chars, and
@@ -135,9 +141,47 @@ type SessionSpec struct {
 	SystemPrompt string
 	ModelID      string
 	Tools        []ToolRef
+	// ReasoningLevel sets the session-wide default applied to every run
+	// created through Session.Send. See RunSpec.ReasoningLevel.
+	ReasoningLevel *ReasoningLevel
 	// Metadata is inherited by every run created through `Session.Send`. See
 	// RunSpec.Metadata for the validation rules.
 	Metadata map[string]string
+}
+
+// ReasoningLevel is provider thinking strength. Build one with the helpers
+// below — its zero value is unusable; pass nil to leave the field unset.
+type ReasoningLevel struct {
+	raw any // string ("off"|"low"|"medium"|"high") or int (0..100)
+}
+
+// ReasoningOff disables provider thinking explicitly.
+func ReasoningOff() *ReasoningLevel { return &ReasoningLevel{raw: "off"} }
+
+// ReasoningLow snaps to the same anchor as the web composer's "Fast" preset.
+func ReasoningLow() *ReasoningLevel { return &ReasoningLevel{raw: "low"} }
+
+// ReasoningMedium snaps to the "Moderate" preset.
+func ReasoningMedium() *ReasoningLevel { return &ReasoningLevel{raw: "medium"} }
+
+// ReasoningHigh snaps to the "Smart" preset.
+func ReasoningHigh() *ReasoningLevel { return &ReasoningLevel{raw: "high"} }
+
+// ReasoningEffort accepts an explicit integer in [0, 100]. 0 explicitly
+// disables provider thinking on reasoning models. Out-of-range values panic.
+func ReasoningEffort(n int) *ReasoningLevel {
+	if n < 0 || n > 100 {
+		panic(fmt.Sprintf("mantyx.ReasoningEffort: %d is out of range [0, 100]", n))
+	}
+	return &ReasoningLevel{raw: n}
+}
+
+// MarshalJSON serialises the level to either a JSON string or a JSON number.
+func (r *ReasoningLevel) MarshalJSON() ([]byte, error) {
+	if r == nil || r.raw == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(r.raw)
 }
 
 // RunResult is the outcome of a successful run.
@@ -174,6 +218,10 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 	if spec.AgentID == "" && spec.SystemPrompt == "" {
 		return RunResult{}, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
 	}
+	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
+		return RunResult{}, err
+	}
+	defer closeMcpRefs(spec.Tools)
 	body := serializeRunSpec(spec)
 	created, err := c.createRun(ctx, "/agent-runs", body)
 	if err != nil {
@@ -189,14 +237,19 @@ func (c *Client) StreamAgent(ctx context.Context, spec RunSpec) (<-chan RunEvent
 	if spec.AgentID == "" && spec.SystemPrompt == "" {
 		return nil, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
 	}
+	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
+		return nil, err
+	}
 	body := serializeRunSpec(spec)
 	created, err := c.createRun(ctx, "/agent-runs", body)
 	if err != nil {
+		closeMcpRefs(spec.Tools)
 		return nil, err
 	}
 	ch := make(chan RunEvent, 32)
 	go func() {
 		defer close(ch)
+		defer closeMcpRefs(spec.Tools)
 		_, _ = c.consumeStream(ctx, created.RunID, collectLocalHandlers(spec.Tools), func(ev RunEvent) {
 			select {
 			case ch <- ev:
@@ -214,6 +267,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	if spec.AgentID == "" && spec.SystemPrompt == "" {
 		return nil, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
 	}
+	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
+		return nil, err
+	}
 	body := map[string]any{
 		"tools": toolWire(spec.Tools),
 	}
@@ -229,6 +285,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	if spec.ModelID != "" {
 		body["modelId"] = spec.ModelID
 	}
+	if spec.ReasoningLevel != nil {
+		body["reasoningLevel"] = spec.ReasoningLevel
+	}
 	if len(spec.Metadata) > 0 {
 		body["metadata"] = spec.Metadata
 	}
@@ -237,12 +296,14 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 		Name      string `json:"name"`
 	}
 	if err := c.do(ctx, "POST", "/agent-sessions", body, &resp); err != nil {
+		closeMcpRefs(spec.Tools)
 		return nil, err
 	}
 	return &Session{
 		ID:       resp.SessionID,
 		client:   c,
 		handlers: collectLocalHandlers(spec.Tools),
+		tools:    spec.Tools,
 	}, nil
 }
 
@@ -253,11 +314,15 @@ func (c *Client) ResumeSession(ctx context.Context, id string, tools []ToolRef) 
 	if _, err := c.GetSessionInfo(ctx, id); err != nil {
 		return nil, err
 	}
+	if err := resolveLocalRefs(ctx, tools, c.httpClient); err != nil {
+		return nil, err
+	}
 	return &Session{
 		ID:        id,
 		client:    c,
 		handlers:  collectLocalHandlers(tools),
 		toolsWire: toolWire(tools),
+		tools:     tools,
 	}, nil
 }
 
@@ -294,9 +359,20 @@ func (c *Client) driveRun(
 	onDelta func(string),
 	onEvent func(RunEvent),
 ) (RunResult, error) {
+	return c.driveRunWithRegistry(ctx, runID, collectLocalHandlers(tools), onDelta, onEvent)
+}
+
+// driveRunWithRegistry is the lower-level entry point — used by Session
+// where the registry is already pre-built.
+func (c *Client) driveRunWithRegistry(
+	ctx context.Context,
+	runID string,
+	handlers *localToolRegistry,
+	onDelta func(string),
+	onEvent func(RunEvent),
+) (RunResult, error) {
 	collected := make([]RunEvent, 0, 32)
 	finalText := ""
-	handlers := collectLocalHandlers(tools)
 	terminalErr, err := c.consumeStream(ctx, runID, handlers, func(ev RunEvent) {
 		collected = append(collected, ev)
 		if onEvent != nil {
@@ -328,7 +404,7 @@ func (c *Client) driveRun(
 func (c *Client) consumeStream(
 	ctx context.Context,
 	runID string,
-	handlers localToolRegistry,
+	handlers *localToolRegistry,
 	onEvent func(RunEvent),
 ) (terminalErr error, fatal error) {
 	lastSeq := 0
@@ -428,24 +504,77 @@ func (c *Client) consumeStream(
 	}
 }
 
-func (c *Client) dispatchLocalTool(ctx context.Context, runID string, ev RunEvent, handlers localToolRegistry) {
+func (c *Client) dispatchLocalTool(ctx context.Context, runID string, ev RunEvent, handlers *localToolRegistry) {
 	name, _ := ev.Data["name"].(string)
 	toolUseID, _ := ev.Data["toolUseId"].(string)
 	if toolUseID == "" {
 		return
 	}
-	tool, ok := handlers[name]
-	if !ok {
-		_ = c.PostToolResult(ctx, runID, toolUseID, "", fmt.Sprintf("No local handler registered for tool %q", name))
-		return
+	kind, _ := ev.Data["kind"].(string)
+	if kind == "" {
+		kind = "local"
 	}
-	rawArgs, _ := json.Marshal(ev.Data["args"])
-	out, err := tool.spec.Execute(ctx, rawArgs)
-	if err != nil {
-		_ = c.PostToolResult(ctx, runID, toolUseID, "", err.Error())
-		return
+	switch kind {
+	case "a2a_local":
+		tool, ok := handlers.a2aTools[name]
+		if !ok {
+			_ = c.PostToolResult(ctx, runID, toolUseID, "", fmt.Sprintf("No local A2A handler registered for tool %q", name))
+			return
+		}
+		message := ""
+		if args, ok := ev.Data["args"].(map[string]any); ok {
+			if m, ok := args["message"].(string); ok {
+				message = m
+			}
+		}
+		out, err := callA2A(ctx, tool, message, c.httpClient)
+		if err != nil {
+			_ = c.PostToolResult(ctx, runID, toolUseID, "", err.Error())
+			return
+		}
+		_ = c.PostToolResult(ctx, runID, toolUseID, out, "")
+	case "mcp_local":
+		serverName, _ := ev.Data["mcpServer"].(string)
+		mcpToolName, _ := ev.Data["mcpToolName"].(string)
+		server, ok := handlers.mcpServers[serverName]
+		if !ok {
+			_ = c.PostToolResult(ctx, runID, toolUseID, "", fmt.Sprintf("No local MCP server registered for %q", serverName))
+			return
+		}
+		server.mu.Lock()
+		r := server.resolved
+		server.mu.Unlock()
+		if r == nil || r.callTool == nil {
+			_ = c.PostToolResult(ctx, runID, toolUseID, "", fmt.Sprintf("Local MCP server %q has not been resolved", serverName))
+			return
+		}
+		upstream, ok := r.upstreamNames[mcpToolName]
+		if !ok {
+			// Fall back to stripping the server prefix in case the wire echoes
+			// a tool we didn't ship in our `tools/list` snapshot.
+			upstream = strings.TrimPrefix(mcpToolName, server.spec.Name+"_")
+		}
+		rawArgs, _ := json.Marshal(ev.Data["args"])
+		out, err := r.callTool(ctx, upstream, rawArgs)
+		if err != nil {
+			_ = c.PostToolResult(ctx, runID, toolUseID, "", err.Error())
+			return
+		}
+		_ = c.PostToolResult(ctx, runID, toolUseID, out, "")
+	default:
+		tool, ok := handlers.localTools[name]
+		if !ok {
+			_ = c.PostToolResult(ctx, runID, toolUseID, "", fmt.Sprintf("No local handler registered for tool %q", name))
+			return
+		}
+		rawArgs, _ := json.Marshal(ev.Data["args"])
+		out, err := tool.spec.Execute(ctx, rawArgs)
+		if err != nil {
+			_ = c.PostToolResult(ctx, runID, toolUseID, "", err.Error())
+			return
+		}
+		_ = c.PostToolResult(ctx, runID, toolUseID, out, "")
 	}
-	_ = c.PostToolResult(ctx, runID, toolUseID, out, "")
 }
 
 // PostToolResult sends the SDK's response for a `local_tool_call` event back to
@@ -562,6 +691,9 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 	}
 	if spec.ModelID != "" {
 		body["modelId"] = spec.ModelID
+	}
+	if spec.ReasoningLevel != nil {
+		body["reasoningLevel"] = spec.ReasoningLevel
 	}
 	if spec.Prompt != "" {
 		body["prompt"] = spec.Prompt

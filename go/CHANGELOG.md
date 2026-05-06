@@ -3,7 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [go/v0.2.0] — 2026-05-04
+## [Unreleased]
+
+### Added
+
+- Add support for a2a, mcp and local versions
 
 ### Fixed
 
@@ -21,6 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [go/v0.1.0] — 2026-05-02
 
-[go/v0.2.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.1.1..go/v0.2.0
+[unreleased]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.1.1..HEAD
 [go/v0.1.1]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.1.0..go/v0.1.1
 [go/v0.1.0]: https://github.com/mantyx-io/mantyx-sdk/releases/tag/go/v0.1.0

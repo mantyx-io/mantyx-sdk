@@ -71,18 +71,27 @@ export default defineConfig({
             { label: "Local tools", link: "/docs/tools/local/" },
             { label: "MANTYX tools", link: "/docs/tools/mantyx/" },
             { label: "Plugin tools", link: "/docs/tools/plugin/" },
+            { label: "Agent2Agent (A2A)", link: "/docs/tools/a2a/" },
+            { label: "MCP connectors", link: "/docs/tools/mcp/" },
           ],
         },
         {
           label: "Concepts",
           items: [
             { label: "Models", link: "/docs/models/" },
+            { label: "Reasoning level", link: "/docs/reasoning/" },
             { label: "Streaming", link: "/docs/streaming/" },
             { label: "Errors", link: "/docs/errors/" },
             { label: "Metadata", link: "/docs/metadata/" },
           ],
         },
-        { label: "Wire protocol", link: "/docs/protocol/" },
+        {
+          label: "Protocol",
+          items: [
+            { label: "Agent-runs protocol", link: "/docs/protocol/" },
+            { label: "Wire protocol — messaging", link: "/docs/wire-protocol/" },
+          ],
+        },
         {
           label: "Reference",
           items: [

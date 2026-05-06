@@ -6,9 +6,12 @@ locally-executed tools, run them remotely, and stream events back into your
 program.
 
 - LLM loop runs on MANTYX (BYOK or platform-hosted models).
-- Server-side tools (`mantyx`, `mantyx_plugin`) execute inside MANTYX.
-- Local tools execute in *your* process; the SDK shuttles arguments and
-  results over an SSE stream + a tool-result POST.
+- Server-resolved tools (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) execute
+  inside MANTYX — including remote Agent2Agent peers and remote MCP servers.
+- Client-resolved tools (`local`, `a2a_local`, `mcp_local`) execute in *your*
+  process; the SDK shuttles arguments and results over an SSE stream + a
+  tool-result POST.
+- Tunable provider thinking via `ReasoningLevel` (string anchors or 0–100).
 - One-shot runs and multi-turn sessions, both with persisted observability.
 - Authenticated with a single workspace API key.
 
@@ -20,10 +23,14 @@ For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md
 go get github.com/mantyx-io/mantyx-go-sdk@latest
 ```
 
-Requires Go 1.22+. The only third-party dependency is
-[`github.com/invopop/jsonschema`](https://github.com/invopop/jsonschema)
-(MIT) for converting Go structs into JSON Schema documents for local tool
-parameters.
+Requires Go 1.24+. Third-party runtime dependencies:
+
+- [`github.com/invopop/jsonschema`](https://github.com/invopop/jsonschema)
+  (MIT) — converts Go structs into JSON Schema for local tool parameters.
+- [`github.com/modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)
+  (Apache-2.0) — drives the Streamable HTTP and stdio transports for
+  `LocalMcp`. The SDK is the implementation under `mantyx.LocalMcp`; you
+  don't need to import it yourself.
 
 ## Quickstart
 
@@ -123,6 +130,173 @@ Notes:
 - The API key must be authorized for the agent (an empty `agentIds` allow-
   list on the key counts as "all agents in the workspace"). Otherwise the
   call returns `403`.
+
+## Agent2Agent delegation
+
+Hand a turn off to another agent — either a remote peer MANTYX dials
+directly (`MantyxA2A`) or a peer that only the SDK can reach (`LocalA2A`).
+The model addresses both with the same `{"message": string}` argument shape
+described in `docs/agent-runs-protocol.md` §4.2, so the same prompt works
+unchanged whichever flavour is configured.
+
+`LocalA2A` is **URL-only**: you supply the Agent Card URL (and optional
+auth headers), and the SDK does the rest. On the first run / session the
+SDK fetches the card with `net/http`, ships it inline with the agent
+spec (so MANTYX never reaches your intranet directly), and on every
+`local_tool_call` event with `kind: "a2a_local"` it speaks A2A's
+JSON-RPC `message/send` against `agentCard.url`, returning the reply
+text as the tool result. The fetched card is cached for the duration of
+the run / session.
+
+```go
+result, err := client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt: "You are a helpful router. Delegate billing to billing_agent.",
+    Prompt:       "Why was I charged twice last month?",
+    Tools: []mantyx.ToolRef{
+        // Public peer MANTYX dials over A2A `message/send`.
+        mantyx.MantyxA2A(mantyx.MantyxA2AOptions{
+            Name:         "billing_agent",
+            Description:  "Delegate billing questions to the Acme billing agent.",
+            AgentCardURL: "https://billing.acme.com/.well-known/agent-card.json",
+            Headers:      map[string]string{"Authorization": "Bearer " + os.Getenv("BILLING_TOKEN")},
+        }),
+        // Intranet peer the SDK can reach but MANTYX cannot.
+        mantyx.LocalA2A(mantyx.LocalA2ASpec{
+            Name:         "intranet_hr",
+            AgentCardURL: "https://hr.intranet.acme/.well-known/agent-card.json",
+            Headers:      map[string]string{"Authorization": "Bearer " + os.Getenv("HR_TOKEN")},
+        }),
+    },
+})
+```
+
+> **Headers and secrets.** The `Headers` you pass are forwarded as-is —
+> on the Agent Card GET (LocalA2A only) and on every `message/send` POST
+> (both flavours). For long-lived credentials, register the peer as a
+> workspace `ExternalAgent` instead; those headers support
+> `{{secret:NAME}}` placeholders. Use the per-run header bag for
+> short-lived, per-run tokens minted by your application.
+
+### Exposing an agent over A2A
+
+The inverse direction also works: wrap a MANTYX agent (ephemeral spec or a
+persisted `AgentID`) and serve it as an Agent2Agent peer using the
+[official A2A Go SDK](https://pkg.go.dev/github.com/a2aproject/a2a-go/v2)
+mounted on `net/http`.
+
+```go
+import (
+    mantyx "github.com/mantyx-io/mantyx-go-sdk"
+    "github.com/mantyx-io/mantyx-go-sdk/a2asrv"
+)
+
+client := mantyx.NewClient(mantyx.Options{APIKey: "...", WorkspaceSlug: "acme"})
+
+card := a2asrv.NewSimpleAgentCard(
+    "Acme Support", "Customer support questions.", "1.0.0", "http://localhost:4000",
+)
+
+handle, err := a2asrv.Serve(ctx, a2asrv.ServeOptions{
+    Client:    client,
+    Agent:     a2asrv.AgentSpec{AgentID: "agent_cm6abc123"},
+    AgentCard: card,
+    Addr:      ":4000",
+})
+if err != nil { log.Fatal(err) }
+defer handle.Close(context.Background())
+
+log.Printf("A2A peer up on %s", handle.URL)
+<-ctx.Done()
+```
+
+`github.com/a2aproject/a2a-go/v2` is pulled in as a regular dependency of
+the `a2asrv` sub-package; consumers that don't import `a2asrv` don't pay
+its cost in their final binary.
+
+Each unique A2A `ContextID` opens a long-lived MANTYX session by default,
+so multi-turn `SendMessage` calls share conversational history. Pass
+`Conversation: a2asrv.ConversationStateless` to reduce every A2A request
+to a one-shot `RunAgent` call. For lower-level integration (mounting the
+executor in your own `net/http` mux), `a2asrv` also exports `NewExecutor`
+which returns a value implementing the official `a2asrv.AgentExecutor`
+interface.
+
+## MCP connectors
+
+Expose every tool published by an MCP server to the agent loop in one go,
+without listing them individually.
+
+`LocalMcp` is **URL-only** for HTTP and **command-only** for stdio. The
+SDK uses the official
+[`github.com/modelcontextprotocol/go-sdk/mcp`](https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp)
+package internally to open the transport, run `Initialize` + `tools/list`
+on the first `RunAgent` / `Session.Send`, ship the resolved catalog
+inline (with `<server>_<tool>` names) so MANTYX can render the tools to
+the model, forward every `local_tool_call` event with `kind: "mcp_local"`
+to the live MCP session via `tools/call`, and close the transport when
+the run / session ends.
+
+```go
+result, err := client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt: "You are a developer assistant with GitHub + filesystem access.",
+    Prompt:       "Summarise the latest 5 issues on octocat/hello-world.",
+    Tools: []mantyx.ToolRef{
+        // Remote MCP server (Streamable HTTP) — MANTYX lists the catalog at
+        // run start and proxies every call. Tools surface as `github_<tool>`.
+        mantyx.MantyxMcp(mantyx.MantyxMcpOptions{
+            Name:       "github",
+            URL:        "https://mcp.github.com/v1",
+            Headers:    map[string]string{"Authorization": "Bearer " + os.Getenv("GH_PAT")},
+            ToolFilter: []string{"search_issues", "get_repo"},
+        }),
+        // Local Streamable HTTP MCP server — SDK manages discovery and tool calls.
+        mantyx.LocalMcp(mantyx.LocalMcpSpec{
+            Name:    "fs",
+            URL:     "http://localhost:8080/mcp",
+            Headers: map[string]string{"Authorization": "Bearer " + os.Getenv("FS_TOKEN")},
+        }),
+        // Or speak stdio to a local subprocess instead:
+        // mantyx.LocalMcp(mantyx.LocalMcpSpec{
+        //     Name:    "fs",
+        //     Command: "mcp-server-filesystem",
+        //     Args:    []string{"."},
+        // }),
+    },
+})
+```
+
+If a remote (`kind: "mcp"`) MCP server is unreachable when the run starts,
+MANTYX still exposes a single `<server>_unavailable` stub so the model can
+tell the user why the connector is missing. Local MCP servers are
+SDK-resolved end-to-end, so the SDK handles its own connection failures the
+same way it would handle any other tool error — `RunAgent` returns it.
+
+## Reasoning effort (`ReasoningLevel`)
+
+Crank up provider thinking on reasoning models without writing
+provider-specific code:
+
+```go
+_, err := client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt:   "...",
+    Prompt:         "Plan a multi-week migration.",
+    ReasoningLevel: mantyx.ReasoningHigh(), // or mantyx.ReasoningEffort(80)
+})
+```
+
+| Builder                  | Wire value | Notes |
+| ------------------------ | ---------- | ----- |
+| `mantyx.ReasoningOff()`     | `"off"`    | Disables provider thinking. |
+| `mantyx.ReasoningLow()`     | `"low"`    | Web composer's "Fast" preset. |
+| `mantyx.ReasoningMedium()`  | `"medium"` | Web composer's "Moderate" preset. |
+| `mantyx.ReasoningHigh()`    | `"high"`   | Web composer's "Smart" preset. |
+| `mantyx.ReasoningEffort(n)` | `n`        | Integer in `[0, 100]`. `0` disables thinking explicitly. |
+
+The server maps this onto each LLM's native dial — `reasoning.effort` for
+OpenAI, `thinkingConfig` for Gemini, extended-thinking budget for
+Anthropic. Non-reasoning models silently ignore it. On sessions, pass
+`mantyx.WithReasoningLevel(...)` to `Session.Send` to override the
+session-wide value for one turn.
 
 ## Picking a model
 
@@ -273,11 +447,15 @@ func NewClient(opts Options) *Client
 
 ### Tools
 
-| Helper                                              | Use case                                                         |
-| --------------------------------------------------- | ---------------------------------------------------------------- |
-| `LocalTool(LocalToolSpec)`                          | Define a local tool with Go-struct parameters and a handler.     |
-| `MantyxTool(id)`                                    | Reference an existing MANTYX tool by id.                         |
-| `MantyxPluginTool(name)`                            | Reference an installed platform plugin tool by name.             |
+| Helper                                              | Use case                                                                    |
+| --------------------------------------------------- | --------------------------------------------------------------------------- |
+| `LocalTool(LocalToolSpec)`                          | Define a local tool with Go-struct parameters and a handler.                |
+| `LocalA2A(LocalA2ASpec)`                            | A2A peer addressed by `AgentCardURL`; SDK fetches the card and dials it.    |
+| `LocalMcp(LocalMcpSpec)`                            | MCP server addressed by URL or stdio command; SDK manages it.               |
+| `MantyxTool(id)`                                    | Reference an existing MANTYX tool by id.                                    |
+| `MantyxPluginTool(name)`                            | Reference an installed platform plugin tool by name.                        |
+| `MantyxA2A(MantyxA2AOptions)`                       | Remote Agent2Agent peer reachable from MANTYX (server-resolved).            |
+| `MantyxMcp(MantyxMcpOptions)`                       | Remote MCP server (Streamable HTTP) MANTYX dials and proxies for you.       |
 
 ### Errors
 
@@ -299,6 +477,8 @@ Self-contained example projects live under [`examples/`](./examples/):
 - `examples/mixed-tools` — combines local, MANTYX, and plugin tools.
 - `examples/streaming` — token streaming to stdout.
 - `examples/list-models` — model catalog + pick-and-run.
+- `examples/a2a-tools` — remote (`MantyxA2A`) + local (`LocalA2A`) Agent2Agent peers.
+- `examples/mcp-tools` — remote (`MantyxMcp`) + local (`LocalMcp`) MCP servers.
 
 Each example has its own `go.mod`, with a `replace` directive pointing at
 `../..` so it resolves the local SDK source. When you copy an example out of
@@ -319,7 +499,9 @@ go build ./...
 ```
 
 The SDK has no MANTYX-internal Go modules in `go.mod`; only the standard
-library and `github.com/invopop/jsonschema`.
+library, `github.com/invopop/jsonschema` (JSON Schema reflection for local
+tool parameters), and `github.com/modelcontextprotocol/go-sdk` (drives the
+Streamable HTTP and stdio transports for `LocalMcp`).
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the contribution flow and
 [`EXTRACT.md`](./EXTRACT.md) for the small steps to lift this folder into

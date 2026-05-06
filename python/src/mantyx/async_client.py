@@ -7,16 +7,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import (
     Any,
-    Callable,
-    Optional,
     cast,
 )
 
 import httpx
 
+from ._local_resolver import (
+    async_call_a2a,
+    async_close_mcp_refs,
+    async_resolve_local_refs,
+)
 from ._schema import parse_args_with_pydantic
 from ._version import SDK_VERSION
 from .client import (
@@ -26,6 +29,7 @@ from .client import (
     RunEvent,
     RunResult,
     SessionInfo,
+    _describe_handler,
     _parse_model_catalog,
     _parse_session_info,
     _quote,
@@ -41,11 +45,12 @@ from .errors import (
 )
 from .sse import aiter_sse
 from .tools import (
-    LocalTool,
-    ToolName,
+    ReasoningLevel,
     ToolRef,
+    _LocalHandlers,
     collect_local_handlers,
     maybe_await,
+    normalize_reasoning_level,
     serialize_tool_refs,
 )
 
@@ -115,35 +120,42 @@ class AsyncMantyxClient:
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], Any] | None = None,
         on_event: Callable[[RunEvent], Any] | None = None,
     ) -> RunResult:
-        body = _serialize_agent_spec(
-            agent_id=agent_id,
-            system_prompt=system_prompt,
-            model_id=model_id,
-            name=name,
-            tools=list(tools) if tools else None,
-            budgets=budgets,
-            metadata=metadata,
-        )
-        if prompt is not None:
-            body["prompt"] = prompt
-        if messages is not None:
-            body["messages"] = list(messages)
-        created = await self._request("POST", "/agent-runs", body)
-        run_id = str((created or {}).get("runId") or "")
-        if not run_id:
-            raise MantyxError("server did not return a runId")
-        handlers = collect_local_handlers(list(tools) if tools else None)
-        return await self._drive_run(
-            run_id=run_id,
-            handlers=handlers,
-            on_assistant_delta=on_assistant_delta,
-            on_event=on_event,
-        )
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        await async_resolve_local_refs(tools_list, http=self._http)
+        try:
+            body = _serialize_agent_spec(
+                agent_id=agent_id,
+                system_prompt=system_prompt,
+                model_id=model_id,
+                name=name,
+                tools=tools_list,
+                reasoning_level=reasoning_level,
+                budgets=budgets,
+                metadata=metadata,
+            )
+            if prompt is not None:
+                body["prompt"] = prompt
+            if messages is not None:
+                body["messages"] = list(messages)
+            created = await self._request("POST", "/agent-runs", body)
+            run_id = str((created or {}).get("runId") or "")
+            if not run_id:
+                raise MantyxError("server did not return a runId")
+            handlers = collect_local_handlers(tools_list)
+            return await self._drive_run(
+                run_id=run_id,
+                handlers=handlers,
+                on_assistant_delta=on_assistant_delta,
+                on_event=on_event,
+            )
+        finally:
+            await async_close_mcp_refs(tools_list)
 
     async def stream_agent(
         self,
@@ -155,6 +167,7 @@ class AsyncMantyxClient:
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncIterator[RunEvent]:
@@ -162,26 +175,32 @@ class AsyncMantyxClient:
 
         This is an async generator: ``async for event in client.stream_agent(...)``.
         """
-        body = _serialize_agent_spec(
-            agent_id=agent_id,
-            system_prompt=system_prompt,
-            model_id=model_id,
-            name=name,
-            tools=list(tools) if tools else None,
-            budgets=budgets,
-            metadata=metadata,
-        )
-        if prompt is not None:
-            body["prompt"] = prompt
-        if messages is not None:
-            body["messages"] = list(messages)
-        created = await self._request("POST", "/agent-runs", body)
-        run_id = str((created or {}).get("runId") or "")
-        if not run_id:
-            raise MantyxError("server did not return a runId")
-        handlers = collect_local_handlers(list(tools) if tools else None)
-        async for ev in self._stream_events(run_id, handlers):
-            yield ev
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        await async_resolve_local_refs(tools_list, http=self._http)
+        try:
+            body = _serialize_agent_spec(
+                agent_id=agent_id,
+                system_prompt=system_prompt,
+                model_id=model_id,
+                name=name,
+                tools=tools_list,
+                reasoning_level=reasoning_level,
+                budgets=budgets,
+                metadata=metadata,
+            )
+            if prompt is not None:
+                body["prompt"] = prompt
+            if messages is not None:
+                body["messages"] = list(messages)
+            created = await self._request("POST", "/agent-runs", body)
+            run_id = str((created or {}).get("runId") or "")
+            if not run_id:
+                raise MantyxError("server did not return a runId")
+            handlers = collect_local_handlers(tools_list)
+            async for ev in self._stream_events(run_id, handlers):
+                yield ev
+        finally:
+            await async_close_mcp_refs(tools_list)
 
     async def cancel_run(self, run_id: str) -> None:
         await self._request("POST", f"/agent-runs/{_quote(run_id)}/cancel")
@@ -196,24 +215,33 @@ class AsyncMantyxClient:
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncAgentSession:
-        body = _serialize_agent_spec(
-            agent_id=agent_id,
-            system_prompt=system_prompt,
-            model_id=model_id,
-            name=name,
-            tools=list(tools) if tools else None,
-            budgets=budgets,
-            metadata=metadata,
-        )
-        created = await self._request("POST", "/agent-sessions", body) or {}
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        await async_resolve_local_refs(tools_list, http=self._http)
+        try:
+            body = _serialize_agent_spec(
+                agent_id=agent_id,
+                system_prompt=system_prompt,
+                model_id=model_id,
+                name=name,
+                tools=tools_list,
+                reasoning_level=reasoning_level,
+                budgets=budgets,
+                metadata=metadata,
+            )
+            created = await self._request("POST", "/agent-sessions", body) or {}
+        except Exception:
+            await async_close_mcp_refs(tools_list)
+            raise
         session_id = str(created.get("sessionId") or "")
         if not session_id:
+            await async_close_mcp_refs(tools_list)
             raise MantyxError("server did not return a sessionId")
-        handlers = collect_local_handlers(list(tools) if tools else None)
-        return AsyncAgentSession(self, id=session_id, handlers=handlers)
+        handlers = collect_local_handlers(tools_list)
+        return AsyncAgentSession(self, id=session_id, handlers=handlers, tools_for_resume=tools_list)
 
     async def resume_session(
         self,
@@ -222,12 +250,15 @@ class AsyncMantyxClient:
         tools: Sequence[ToolRef] | None = None,
     ) -> AsyncAgentSession:
         await self.get_session_info(session_id)
-        handlers = collect_local_handlers(list(tools) if tools else None)
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        if tools_list:
+            await async_resolve_local_refs(tools_list, http=self._http)
+        handlers = collect_local_handlers(tools_list)
         return AsyncAgentSession(
             self,
             id=session_id,
             handlers=handlers,
-            tools_for_resume=list(tools) if tools else None,
+            tools_for_resume=tools_list,
         )
 
     async def end_session(self, session_id: str) -> None:
@@ -243,7 +274,7 @@ class AsyncMantyxClient:
         self,
         *,
         run_id: str,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
         on_assistant_delta: Callable[[str], Any] | None = None,
         on_event: Callable[[RunEvent], Any] | None = None,
     ) -> RunResult:
@@ -275,7 +306,7 @@ class AsyncMantyxClient:
     async def _stream_events(
         self,
         run_id: str,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
     ) -> AsyncIterator[RunEvent]:
         last_seq = 0
         background: list[asyncio.Task[Any]] = []
@@ -328,24 +359,65 @@ class AsyncMantyxClient:
         self,
         run_id: str,
         ev: RunEvent,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
     ) -> None:
         name = str(ev.data.get("name") or "")
         tool_use_id = str(ev.data.get("toolUseId") or "")
         if not tool_use_id:
             return
-        handler = handlers.get(name)
-        if handler is None:
-            await self._post_tool_result(
-                run_id,
-                tool_use_id,
-                error=f"No local handler registered for tool {name!r}",
-            )
-            return
+        kind = str(ev.data.get("kind") or "local")
         try:
+            if kind == "a2a_local":
+                a2a = handlers.a2a_tools.get(name)
+                if a2a is None:
+                    await self._post_tool_result(
+                        run_id,
+                        tool_use_id,
+                        error=f"No local A2A handler registered for tool {name!r}",
+                    )
+                    return
+                args = ev.data.get("args") or {}
+                message = ""
+                if isinstance(args, dict):
+                    raw_msg = args.get("message")
+                    message = raw_msg if isinstance(raw_msg, str) else ""
+                text = await async_call_a2a(a2a, message, http=self._http)
+                await self._post_tool_result(run_id, tool_use_id, result=text)
+                return
+            if kind == "mcp_local":
+                server_name = str(ev.data.get("mcpServer") or "")
+                tool_name = str(ev.data.get("mcpToolName") or "")
+                server = handlers.mcp_servers.get(server_name)
+                if server is None or server._resolved is None:
+                    await self._post_tool_result(
+                        run_id,
+                        tool_use_id,
+                        error=f"No local MCP server registered as {server_name!r}",
+                    )
+                    return
+                upstream_name = (
+                    tool_name[len(server_name) + 1 :]
+                    if tool_name.startswith(f"{server_name}_")
+                    else tool_name
+                )
+                args_in = ev.data.get("args") or ev.data.get("input") or {}
+                args_dict: dict[str, Any] = (
+                    cast(dict[str, Any], args_in) if isinstance(args_in, dict) else {}
+                )
+                text = await server._resolved.call_async(upstream_name, args_dict)
+                await self._post_tool_result(run_id, tool_use_id, result=text)
+                return
+            handler = handlers.local_tools.get(name)
+            if handler is None:
+                await self._post_tool_result(
+                    run_id,
+                    tool_use_id,
+                    error=f"No local handler registered for tool {name!r}",
+                )
+                return
             args = parse_args_with_pydantic(
                 handler.parameters,
-                cast(Optional[dict[str, Any]], ev.data.get("args") or ev.data.get("input")),
+                cast(dict[str, Any] | None, ev.data.get("args") or ev.data.get("input")),
             )
             out = await maybe_await(handler.execute(args))
             text = out if isinstance(out, str) else json.dumps(out)
@@ -354,7 +426,7 @@ class AsyncMantyxClient:
             await self._post_tool_result(
                 run_id,
                 tool_use_id,
-                error=MantyxToolError(handler.name, str(e)).message,
+                error=MantyxToolError(_describe_handler(ev, name), str(e)).message,
             )
 
     async def _post_tool_result(
@@ -439,12 +511,12 @@ class AsyncAgentSession:
         client: AsyncMantyxClient,
         *,
         id: str,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
         tools_for_resume: list[ToolRef] | None = None,
     ) -> None:
         self.client = client
         self.id = id
-        self._handlers: dict[ToolName, LocalTool] = dict(handlers)
+        self._handlers = handlers
         self._tools_for_resume = tools_for_resume
 
     async def send(
@@ -452,14 +524,11 @@ class AsyncAgentSession:
         prompt: str,
         *,
         metadata: Mapping[str, str] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         on_assistant_delta: Callable[[str], Any] | None = None,
         on_event: Callable[[RunEvent], Any] | None = None,
     ) -> RunResult:
-        body: dict[str, Any] = {"prompt": prompt}
-        if self._tools_for_resume:
-            body["tools"] = serialize_tool_refs(self._tools_for_resume)
-        if metadata:
-            body["metadata"] = dict(metadata)
+        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
             or {}
@@ -479,16 +548,13 @@ class AsyncAgentSession:
         prompt: str,
         *,
         metadata: Mapping[str, str] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
     ) -> AsyncIterator[RunEvent]:
         """Stream events from a session turn as they arrive.
 
         Async generator: ``async for event in session.stream("hi"):``.
         """
-        body: dict[str, Any] = {"prompt": prompt}
-        if self._tools_for_resume:
-            body["tools"] = serialize_tool_refs(self._tools_for_resume)
-        if metadata:
-            body["metadata"] = dict(metadata)
+        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
             or {}
@@ -499,6 +565,23 @@ class AsyncAgentSession:
         async for ev in self.client._stream_events(run_id, self._handlers):
             yield ev
 
+    def _build_message_body(
+        self,
+        prompt: str,
+        *,
+        metadata: Mapping[str, str] | None,
+        reasoning_level: ReasoningLevel | None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"prompt": prompt}
+        if self._tools_for_resume:
+            body["tools"] = serialize_tool_refs(self._tools_for_resume)
+        if metadata:
+            body["metadata"] = dict(metadata)
+        normalized = normalize_reasoning_level(reasoning_level)
+        if normalized is not None:
+            body["reasoningLevel"] = normalized
+        return body
+
     async def history(self) -> list[dict[str, str]]:
         info = await self.client.get_session_info(self.id)
         return info.messages
@@ -507,7 +590,10 @@ class AsyncAgentSession:
         return await self.client.get_session_info(self.id)
 
     async def end(self) -> None:
-        await self.client.end_session(self.id)
+        try:
+            await self.client.end_session(self.id)
+        finally:
+            await async_close_mcp_refs(self._tools_for_resume)
 
 
 __all__ = ["AsyncAgentSession", "AsyncMantyxClient"]

@@ -3,16 +3,35 @@ package mantyx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strings"
+	"sync"
 )
 
 // ToolRef is the developer-facing tool reference type. Use one of:
 //
+// Server-resolved (MANTYX runs the tool itself):
 //   - MantyxTool(id)                — workspace tool by id
 //   - MantyxPluginTool(name)        — plugin tool by `@plugin/tool` name
-//   - LocalTool(LocalToolSpec{...}) — handler running in this process
+//   - MantyxA2A(MantyxA2AOptions{}) — remote Agent2Agent peer
+//   - MantyxMcp(MantyxMcpOptions{}) — remote MCP server (Streamable HTTP)
+//
+// Client-resolved (the SDK runs the tool in this process):
+//   - LocalTool(LocalToolSpec{}) — generic local tool
+//   - LocalA2A(LocalA2ASpec{})   — A2A peer addressed by URL; SDK fetches the
+//     Agent Card and dials the peer transparently.
+//   - LocalMcp(LocalMcpSpec{})   — MCP server addressed by URL or stdio
+//     command; SDK manages the transport, discovery, and tool calls
+//     transparently using the official MCP Go SDK.
 type ToolRef interface {
 	toolWire() map[string]any
 }
+
+var toolNameRe = regexp.MustCompile(`^[a-zA-Z0-9_]{1,64}$`)
+
+// ----- mantyx (workspace tool by id) ---------------------------------------
 
 type mantyxToolRef struct{ id string }
 
@@ -23,6 +42,8 @@ func (r mantyxToolRef) toolWire() map[string]any {
 // MantyxTool references an existing workspace `Tool` row by id.
 func MantyxTool(id string) ToolRef { return mantyxToolRef{id: id} }
 
+// ----- mantyx_plugin (platform plugin tool by name) ------------------------
+
 type mantyxPluginToolRef struct{ name string }
 
 func (r mantyxPluginToolRef) toolWire() map[string]any {
@@ -32,6 +53,8 @@ func (r mantyxPluginToolRef) toolWire() map[string]any {
 // MantyxPluginTool references a plugin tool by its `@plugin-slug/tool-name`.
 func MantyxPluginTool(name string) ToolRef { return mantyxPluginToolRef{name: name} }
 
+// ----- local (generic local tool) ------------------------------------------
+
 // LocalToolSpec describes a tool that runs in the developer's process.
 type LocalToolSpec struct {
 	// Name must match /^[a-zA-Z0-9_]{1,64}$/.
@@ -39,7 +62,7 @@ type LocalToolSpec struct {
 	// Description is shown to the LLM as the tool's purpose.
 	Description string
 	// Parameters is one of:
-	//   - nil                                 → empty object schema
+	//   - nil                                  → empty object schema
 	//   - map[string]any / json.RawMessage     → passed through as-is
 	//   - a Go struct (or pointer-to-struct)   → reflected to JSON Schema
 	Parameters any
@@ -66,23 +89,353 @@ func (t *localTool) toolWire() map[string]any {
 // LocalTool registers a local tool. `Execute` runs in the SDK process whenever
 // the agent loop emits a `local_tool_call` event for this tool's name.
 func LocalTool(spec LocalToolSpec) ToolRef {
+	if !toolNameRe.MatchString(spec.Name) {
+		panic(fmt.Sprintf("mantyx.LocalTool: invalid tool name %q (must match /^[a-zA-Z0-9_]{1,64}$/)", spec.Name))
+	}
 	schema, err := jsonSchemaFor(spec.Parameters)
 	if err != nil {
-		// Fall back to permissive object schema; surface as best-effort.
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
 	return &localTool{spec: spec, schema: schema}
 }
 
+// ----- a2a (server-resolved Agent2Agent) -----------------------------------
+
+// MantyxA2AOptions describes a remote Agent2Agent peer reachable from MANTYX.
+type MantyxA2AOptions struct {
+	// Name surfaced to the model; must match /^[a-zA-Z0-9_]{1,64}$/.
+	Name string
+	// Description shown to the model. Falls back to a generic delegation hint.
+	Description string
+	// AgentCardURL is the remote Agent Card URL or JSON-RPC root.
+	AgentCardURL string
+	// Headers are forwarded as-is on every A2A request (typically Authorization).
+	Headers map[string]string
+	// ContextID, when set, threads multiple delegations into the same A2A
+	// remote conversation. Omit for fresh per-call context.
+	ContextID string
+}
+
+type a2aToolRef struct{ opts MantyxA2AOptions }
+
+func (r a2aToolRef) toolWire() map[string]any {
+	out := map[string]any{
+		"kind":         "a2a",
+		"name":         r.opts.Name,
+		"agentCardUrl": r.opts.AgentCardURL,
+	}
+	if r.opts.Description != "" {
+		out["description"] = r.opts.Description
+	}
+	if len(r.opts.Headers) > 0 {
+		headers := make(map[string]any, len(r.opts.Headers))
+		for k, v := range r.opts.Headers {
+			headers[k] = v
+		}
+		out["headers"] = headers
+	}
+	if r.opts.ContextID != "" {
+		out["contextId"] = r.opts.ContextID
+	}
+	return out
+}
+
+// MantyxA2A registers a remote Agent2Agent peer. MANTYX dials the peer over
+// A2A's `message/send` RPC and forwards the reply as the tool result.
+func MantyxA2A(opts MantyxA2AOptions) ToolRef {
+	if !toolNameRe.MatchString(opts.Name) {
+		panic(fmt.Sprintf("mantyx.MantyxA2A: invalid tool name %q", opts.Name))
+	}
+	if opts.AgentCardURL == "" {
+		panic("mantyx.MantyxA2A: AgentCardURL is required")
+	}
+	return a2aToolRef{opts: opts}
+}
+
+// ----- a2a_local (client-resolved Agent2Agent) -----------------------------
+
+// LocalA2ASpec describes an Agent2Agent peer the SDK reaches on MANTYX's
+// behalf. You only supply the Agent Card URL — the SDK fetches the Agent
+// Card on the first run, ships it inline with the spec (so MANTYX never
+// dials your peer directly), and JSON-RPC `message/send`s the model's
+// `message` argument against the resolved card's `url` whenever MANTYX
+// emits a `local_tool_call` event for this tool.
+//
+// Per `docs/wire-protocol.md` §3.1, MANTYX uses the resolved card's
+// `name`, `description`, and the first 12 `skills` to compose the
+// model-facing tool description.
+type LocalA2ASpec struct {
+	// Name surfaced to the model; must match /^[a-zA-Z0-9_]{1,64}$/.
+	Name string
+	// Description is an optional model-facing description override. When
+	// empty, MANTYX synthesizes one from the resolved Agent Card.
+	Description string
+	// AgentCardURL is the location of the peer's A2A Agent Card. Required.
+	// Typical shape: `https://hr.intranet.acme/.well-known/agent-card.json`.
+	AgentCardURL string
+	// Headers are forwarded as-is on both the Agent Card GET and the
+	// JSON-RPC `message/send` POST (typically `Authorization: Bearer ...`).
+	Headers map[string]string
+	// HTTPClient overrides the default `http.DefaultClient` used to fetch
+	// the Agent Card and dial the peer's `message/send` endpoint.
+	HTTPClient *http.Client
+}
+
+// localA2ATool is the internal `kind: "a2a_local"` ToolRef. It caches the
+// resolved Agent Card after the first fetch so subsequent runs and
+// `local_tool_call` dispatches don't refetch.
+type localA2ATool struct {
+	spec LocalA2ASpec
+
+	mu           sync.Mutex
+	resolvedCard map[string]any // raw JSON object as fetched, with at least "name"
+}
+
+func (t *localA2ATool) toolWire() map[string]any {
+	t.mu.Lock()
+	card := t.resolvedCard
+	t.mu.Unlock()
+	if card == nil {
+		// Resolution should always run before serialization. Falling back to
+		// a stub avoids a hard panic while still surfacing a missing-name
+		// error server-side.
+		card = map[string]any{"name": t.spec.Name}
+	}
+	out := map[string]any{
+		"kind":      "a2a_local",
+		"name":      t.spec.Name,
+		"agentCard": card,
+	}
+	if t.spec.Description != "" {
+		out["description"] = t.spec.Description
+	}
+	return out
+}
+
+// LocalA2A registers an Agent2Agent peer the SDK reaches on MANTYX's behalf.
+// The SDK fetches the Agent Card from spec.AgentCardURL on the first run /
+// session.send, caches the result, and dials the peer's JSON-RPC `message/send`
+// endpoint for every `local_tool_call` event MANTYX emits.
+func LocalA2A(spec LocalA2ASpec) ToolRef {
+	if !toolNameRe.MatchString(spec.Name) {
+		panic(fmt.Sprintf("mantyx.LocalA2A: invalid tool name %q", spec.Name))
+	}
+	if spec.AgentCardURL == "" {
+		panic("mantyx.LocalA2A: AgentCardURL is required")
+	}
+	return &localA2ATool{spec: spec}
+}
+
+// ----- mcp (server-resolved MCP server) ------------------------------------
+
+// MantyxMcpOptions describes a remote MCP server (Streamable HTTP) discovered
+// and proxied by MANTYX. Each tool in the catalog surfaces as `<name>_<tool>`.
+type MantyxMcpOptions struct {
+	// Name is the server label; must match /^[a-zA-Z0-9_]{1,64}$/.
+	Name string
+	// URL is the Streamable HTTP MCP endpoint.
+	URL string
+	// Headers are forwarded as-is on every MCP request.
+	Headers map[string]string
+	// ToolFilter, when non-empty, allows only the listed MCP tool names.
+	ToolFilter []string
+}
+
+type mcpToolRef struct{ opts MantyxMcpOptions }
+
+func (r mcpToolRef) toolWire() map[string]any {
+	out := map[string]any{
+		"kind": "mcp",
+		"name": r.opts.Name,
+		"url":  r.opts.URL,
+	}
+	if len(r.opts.Headers) > 0 {
+		headers := make(map[string]any, len(r.opts.Headers))
+		for k, v := range r.opts.Headers {
+			headers[k] = v
+		}
+		out["headers"] = headers
+	}
+	if len(r.opts.ToolFilter) > 0 {
+		filter := make([]any, len(r.opts.ToolFilter))
+		for i, s := range r.opts.ToolFilter {
+			filter[i] = s
+		}
+		out["toolFilter"] = filter
+	}
+	return out
+}
+
+// MantyxMcp registers a remote MCP server reachable from MANTYX.
+func MantyxMcp(opts MantyxMcpOptions) ToolRef {
+	if !toolNameRe.MatchString(opts.Name) {
+		panic(fmt.Sprintf("mantyx.MantyxMcp: invalid server name %q", opts.Name))
+	}
+	if opts.URL == "" {
+		panic("mantyx.MantyxMcp: URL is required")
+	}
+	return mcpToolRef{opts: opts}
+}
+
+// ----- mcp_local (client-resolved MCP server) ------------------------------
+
+// LocalMcpSpec describes an MCP server the SDK manages end-to-end. Provide
+// either a Streamable HTTP transport (URL + optional Headers) **or** an
+// stdio transport (Command + Args/Env/Cwd) — never both. The SDK opens the
+// transport on the first run / session, runs `Initialize` + `tools/list` to
+// discover the catalog, ships the resolved catalog inline with the agent
+// spec (so MANTYX can render the tools to the model under the
+// `<server>_<tool>` naming convention), and forwards every
+// `local_tool_call` event MANTYX emits to the live MCP session via
+// `tools/call`. The transport closes when the run / session ends.
+//
+// Internally the SDK uses the official
+// `github.com/modelcontextprotocol/go-sdk/mcp` package.
+type LocalMcpSpec struct {
+	// Name is the server label echoed back as `mcpServer` on every
+	// `local_tool_call`. Must match /^[a-zA-Z0-9_]{1,64}$/. The SDK
+	// auto-prefixes each tool's wire-level `name` with `<this>_` so the
+	// model sees a non-colliding `<server>_<tool>` surface.
+	Name string
+
+	// HTTP transport (mutually exclusive with stdio).
+
+	// URL is the Streamable HTTP MCP endpoint.
+	URL string
+	// Headers are forwarded as-is on every HTTP request to the server.
+	Headers map[string]string
+	// HTTPClient overrides the default `http.DefaultClient` used by the
+	// Streamable HTTP transport. Ignored for stdio.
+	HTTPClient *http.Client
+
+	// stdio transport (mutually exclusive with HTTP).
+
+	// Command is the binary to launch (e.g. `mcp-server-filesystem`).
+	Command string
+	// Args are the command-line arguments passed to Command.
+	Args []string
+	// Env is appended to the child process's environment, on top of os.Environ().
+	Env map[string]string
+	// Cwd is the working directory of the child process. Empty inherits.
+	Cwd string
+}
+
+// localMcpServer is the internal `kind: "mcp_local"` ToolRef. It owns the
+// MCP transport / session lifetime and caches the resolved tool catalog
+// for both wire serialization and `local_tool_call` dispatch.
+type localMcpServer struct {
+	spec LocalMcpSpec
+
+	mu       sync.Mutex
+	resolved *resolvedMcp
+}
+
+// resolvedMcp captures the post-Initialize state of an `mcp_local` server.
+// It is populated by the resolver before the first run starts and reused
+// by both wire serialization and `local_tool_call` dispatch. The function
+// fields are kept on the struct so tests can drop in a fake resolution
+// without spawning a real MCP transport.
+type resolvedMcp struct {
+	// serverInfo is the wire-friendly `Implementation` block from MCP
+	// `Initialize` (typically `{name, version, ...}`). May be nil.
+	serverInfo map[string]any
+	// tools is the wire-ready catalog: each entry already has its `name`
+	// auto-prefixed with the server's Name and matches the verbatim MCP
+	// `tools/list` shape (`name`, `description`, `inputSchema`,
+	// `annotations?`, ...).
+	tools []map[string]any
+	// upstreamNames maps the wire-prefixed name (e.g. `fs_read_file`) back
+	// to the upstream MCP tool name (e.g. `read_file`) used on the
+	// `tools/call` invocation.
+	upstreamNames map[string]string
+
+	// callTool is invoked for every dispatched `local_tool_call`. The
+	// caller passes the upstream MCP tool name and raw JSON args; the
+	// callee performs the `tools/call` RPC and returns the flattened text
+	// reply.
+	callTool func(ctx context.Context, toolName string, args json.RawMessage) (string, error)
+	// close releases any underlying transport (HTTP keep-alive,
+	// subprocess, ...). Called by closeMcpRefs on session / run end.
+	close func() error
+}
+
+func (s *localMcpServer) toolWire() map[string]any {
+	s.mu.Lock()
+	r := s.resolved
+	s.mu.Unlock()
+	out := map[string]any{
+		"kind":  "mcp_local",
+		"name":  s.spec.Name,
+		"tools": []map[string]any{},
+	}
+	if r == nil {
+		return out
+	}
+	if r.serverInfo != nil {
+		out["serverInfo"] = r.serverInfo
+	}
+	out["tools"] = r.tools
+	return out
+}
+
+// prefixedMcpToolName composes the wire-level (model-facing) tool name for a
+// `mcp_local` entry. It prepends `<server>_` unless the tool name already
+// starts with that prefix, so manual prefixing stays idempotent.
+func prefixedMcpToolName(serverName, toolName string) string {
+	prefix := serverName + "_"
+	if strings.HasPrefix(toolName, prefix) {
+		return toolName
+	}
+	return prefix + toolName
+}
+
+// LocalMcp registers a local MCP server with a transport-only spec. The SDK
+// performs Initialize + tools/list on the first run / session.send and
+// dispatches each `local_tool_call` event with `kind: "mcp_local"` into the
+// live session via `tools/call`.
+func LocalMcp(spec LocalMcpSpec) ToolRef {
+	if !toolNameRe.MatchString(spec.Name) {
+		panic(fmt.Sprintf("mantyx.LocalMcp: invalid server name %q", spec.Name))
+	}
+	httpSet := spec.URL != ""
+	stdioSet := spec.Command != ""
+	switch {
+	case httpSet && stdioSet:
+		panic("mantyx.LocalMcp: specify either URL (Streamable HTTP) or Command (stdio), not both")
+	case !httpSet && !stdioSet:
+		panic("mantyx.LocalMcp: one of URL (Streamable HTTP) or Command (stdio) is required")
+	}
+	return &localMcpServer{spec: spec}
+}
+
+// ----- registry ------------------------------------------------------------
+
 // localToolRegistry maps tool name to the LocalTool that registered it. Used
 // by the run driver to dispatch `local_tool_call` events.
-type localToolRegistry map[string]*localTool
+type localToolRegistry struct {
+	localTools map[string]*localTool
+	a2aTools   map[string]*localA2ATool
+	mcpServers map[string]*localMcpServer
+}
 
-func collectLocalHandlers(tools []ToolRef) localToolRegistry {
-	out := localToolRegistry{}
+func newRegistry() *localToolRegistry {
+	return &localToolRegistry{
+		localTools: map[string]*localTool{},
+		a2aTools:   map[string]*localA2ATool{},
+		mcpServers: map[string]*localMcpServer{},
+	}
+}
+
+func collectLocalHandlers(tools []ToolRef) *localToolRegistry {
+	out := newRegistry()
 	for _, t := range tools {
-		if lt, ok := t.(*localTool); ok {
-			out[lt.spec.Name] = lt
+		switch h := t.(type) {
+		case *localTool:
+			out.localTools[h.spec.Name] = h
+		case *localA2ATool:
+			out.a2aTools[h.spec.Name] = h
+		case *localMcpServer:
+			out.mcpServers[h.spec.Name] = h
 		}
 	}
 	return out

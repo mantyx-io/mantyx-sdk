@@ -5,8 +5,14 @@ speaks with SDKs. It is the source of truth for anyone implementing a new
 client (Python, Rust, Java…) and is shipped with each first-party SDK so the
 SDK repository can stand on its own when it is extracted from this monorepo.
 
-The companion document for this protocol — server-side overview, internals,
-deployment notes — is [`docs/agent-runs.md`](./agent-runs.md).
+Companion documents:
+
+- [`docs/wire-protocol.md`](./wire-protocol.md) — the messaging-layer
+  reference: every SSE event payload, the SDK-side dispatcher pattern, and
+  the resolved data structures (`a2a_local` Agent Card, `mcp_local`
+  `Tool[]`) the SDK is expected to ship.
+- [`docs/agent-runs.md`](./agent-runs.md) — server-side overview, internals,
+  deployment notes.
 
 ## 1. Concepts
 
@@ -15,17 +21,34 @@ than persisted as a row in MANTYX's `Agent` table. The full spec (system
 prompt, model, tools) is stored as part of each session/run for observability
 but is not editable from the dashboard.
 
-**Tool refs.** Three flavours, all carried inside the agent spec:
+**Tool refs.** Seven flavours, all carried inside the agent spec's `tools`
+array:
 
 | `kind`           | Resolved by | Notes |
 | ---------------- | ----------- | ----- |
 | `mantyx`         | server      | A workspace `Tool` row referenced by id (HTTP / Code / Plugin). |
 | `mantyx_plugin`  | server      | A platform plugin tool referenced by name. |
-| `local`          | client      | Defined and executed in the SDK's process. |
+| `local`          | client      | A custom tool defined and executed in the SDK's process. |
+| `a2a`            | server      | A *remote* Agent2Agent peer MANTYX can reach; invoked via `message/send` and the reply is surfaced as the tool result. |
+| `a2a_local`      | client      | An A2A peer MANTYX **cannot** reach. SDK resolves the [Agent Card](https://google.github.io/A2A/specification/#agent-card) locally and ships it inline; MANTYX uses it for the model description and routes calls back to the SDK over SSE. |
+| `mcp`            | server      | A *remote* MCP server (Streamable HTTP). At run start MANTYX lists the catalog and exposes every tool as `<server>_<tool>` (subject to `toolFilter`). |
+| `mcp_local`      | client      | An MCP server MANTYX **cannot** reach. SDK runs `Initialize` + `tools/list` locally and ships the resolved `Tool[]` (with `inputSchema`); MANTYX exposes them to the model with the SDK-declared names and routes calls back over SSE. |
 
-When the model calls a `local` tool, MANTYX pauses the agent loop, emits a
-`local_tool_call` event over SSE and waits for the SDK to POST a tool-result
-back via HTTP.
+The split is deliberate:
+
+- **Server-resolved** (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) — MANTYX has
+  network access to the resource. The worker runs the tool itself and the
+  SDK only sees an informational `tool_result` event in the SSE stream. For
+  MCP/A2A this also means MANTYX does discovery (`listTools`, agent-card
+  fetch).
+- **Client-resolved / "local"** (`local`, `a2a_local`, `mcp_local`) —
+  MANTYX has *no* access to the resource. The SDK does **all** of the
+  work: connection, discovery, listing, expansion, arg validation, auth,
+  execution, retries. MANTYX is a thin LLM-routing layer that emits a
+  `local_tool_call` event and blocks until the SDK POSTs back to
+  `.../tool-results`. The event payload carries a `kind` discriminator
+  (`"local"` implied when absent, `"a2a_local"` and `"mcp_local"` explicit)
+  so SDKs can dispatch to the right local handler.
 
 **One-shot run vs. session.** A run is an LLM execution. Runs may be:
 
@@ -114,6 +137,7 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
   "agentId": "agent_cm6abc123",         // optional — see §4.1
   "systemPrompt": "You are helpful.",   // required unless agentId is set
   "modelId": "platform:cm6abc123",      // optional, see §3
+  "reasoningLevel": "medium",           // optional, see §4.4
   "tools": [
     { "kind": "mantyx", "id": "tool_cm6..." },
     { "kind": "mantyx_plugin", "name": "web_search" },
@@ -127,10 +151,68 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
         "required": ["path"],
         "additionalProperties": false
       }
+    },
+    {
+      "kind": "a2a",
+      "name": "billing_agent",
+      "description": "Delegate billing questions to the Acme billing agent.",
+      "agentCardUrl": "https://billing.acme.com/.well-known/agent-card.json",
+      "headers": { "Authorization": "Bearer ${BILLING_TOKEN}" },
+      "contextId": "ctx_abc"            // optional A2A context to thread turns
+    },
+    {
+      "kind": "a2a_local",
+      "name": "intranet_hr_agent",
+      "agentCard": {                    // SDK-resolved A2A Agent Card content
+        "protocolVersion": "0.3.0",
+        "name": "Acme HR",
+        "description": "Answers questions about HR policies and benefits.",
+        "url": "https://hr.intranet.acme/a2a",
+        "version": "1.4.0",
+        "capabilities": { "streaming": false },
+        "skills": [
+          {
+            "id": "pto_lookup",
+            "name": "PTO lookup",
+            "description": "Find a teammate's remaining PTO days for the year."
+          },
+          {
+            "id": "benefits_qa",
+            "name": "Benefits Q&A",
+            "description": "Answer questions about insurance, 401k, and parental leave."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "mcp",
+      "name": "github",                 // → tools become github_<tool>
+      "url": "https://mcp.github.com/v1",
+      "headers": { "Authorization": "Bearer ${GH_PAT}" },
+      "toolFilter": ["search_repos", "read_file"]   // optional allowlist
+    },
+    {
+      "kind": "mcp_local",
+      "name": "fs",                     // SDK-side server label only — NOT a prefix
+      "serverInfo": {                   // optional; from MCP Initialize
+        "name": "mcp-server-filesystem",
+        "version": "0.4.1"
+      },
+      "tools": [                        // verbatim MCP tools/list response
+        {
+          "name": "fs_read_file",       // model-facing name, exactly as declared
+          "description": "Read a file from the user's workstation",
+          "inputSchema": {              // MCP's term — JSON Schema
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"]
+          }
+        }
+      ]
     }
   ],
   "budgets": { "maxToolTurns": 32 },    // optional safety cap
-  "metadata": {                         // optional, see §4.2
+  "metadata": {                         // optional, see §4.5
     "customer": "acme",
     "env": "prod"
   }
@@ -165,7 +247,232 @@ defining an ephemeral one inline. When `agentId` is set:
 Both `agentId` and `systemPrompt` may be supplied. The agent's stored prompt
 wins; the inline `systemPrompt` is ignored.
 
-### 4.2 `metadata` (developer-supplied KV for filtering)
+### 4.2 A2A tool refs
+
+A2A delegation lets the agent hand a task to another
+[Agent2Agent](https://google.github.io/A2A/) peer. The wire protocol exposes
+two kinds depending on **who can reach the peer**:
+
+- `kind: "a2a"` — *remote* (server-resolved). MANTYX dials `agentCardUrl`
+  directly. Pick this when the peer is on the public internet or in the
+  same VPC as MANTYX.
+- `kind: "a2a_local"` — *local* (client-resolved). The SDK invokes the peer
+  on its side and posts back the reply. Pick this when the peer lives on an
+  intranet, behind a VPN, or on the user's device — anywhere MANTYX can't
+  reach but the SDK can.
+
+Both kinds present the **same** `{ "message": string }` argument shape to
+the model, so an agent prompt that uses one transparently works with the
+other. (This also matches MANTYX's internal `delegate_to_<name>` tools, so
+models trained on one pattern carry across.)
+
+#### `kind: "a2a"` — remote A2A
+
+MANTYX resolves the tool server-side: when the model calls it, the worker
+POSTs the model's `message` argument to `agentCardUrl` over A2A's standard
+`message/send` RPC (Google ADK JSON-RPC root, A2A `/rpc`, `/message:send`,
+and `/message/send` endpoints are probed in order) and forwards the remote
+agent's text reply back as the tool result.
+
+| Field           | Required | Notes |
+| --------------- | -------- | ----- |
+| `kind`          | yes      | Discriminator literal `"a2a"`. |
+| `name`          | yes      | Tool name surfaced to the model — must match `/^[a-zA-Z0-9_]{1,64}$/`. |
+| `description`   | no       | Model-facing description. Defaults to `"Delegate a task to the <name> agent over A2A. Pass the full task as a single message."`. Mention the remote agent's purpose so the model picks it for the right turn. |
+| `agentCardUrl`  | yes      | URL of the remote Agent Card (`/.well-known/agent-card.json`) or the JSON-RPC root the peer accepts. |
+| `headers`       | no       | Flat string→string HTTP headers sent on every A2A request — typically `Authorization`. Each value is capped at 8 KB. |
+| `contextId`     | no       | A2A `contextId` to thread multiple delegations into the same remote conversation. Omit for fresh per-call context. |
+
+> **Secret handling.** `headers` are forwarded **as-is** by the SDK API. If
+> you need long-lived credentials (refresh tokens, rotating API keys),
+> register the peer as a workspace `ExternalAgent` instead — those headers
+> support `{{secret:NAME}}` resolution against the workspace secrets store
+> (see `runtime/a2a-client.ts`). The wire-protocol `a2a` ref is best for
+> short-lived per-run tokens minted by your application.
+
+#### `kind: "a2a_local"` — local A2A
+
+> **MANTYX does no A2A work for this kind.** It does not fetch the agent
+> card, validate transport, manage credentials, or speak `message/send`.
+> The SDK owns the entire A2A relationship; MANTYX merely translates the
+> model's `delegate_to_<name>` call into a `local_tool_call` event and
+> waits for the SDK to POST back the reply text.
+
+Per-run lifecycle:
+
+1. **Resolution (SDK).** Before submitting the spec, the SDK obtains the
+   peer's [A2A Agent Card](https://google.github.io/A2A/specification/#agent-card)
+   — typically by fetching `/.well-known/agent-card.json` from the local
+   peer, or by reading it from a config file / registry / inline constant.
+2. **Submission (SDK → MANTYX).** SDK posts the spec with the resolved
+   card embedded as `agentCard`. MANTYX uses the card's `name`,
+   `description`, and `skills[]` to compose the model-facing tool
+   description so the LLM understands what the peer can do.
+3. **Tool call (MANTYX → SDK).** When the model calls the tool, MANTYX
+   emits a `local_tool_call` event with `kind: "a2a_local"`,
+   `args: { message: string }`, and the **full `agentCard`** echoed back
+   so the SDK can route to the right local A2A handler (matching by URL,
+   name, skill set, or any other field).
+4. **Execution (SDK).** SDK invokes the A2A peer (its own client, its own
+   credentials, its own retries) and POSTs the reply text to
+   `POST /agent-runs/:runId/tool-results`.
+5. **Continuation (MANTYX).** MANTYX feeds the reply back into the model
+   loop as the tool result.
+
+| Field           | Required | Notes |
+| --------------- | -------- | ----- |
+| `kind`          | yes      | Discriminator literal `"a2a_local"`. |
+| `name`          | yes      | Tool name surfaced to the model — must match `/^[a-zA-Z0-9_]{1,64}$/`. |
+| `description`   | no       | Model-facing description override. When omitted, MANTYX synthesizes one from `agentCard.name`, `agentCard.description`, and the first 12 skills. |
+| `agentCard`     | yes      | The resolved A2A Agent Card (JSON content). Schema follows the [A2A Agent Card spec](https://google.github.io/A2A/specification/#agent-card) — passthrough for unknown fields, so any spec-compliant card works. See the *Agent Card shape* table below for the fields MANTYX actually reads. |
+
+**Agent Card shape** (only the fields MANTYX inspects; everything else is
+forwarded verbatim back to the SDK):
+
+| Card field            | Used by MANTYX | Notes |
+| --------------------- | -------------- | ----- |
+| `protocolVersion`     | echo only      | A2A protocol version (e.g. `"0.3.0"`). |
+| `name`                | description    | Used when synthesizing the tool description (`"Delegate a task to the <name> agent ..."`). |
+| `description`         | description    | One-paragraph summary of what the peer does — surfaced to the model. |
+| `url`                 | echo only      | Peer's A2A endpoint. Forwarded back to the SDK in the `local_tool_call` event so the SDK can dispatch by URL. Never fetched server-side. |
+| `version`             | echo only      | Peer agent version. |
+| `provider`            | echo only      | Vendor info. |
+| `capabilities`        | echo only      | A2A capability flags (streaming, push notifications, …). |
+| `defaultInputModes`   | echo only      | Modalities the peer accepts. |
+| `defaultOutputModes`  | echo only      | Modalities the peer returns. |
+| `skills[]`            | description    | First 12 skills (`name`, `description`) are bulleted into the tool description so the model knows what to ask for. |
+| `securitySchemes`, `security` | echo only | Forwarded to the SDK; MANTYX does no auth. |
+| *anything else*       | echo only      | Passthrough — survives round-trip unchanged. |
+
+Local A2A respects the same `localToolTimeoutMs` budget (default 5 minutes)
+as `kind: "local"`. Tool-result POSTs after timeout return `409 run_terminal`.
+
+### 4.3 MCP tool refs
+
+[Model Context Protocol](https://modelcontextprotocol.io/) connectors
+expose every tool published by an MCP server to the agent loop in one go.
+Like A2A, the protocol distinguishes by **where the server lives**:
+
+- `kind: "mcp"` — *remote* MCP (Streamable HTTP). MANTYX has network access
+  to the server, dials it, lists the catalog at run start, and proxies each
+  call server-side. **MANTYX prefixes every discovered tool name with the
+  ref's `name`** (e.g. `github_search_repos`) so multiple MCP servers
+  can coexist without colliding.
+- `kind: "mcp_local"` — *local* MCP (stdio, on-device, intranet). MANTYX
+  has **no** access to the server; the SDK does discovery, validation, and
+  execution. The SDK declares the tool catalog with **the exact names it
+  wants the model to see** — MANTYX does not auto-prefix.
+
+#### `kind: "mcp"` — remote MCP
+
+| Field          | Required | Notes |
+| -------------- | -------- | ----- |
+| `kind`         | yes      | Discriminator literal `"mcp"`. |
+| `name`         | yes      | Server label — MANTYX prefixes every discovered tool name as `<name>_<tool>`. Must match `/^[a-zA-Z0-9_]{1,64}$/`. |
+| `url`          | yes      | Streamable HTTP MCP endpoint. |
+| `headers`      | no       | Flat string→string HTTP headers (e.g. `Authorization`). Each value capped at 8 KB. |
+| `toolFilter`   | no       | Allowlist of MCP tool names (un-prefixed, as the server returns them). When set, tools not in the list are silently dropped. When omitted, every published tool is exposed. |
+
+If the MCP server is unreachable when the run starts, MANTYX still exposes
+a single stub tool named `<server>_unavailable` so the model can report the
+failure to the user instead of silently going without the catalog.
+
+#### `kind: "mcp_local"` — local MCP
+
+> **MANTYX does no MCP work for this kind.** It does not speak
+> `Initialize`, `tools/list`, or `tools/call`, does not validate args,
+> and does not interpret result content blocks. The SDK owns the entire
+> MCP relationship — including discovery — and gives MANTYX the resolved
+> tool catalog so the model can be told what's available. MANTYX is
+> purely a transport.
+
+Per-run lifecycle:
+
+1. **Discovery (SDK).** Before submitting the spec, the SDK connects to
+   its local MCP server, speaks `Initialize` (capturing the `Implementation`
+   block as optional `serverInfo`), then calls `tools/list`. The
+   resulting `Tool[]` array is shipped **verbatim** as `tools[]`.
+2. **Submission (SDK → MANTYX).** SDK posts the spec with the resolved
+   catalog. Field names match the MCP spec exactly — `inputSchema`, not
+   `parameters` — so a TypeScript SDK can pass through what its MCP client
+   already decoded. The `tools[].name` values are exactly what the model
+   will see; MANTYX does **not** auto-prefix or rename anything. Sanitize
+   them to `[a-zA-Z0-9_]{1,64}` yourself (if you want `fs/read_file` to
+   surface as `fs_read_file`, declare it that way).
+3. **Tool call (MANTYX → SDK).** When the model calls a tool, MANTYX emits
+   a `local_tool_call` event with `kind: "mcp_local"` and these extra
+   hints so the SDK can dispatch to the right MCP client:
+
+   ```jsonc
+   {
+     "seq": 9,
+     "type": "local_tool_call",
+     "data": {
+       "toolUseId": "tu_x",
+       "name": "fs_read_file",       // SDK-declared name; same string the model called
+       "args": { "path": "/etc/hosts" },
+       "kind": "mcp_local",
+       "mcpServer": "fs",            // the SDK-side label from the ref's `name`
+       "mcpToolName": "fs_read_file", // duplicates `name` for the SDK's convenience
+       "mcpServerInfo": {            // present iff the ref carried `serverInfo`
+         "name": "mcp-server-filesystem",
+         "version": "0.4.1"
+       }
+     }
+   }
+   ```
+
+4. **Execution (SDK).** SDK validates args against the locally-known
+   `inputSchema`, speaks MCP `tools/call`, flattens the response content
+   blocks (typically the joined `text` blocks), and POSTs the result back
+   to `.../tool-results`.
+5. **Refresh (optional).** To pick up new tools mid-session, send the
+   updated `mcp_local` ref inside `POST /agent-sessions/:id/messages`'s
+   `tools` field; the catalog snapshot lives on the run, not the session.
+
+| Field          | Required | Notes |
+| -------------- | -------- | ----- |
+| `kind`         | yes      | Discriminator literal `"mcp_local"`. |
+| `name`         | yes      | SDK-side server label (e.g. `"fs"`, `"jira"`). Echoed back unchanged as `mcpServer` on every `local_tool_call`. **Not used to prefix tool names.** Match `/^[a-zA-Z0-9_]{1,64}$/`. |
+| `serverInfo`   | no       | The MCP `Implementation` block the SDK got from `Initialize` (`{ name, version? }`, plus any extra fields the server returned). Forwarded to the SDK in `local_tool_call.mcpServerInfo` for observability; not used to drive behavior. |
+| `tools`        | yes      | Verbatim MCP `tools/list` output (1–64 entries). Each item is the standard MCP `Tool` shape: `{ name, description?, inputSchema?, annotations?, … }`. `name` is the model-facing tool name (SDK owns naming). `inputSchema` is the MCP-spec JSON Schema for the tool's arguments — used to constrain the LLM's tool call. Empty `inputSchema` means a no-arg tool. |
+
+Older SDKs that ignore the `kind` discriminator still see a normal
+`local_tool_call` and can match on `name` alone.
+
+### 4.4 `reasoningLevel` (provider thinking strength)
+
+`reasoningLevel` controls how much extended-thinking / reasoning effort the
+model spends per turn. MANTYX maps the same value onto every supported
+provider:
+
+- **OpenAI Responses** — `reasoning.effort` on reasoning models (o-series,
+  GPT-5.x, …; ignored on non-reasoning models and on xAI Grok).
+- **Gemini 3+** — `thinkingConfig.thinkingLevel`; pre-Gemini-3 models
+  consume the equivalent `thinkingBudget` token count.
+- **Anthropic / Bedrock-Anthropic** — extended thinking with a budget that
+  scales with strength (≈512 tokens at `low` → ≈8000 at `high`).
+
+Two equivalent input shapes are accepted:
+
+| Form        | Values                                | Notes |
+| ----------- | ------------------------------------- | ----- |
+| **String**  | `"off"`, `"low"`, `"medium"`, `"high"` | Snaps to the same anchors the web composer uses (Fast=30, Moderate=50, Smart=80; off=0). |
+| **Number**  | integer `0`–`100`                     | Pass-through to `RunAgentOptions.reasoningLevel`. `0` explicitly disables provider thinking even on reasoning models. |
+
+When omitted, MANTYX falls back to the agent's default — for ephemeral
+specs, that means thinking is off; for `agentId`-backed specs, it follows
+the persisted `Agent` configuration.
+
+For session-scoped runs the inheritance rules are:
+
+- `POST /agent-sessions { reasoningLevel }` — sets the session-default
+  applied to every subsequent message run.
+- `POST /agent-sessions/:id/messages { reasoningLevel }` — optional
+  per-message override; applies to that one run only and does not mutate
+  the session's stored value.
+
+### 4.5 `metadata` (developer-supplied KV for filtering)
 
 `metadata` is a flat string→string KV that is **persisted alongside the run /
 session** and surfaced in the MANTYX dashboard. Use it to tag runs with your
@@ -282,6 +589,11 @@ data: <utf-8 JSON>
 // streamed assistant tokens (zero or more per turn)
 { "seq": 2, "type": "assistant_delta", "data": { "text": "Hello" } }
 
+// streamed reasoning / extended-thinking tokens (only when reasoningLevel > 0
+// AND the active provider exposes thought parts: Anthropic extended thinking,
+// Gemini `includeThoughts`, OpenAI `reasoning_content` on reasoning models).
+{ "seq": 2, "type": "thinking_delta", "data": { "text": "First, I should…" } }
+
 // completed assistant message (text + any tool calls about to execute)
 { "seq": 3, "type": "assistant_message", "data": { "text": "...", "toolCalls": [...] } }
 
@@ -289,8 +601,13 @@ data: <utf-8 JSON>
 { "seq": 4, "type": "tool_call",   "data": { "toolUseId": "...", "name": "...", "input": {...} } }
 { "seq": 5, "type": "tool_result", "data": { "toolUseId": "...", "name": "...", "ok": true, "summary": "..." } }
 
-// LOCAL tool call — SDK MUST POST a tool-result for the same toolUseId
-{ "seq": 6, "type": "local_tool_call", "data": { "toolUseId": "tu_x", "name": "read_file", "input": { "path": "/etc/hosts" } } }
+// LOCAL tool call — SDK MUST POST a tool-result for the same toolUseId.
+// `kind` carries the discriminator so the SDK can dispatch to the right
+// local handler (generic registry, A2A client, or MCP client). Older SDKs
+// that ignore `kind` still match on `name`.
+{ "seq": 6, "type": "local_tool_call", "data": { "toolUseId": "tu_x", "name": "read_file", "args": { "path": "/etc/hosts" } } }
+{ "seq": 6, "type": "local_tool_call", "data": { "toolUseId": "tu_y", "name": "intranet_hr_agent", "args": { "message": "When does PTO reset?" }, "kind": "a2a_local", "agentCard": { "name": "Acme HR", "url": "https://hr.intranet.acme/a2a", "skills": [ { "id": "pto_lookup", "name": "PTO lookup" } ] } } }
+{ "seq": 6, "type": "local_tool_call", "data": { "toolUseId": "tu_z", "name": "fs_read_file", "args": { "path": "/etc/hosts" }, "kind": "mcp_local", "mcpServer": "fs", "mcpToolName": "fs_read_file", "mcpServerInfo": { "name": "mcp-server-filesystem", "version": "0.4.1" } } }
 
 // echo of the SDK's POSTed tool-result, persisted for replay
 { "seq": 7, "type": "local_tool_result_in", "data": { "toolUseId": "tu_x", "output": "127.0.0.1 ..." } }
@@ -368,17 +685,52 @@ A reference SDK should:
 
 1. Hold the API key + workspace slug and a small `fetch` (or stdlib HTTP)
    client.
-2. Maintain a registry of local tool handlers, keyed by `name`.
+2. Maintain three local-callback registries (or one tagged-union registry),
+   keyed by tool `name`:
+   - **Generic local tools** (`kind: "local"`) — caller-supplied handler
+     functions, dispatched by `name`.
+   - **Local A2A peers** (`kind: "a2a_local"`) — caller-supplied A2A
+     clients. Resolve the peer's Agent Card *first* (e.g. `fetch
+     "<peer>/.well-known/agent-card.json"` or read from a local registry),
+     attach it to the spec as `agentCard`, and in the dispatcher look the
+     client up by `agentCard.url` (or any other field you indexed on)
+     when the `local_tool_call` arrives.
+   - **Local MCP servers** (`kind: "mcp_local"`) — caller-supplied MCP
+     client connections. Speak `Initialize` and `tools/list` once at
+     setup, ship the verbatim `tools[]` (with `inputSchema`) plus
+     optional `serverInfo`, and dispatch incoming calls by the `mcpServer`
+     field in the event payload.
+
+   `mantyx`, `mantyx_plugin`, `a2a`, and `mcp` refs are server-resolved —
+   no SDK-side registry needed.
 3. On `runAgent` / `session.send`:
+   - Accept `reasoningLevel` from the caller and pass it through unchanged
+     (string `"off" | "low" | "medium" | "high"` *or* number `0–100`); do
+     **not** translate to a vendor-specific knob — the server owns that
+     mapping so all SDKs stay aligned with the web composer.
    - POST the run/message, get `{ runId, streamUrl }`.
    - Open the SSE stream with `Last-Event-ID` if reconnecting.
-   - On `local_tool_call`, look up the handler, validate args against the
-     tool's schema, run it, POST the result back to `.../tool-results`.
+   - On `local_tool_call`, dispatch by the event's `kind` discriminator
+     (defaulting to `"local"` when omitted): generic registry / local A2A
+     client / local MCP client. Validate args against the tool's schema,
+     run it, POST the result back to `.../tool-results`.
+   - Treat `thinking_delta` events as opt-in callback fodder; many UIs hide
+     them by default. Their presence depends on `reasoningLevel > 0` and
+     on the active model exposing thought parts.
    - On terminal `result`, resolve the call. On `error` subtype, throw.
 4. Re-emit assistant deltas/events as a stream/iterator for callers who care
    about live output.
 5. Treat the protocol as the contract. Implementation details such as Valkey
    pub/sub or pgvector are server-side only.
+6. **Execution model (server-side, informational).** Runs are executed
+   out-of-process by the inbound worker off a dedicated
+   `mantyx:agent-runs` RabbitMQ queue; the API only persists the run row and
+   enqueues. Nothing about this is observable on the wire — clients still see
+   `202 { runId, streamUrl }` followed by the same SSE vocabulary — but it
+   means the `local_tool_call` ↔ `tool-results` round-trip is valid across
+   any API or worker replica, and transient broker failures surface as a
+   terminal `error` event on the stream, not as a 5xx on the initial POST.
 
-The TypeScript SDK in [`packages/mantyx-sdk/ts/`](../packages/mantyx-sdk/ts/) and the Go SDK in
-[`packages/mantyx-sdk/go/`](../packages/mantyx-sdk/go/) are reference implementations of this protocol.
+The npm package [`@mantyx/sdk`](https://www.npmjs.com/package/@mantyx/sdk) and the Go module
+[`github.com/mantyx/mantyx-go-sdk`](https://github.com/mantyx/mantyx-go-sdk) are reference implementations of this protocol
+(maintained in the official **mantyx-sdk** repositories).

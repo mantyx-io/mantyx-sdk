@@ -7,7 +7,7 @@ name = "mantyx-sdk"
 description = "Official Python SDK for the MANTYX agent runtime. Define ephemeral agents, mix server-side MANTYX tools with locally-executed tools, run them remotely."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "MANTYX", email = "support@mantyx.com" }]
 keywords = ["mantyx", "agent", "llm", "sdk", "tool-use", "agentic", "ai"]
 classifiers = [
@@ -17,7 +17,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -31,9 +30,23 @@ dependencies = [
     "httpx>=0.27,<1",
     "pydantic>=2.6,<3",
     "typing-extensions>=4.5; python_version < '3.12'",
+    # Drives `define_local_a2a` / `define_local_mcp` URL-only resolution:
+    # `mcp` is the official MCP Python SDK (stdio + Streamable HTTP transports);
+    # `anyio` lets the synchronous `MantyxClient` drive that async MCP code via
+    # a per-client BlockingPortal.
+    "mcp>=1.27,<2",
+    "anyio>=4.5",
 ]
 
 [project.optional-dependencies]
+# Pulls the official Agent2Agent (A2A) Python SDK plus a Starlette/uvicorn
+# integration. Required when you import `mantyx.a2a_server`. Keeping it as an
+# optional extra means the base wheel doesn't grow ~30 MB of protobuf-generated
+# bindings unless you actually need the server.
+a2a-server = [
+    "a2a-sdk[http-server]>=1.0,<2",
+    "uvicorn>=0.30",
+]
 dev = [
     "anyio>=4.0",
     "mypy>=1.10",
@@ -41,6 +54,8 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
     "build>=1.2",
+    "a2a-sdk[http-server]>=1.0,<2",
+    "uvicorn>=0.30",
 ]
 
 [project.urls]
@@ -78,7 +93,7 @@ asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -96,7 +111,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true

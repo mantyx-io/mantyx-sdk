@@ -8,9 +8,16 @@ import {
   MantyxRunError,
   MantyxToolError,
 } from "./errors.js";
+import { callA2A, callMcpTool, closeMcpRefs, resolveLocalRefs } from "./local-resolver.js";
 import { readSseStream } from "./sse.js";
-import type { LocalTool, ToolRef } from "./tools.js";
-import { isLocalTool } from "./tools.js";
+import type {
+  LocalA2ATool,
+  LocalMcpServer,
+  LocalTool,
+  ReasoningLevel,
+  ToolRef,
+} from "./tools.js";
+import { isLocalA2ATool, isLocalMcpServer, isLocalTool, prefixedMcpToolName } from "./tools.js";
 import { toToolParametersWire } from "./zod-to-json-schema.js";
 
 export const DEFAULT_BASE_URL = "https://app.mantyx.io";
@@ -61,6 +68,16 @@ export interface AgentSpecBase {
   systemPrompt?: string;
   modelId?: string;
   tools?: ToolRef[];
+  /**
+   * Provider thinking strength: a string anchor (`"off" | "low" | "medium" |
+   * "high"`) or an integer in `0..100` (where `0` explicitly disables provider
+   * thinking on reasoning models). The server maps this onto each LLM's
+   * native dial — see `docs/agent-runs-protocol.md` §4.4.
+   *
+   * For session-scoped runs the session value sets the default; per-message
+   * overrides on `session.send` apply to that single run.
+   */
+  reasoningLevel?: ReasoningLevel;
   budgets?: { maxToolTurns?: number };
   /**
    * Flat string→string KV carried alongside the run / session for
@@ -127,8 +144,42 @@ export interface ServerToolResultEvent extends RunEventBase {
 export interface LocalToolCallEvent extends RunEventBase {
   type: "local_tool_call";
   toolUseId: string;
+  /**
+   * The model-facing tool name. For `kind: "mcp_local"` events this is the
+   * `<server>_<tool>` name the SDK declared on the wire; the SDK looks up
+   * the local MCP server via `mcpServer` and forwards `mcpToolName` to
+   * `tools/call` rather than parsing the prefix itself.
+   */
   name: string;
   args: Record<string, unknown>;
+  /**
+   * Discriminator for which client-resolved handler should run.
+   * - `"local"` (or omitted) — generic local tool
+   * - `"a2a_local"` — local Agent2Agent peer
+   * - `"mcp_local"` — local MCP server tool
+   */
+  kind?: "local" | "a2a_local" | "mcp_local";
+  /**
+   * Present on `kind: "a2a_local"` — the full A2A Agent Card the SDK shipped
+   * with the spec, echoed back unchanged. Surfaced for advanced consumers
+   * (`onEvent` / `streamAgent` callers); the built-in dispatcher ignores it
+   * because it already has the cached card from the original
+   * `defineLocalA2A` resolution.
+   */
+  agentCard?: { name: string; url?: string; [k: string]: unknown };
+  /** Present on `kind: "mcp_local"` — server label declared via `defineLocalMcp`. */
+  mcpServer?: string;
+  /**
+   * Present on `kind: "mcp_local"` — the model-facing tool name as declared on
+   * the wire. Always equals `name`; surfaced as a separate field for the SDK's
+   * convenience when dispatching into a local MCP client.
+   */
+  mcpToolName?: string;
+  /**
+   * Present on `kind: "mcp_local"` — the verbatim `Implementation` block from
+   * MCP `Initialize`, echoed back for observability.
+   */
+  mcpServerInfo?: { name: string; version?: string; [k: string]: unknown };
 }
 
 export interface LocalToolResultInEvent extends RunEventBase {
@@ -221,45 +272,85 @@ export class MantyxClient {
   // ------------------------------------------------------------- One-shot
 
   async runAgent(spec: RunSpec): Promise<RunResult> {
-    const handlers = collectLocalHandlers(spec.tools ?? []);
-    const created = await this.request<{ runId: string; streamUrl: string }>({
-      method: "POST",
-      path: "/agent-runs",
-      body: serializeAgentSpec(spec, {
-        prompt: spec.prompt,
-        messages: spec.messages,
-      }),
-    });
-    return this.driveRun(created.runId, handlers, {
-      ...(spec.onAssistantDelta ? { onAssistantDelta: spec.onAssistantDelta } : {}),
-      ...(spec.onEvent ? { onEvent: spec.onEvent } : {}),
-      ...(spec.signal ? { signal: spec.signal } : {}),
-    });
+    const tools = spec.tools ?? [];
+    // Resolve every `a2a_local` agent card and open every `mcp_local`
+    // transport before submitting; the resolver mutates the refs in place
+    // so the subsequent `serializeAgentSpec` reads the resolved data.
+    await resolveLocalRefs(tools, { fetch: this.options.fetch });
+    const handlers = collectLocalHandlers(tools);
+    try {
+      const created = await this.request<{ runId: string; streamUrl: string }>({
+        method: "POST",
+        path: "/agent-runs",
+        body: serializeAgentSpec(spec, {
+          prompt: spec.prompt,
+          messages: spec.messages,
+        }),
+      });
+      return await this.driveRun(created.runId, handlers, {
+        ...(spec.onAssistantDelta ? { onAssistantDelta: spec.onAssistantDelta } : {}),
+        ...(spec.onEvent ? { onEvent: spec.onEvent } : {}),
+        ...(spec.signal ? { signal: spec.signal } : {}),
+      });
+    } finally {
+      // One-shot runs own their MCP transports; close them on exit.
+      await closeMcpRefs(tools);
+    }
   }
 
   async *streamAgent(spec: RunSpec): AsyncGenerator<RunEvent, void, void> {
-    const handlers = collectLocalHandlers(spec.tools ?? []);
-    const created = await this.request<{ runId: string; streamUrl: string }>({
-      method: "POST",
-      path: "/agent-runs",
-      body: serializeAgentSpec(spec, {
-        prompt: spec.prompt,
-        messages: spec.messages,
-      }),
-    });
-    yield* this.streamRunEvents(created.runId, handlers, spec.signal);
+    const tools = spec.tools ?? [];
+    await resolveLocalRefs(tools, { fetch: this.options.fetch });
+    const handlers = collectLocalHandlers(tools);
+    try {
+      const created = await this.request<{ runId: string; streamUrl: string }>({
+        method: "POST",
+        path: "/agent-runs",
+        body: serializeAgentSpec(spec, {
+          prompt: spec.prompt,
+          messages: spec.messages,
+        }),
+      });
+      yield* this.streamRunEvents(created.runId, handlers, spec.signal);
+    } finally {
+      await closeMcpRefs(tools);
+    }
+  }
+
+  /**
+   * Internal registry of client-resolved tool handlers. Exposed for callers
+   * who drive the run loop manually via `driveRun` / `streamRunEvents`.
+   */
+  collectHandlers(tools: ToolRef[]): LocalHandlers {
+    return collectLocalHandlers(tools);
   }
 
   // ------------------------------------------------------------- Sessions
 
   async createSession(spec: SessionSpec): Promise<AgentSession> {
-    const handlers = collectLocalHandlers(spec.tools ?? []);
+    const tools = spec.tools ?? [];
+    // Resolve local refs once at session creation; the session keeps the
+    // resolved cards / live MCP connections for its lifetime.
+    await resolveLocalRefs(tools, { fetch: this.options.fetch });
+    const handlers = collectLocalHandlers(tools);
     const created = await this.request<{ sessionId: string; name: string; createdAt: string }>({
       method: "POST",
       path: "/agent-sessions",
       body: serializeAgentSpec(spec),
     });
-    return new AgentSession(this, created.sessionId, handlers);
+    return new AgentSession(this, created.sessionId, handlers, tools);
+  }
+
+  /**
+   * Re-emit a `local_tool_call` event into the right local handler. Useful
+   * for tests and for users who consume events via `streamAgent` themselves.
+   */
+  async dispatchLocalToolFromEvent(
+    runId: string,
+    ev: LocalToolCallEvent,
+    handlers: LocalHandlers,
+  ): Promise<void> {
+    return this.dispatchLocalTool(runId, ev, handlers);
   }
 
   async resumeSession(
@@ -268,8 +359,13 @@ export class MantyxClient {
   ): Promise<AgentSession> {
     // Verify the session exists and is still active. Optionally refresh tool defs.
     await this.getSessionInfo(sessionId);
-    const handlers = collectLocalHandlers(opts.tools ?? []);
-    return new AgentSession(this, sessionId, handlers, opts.tools);
+    const tools = opts.tools ?? [];
+    if (tools.length > 0) {
+      // Resolve before the first send — mirrors createSession.
+      await resolveLocalRefs(tools, { fetch: this.options.fetch });
+    }
+    const handlers = collectLocalHandlers(tools);
+    return new AgentSession(this, sessionId, handlers, tools);
   }
 
   async endSession(sessionId: string): Promise<void> {
@@ -291,7 +387,7 @@ export class MantyxClient {
   /** Drive an existing run to completion (collect events, dispatch local tools). */
   async driveRun(
     runId: string,
-    handlers: Map<string, LocalTool>,
+    handlers: LocalHandlers,
     opts: {
       onAssistantDelta?: (delta: string) => void;
       onEvent?: (event: RunEvent) => void;
@@ -325,7 +421,7 @@ export class MantyxClient {
 
   async *streamRunEvents(
     runId: string,
-    handlers: Map<string, LocalTool>,
+    handlers: LocalHandlers,
     signal?: AbortSignal,
   ): AsyncGenerator<RunEvent, void, void> {
     const url = this.absoluteUrl(`/agent-runs/${encodeURIComponent(runId)}/stream`);
@@ -391,24 +487,58 @@ export class MantyxClient {
   async dispatchLocalTool(
     runId: string,
     ev: LocalToolCallEvent,
-    handlers: Map<string, LocalTool>,
+    handlers: LocalHandlers,
   ): Promise<void> {
-    const handler = handlers.get(ev.name);
-    if (!handler) {
-      await this.postToolResult(runId, ev.toolUseId, {
-        error: `No local handler registered for tool ${JSON.stringify(ev.name)}`,
-      });
-      return;
-    }
+    const kind = ev.kind ?? "local";
     try {
-      const args = handler.parameters ? handler.parameters.parse?.(ev.args) ?? ev.args : ev.args;
-      const out = await handler.execute(args as Record<string, unknown>);
-      const resultText = typeof out === "string" ? out : JSON.stringify(out);
-      await this.postToolResult(runId, ev.toolUseId, { result: resultText });
+      let out: string;
+      if (kind === "a2a_local") {
+        const tool = handlers.a2aTools.get(ev.name);
+        if (!tool) {
+          await this.postToolResult(runId, ev.toolUseId, {
+            error: `No local A2A handler registered for tool ${JSON.stringify(ev.name)}`,
+          });
+          return;
+        }
+        const message = typeof ev.args?.message === "string" ? (ev.args.message as string) : "";
+        out = await callA2A(tool, { message }, { fetch: this.options.fetch });
+      } else if (kind === "mcp_local") {
+        const serverName = ev.mcpServer ?? "";
+        const mcpToolName = ev.mcpToolName ?? "";
+        const server = handlers.mcpServers.get(serverName);
+        if (!server) {
+          await this.postToolResult(runId, ev.toolUseId, {
+            error: `No local MCP server registered as ${JSON.stringify(serverName)}`,
+          });
+          return;
+        }
+        // The wire-prefixed tool name (`<server>_<tool>`) is what the model
+        // sees; the upstream MCP server uses the bare name. Strip the prefix
+        // before forwarding to `tools/call`.
+        const upstreamName = mcpToolName.startsWith(`${serverName}_`)
+          ? mcpToolName.slice(serverName.length + 1)
+          : mcpToolName;
+        out = await callMcpTool(server, upstreamName, ev.args ?? {});
+      } else {
+        const handler = handlers.localTools.get(ev.name);
+        if (!handler) {
+          await this.postToolResult(runId, ev.toolUseId, {
+            error: `No local handler registered for tool ${JSON.stringify(ev.name)}`,
+          });
+          return;
+        }
+        const args = handler.parameters
+          ? (handler.parameters.parse?.(ev.args) as Record<string, unknown>) ?? ev.args
+          : ev.args;
+        const result = await handler.execute(args);
+        out = typeof result === "string" ? result : JSON.stringify(result);
+      }
+      await this.postToolResult(runId, ev.toolUseId, { result: out });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const handlerName = describeHandlerName(ev);
       await this.postToolResult(runId, ev.toolUseId, {
-        error: new MantyxToolError(handler.name, message).message,
+        error: new MantyxToolError(handlerName, message).message,
       });
     }
   }
@@ -505,19 +635,19 @@ export class MantyxClient {
 export class AgentSession {
   readonly id: string;
   readonly client: MantyxClient;
-  private readonly handlers: Map<string, LocalTool>;
-  private readonly toolsForResume: ToolRef[] | undefined;
+  private readonly handlers: LocalHandlers;
+  private readonly tools: ToolRef[];
 
   constructor(
     client: MantyxClient,
     id: string,
-    handlers: Map<string, LocalTool>,
-    toolsForResume?: ToolRef[],
+    handlers: LocalHandlers,
+    tools?: ToolRef[],
   ) {
     this.client = client;
     this.id = id;
     this.handlers = handlers;
-    this.toolsForResume = toolsForResume;
+    this.tools = tools ?? [];
   }
 
   async send(
@@ -531,18 +661,17 @@ export class AgentSession {
        * Useful for tagging individual turns (e.g. `{ "trace_id": "abc" }`).
        */
       metadata?: Record<string, string>;
+      /**
+       * Per-message override for `reasoningLevel`. Applies only to this run
+       * and does not mutate the session's stored value.
+       */
+      reasoningLevel?: ReasoningLevel;
     } = {},
   ): Promise<RunResult> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
       method: "POST",
       path: `/agent-sessions/${encodeURIComponent(this.id)}/messages`,
-      body: {
-        prompt,
-        ...(this.toolsForResume ? { tools: serializeToolRefs(this.toolsForResume) } : {}),
-        ...(opts.metadata && Object.keys(opts.metadata).length > 0
-          ? { metadata: opts.metadata }
-          : {}),
-      },
+      body: this.buildSessionMessageBody(prompt, opts),
     });
     return this.client.driveRun(created.runId, this.handlers, {
       ...(opts.onAssistantDelta ? { onAssistantDelta: opts.onAssistantDelta } : {}),
@@ -552,20 +681,31 @@ export class AgentSession {
 
   async *stream(
     prompt: string,
-    opts: { signal?: AbortSignal; metadata?: Record<string, string> } = {},
+    opts: {
+      signal?: AbortSignal;
+      metadata?: Record<string, string>;
+      reasoningLevel?: ReasoningLevel;
+    } = {},
   ): AsyncGenerator<RunEvent, void, void> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
       method: "POST",
       path: `/agent-sessions/${encodeURIComponent(this.id)}/messages`,
-      body: {
-        prompt,
-        ...(this.toolsForResume ? { tools: serializeToolRefs(this.toolsForResume) } : {}),
-        ...(opts.metadata && Object.keys(opts.metadata).length > 0
-          ? { metadata: opts.metadata }
-          : {}),
-      },
+      body: this.buildSessionMessageBody(prompt, opts),
     });
     yield* this.client.streamRunEvents(created.runId, this.handlers, opts.signal);
+  }
+
+  private buildSessionMessageBody(
+    prompt: string,
+    opts: { metadata?: Record<string, string>; reasoningLevel?: ReasoningLevel },
+  ): Record<string, unknown> {
+    const body: Record<string, unknown> = { prompt };
+    if (this.tools.length > 0) body.tools = serializeToolRefs(this.tools);
+    if (opts.metadata && Object.keys(opts.metadata).length > 0) body.metadata = opts.metadata;
+    if (opts.reasoningLevel !== undefined) {
+      body.reasoningLevel = normalizeReasoningLevel(opts.reasoningLevel);
+    }
+    return body;
   }
 
   async history(): Promise<Array<{ role: "user" | "assistant" | "system"; content: string }>> {
@@ -578,7 +718,12 @@ export class AgentSession {
   }
 
   async end(): Promise<void> {
-    await this.client.endSession(this.id);
+    try {
+      await this.client.endSession(this.id);
+    } finally {
+      // Close any MCP transports the session opened.
+      await closeMcpRefs(this.tools);
+    }
   }
 }
 
@@ -598,6 +743,9 @@ function serializeAgentSpec(
   if (spec.agentId) body.agentId = spec.agentId;
   if (spec.name) body.name = spec.name;
   if (spec.modelId) body.modelId = spec.modelId;
+  if (spec.reasoningLevel !== undefined) {
+    body.reasoningLevel = normalizeReasoningLevel(spec.reasoningLevel);
+  }
   if (spec.budgets) body.budgets = spec.budgets;
   if (spec.metadata && Object.keys(spec.metadata).length > 0) body.metadata = spec.metadata;
   if (extra.prompt !== undefined) body.prompt = extra.prompt;
@@ -607,23 +755,130 @@ function serializeAgentSpec(
 
 function serializeToolRefs(tools: ToolRef[]): unknown[] {
   return tools.map((t) => {
-    if (t.kind === "mantyx") return { kind: "mantyx", id: t.id };
-    if (t.kind === "mantyx_plugin") return { kind: "mantyx_plugin", name: t.name };
-    return {
-      kind: "local",
-      name: t.name,
-      description: t.description,
-      parameters: toToolParametersWire(t.parameters),
-    };
+    switch (t.kind) {
+      case "mantyx":
+        return { kind: "mantyx", id: t.id };
+      case "mantyx_plugin":
+        return { kind: "mantyx_plugin", name: t.name };
+      case "local":
+        return {
+          kind: "local",
+          name: t.name,
+          description: t.description,
+          parameters: toToolParametersWire(t.parameters),
+        };
+      case "a2a":
+        return {
+          kind: "a2a",
+          name: t.name,
+          ...(t.description !== undefined ? { description: t.description } : {}),
+          agentCardUrl: t.agentCardUrl,
+          ...(t.headers ? { headers: { ...t.headers } } : {}),
+          ...(t.contextId ? { contextId: t.contextId } : {}),
+        };
+      case "a2a_local": {
+        const card = t._resolvedCard;
+        if (!card) {
+          throw new MantyxError(
+            `defineLocalA2A(${JSON.stringify(t.name)}): agent card has not been resolved yet (was \`runAgent\` / \`createSession\` skipped?)`,
+          );
+        }
+        return {
+          kind: "a2a_local",
+          name: t.name,
+          // The wire ships the resolved A2A Agent Card. Shallow-clone so
+          // consumers can mutate the input later without affecting the
+          // wire payload.
+          agentCard: { ...card },
+        };
+      }
+      case "mcp":
+        return {
+          kind: "mcp",
+          name: t.name,
+          url: t.url,
+          ...(t.headers ? { headers: { ...t.headers } } : {}),
+          ...(t.toolFilter ? { toolFilter: [...t.toolFilter] } : {}),
+        };
+      case "mcp_local": {
+        const resolved = t._resolved;
+        if (!resolved) {
+          throw new MantyxError(
+            `defineLocalMcp(${JSON.stringify(t.name)}): MCP server has not been initialised yet`,
+          );
+        }
+        // The SDK owns naming for `mcp_local` (MANTYX does no prefixing).
+        // We auto-prefix each upstream tool name with the server label so
+        // the model-facing surface is `<server>_<tool>` — mirroring how
+        // MANTYX prefixes for `kind: "mcp"`.
+        const tools = resolved.tools.map((tool) => {
+          const wire: Record<string, unknown> = {
+            name: prefixedMcpToolName(t.name, tool.name),
+            inputSchema: tool.inputSchema,
+          };
+          if (typeof tool.description === "string") wire.description = tool.description;
+          if (tool.annotations) wire.annotations = tool.annotations;
+          return wire;
+        });
+        return {
+          kind: "mcp_local",
+          name: t.name,
+          serverInfo: { ...resolved.serverInfo },
+          tools,
+        };
+      }
+    }
   });
 }
 
-function collectLocalHandlers(tools: ToolRef[]): Map<string, LocalTool> {
-  const map = new Map<string, LocalTool>();
+/** Internal registry of client-resolved handlers, indexed by `kind`. */
+export interface LocalHandlers {
+  /** `kind: "local"` — generic local tools, indexed by tool name. */
+  localTools: Map<string, LocalTool>;
+  /** `kind: "a2a_local"` — local A2A peers, indexed by tool name. */
+  a2aTools: Map<string, LocalA2ATool>;
+  /** `kind: "mcp_local"` — local MCP servers, indexed by server name. */
+  mcpServers: Map<string, LocalMcpServer>;
+}
+
+function collectLocalHandlers(tools: ReadonlyArray<ToolRef>): LocalHandlers {
+  const localTools = new Map<string, LocalTool>();
+  const a2aTools = new Map<string, LocalA2ATool>();
+  const mcpServers = new Map<string, LocalMcpServer>();
   for (const t of tools) {
-    if (isLocalTool(t)) map.set(t.name, t);
+    if (isLocalTool(t)) {
+      localTools.set(t.name, t);
+    } else if (isLocalA2ATool(t)) {
+      a2aTools.set(t.name, t);
+    } else if (isLocalMcpServer(t)) {
+      mcpServers.set(t.name, t);
+    }
   }
-  return map;
+  return { localTools, a2aTools, mcpServers };
+}
+
+function describeHandlerName(ev: LocalToolCallEvent): string {
+  if (ev.kind === "mcp_local" && ev.mcpServer && ev.mcpToolName) {
+    return `${ev.mcpServer}/${ev.mcpToolName}`;
+  }
+  return ev.name;
+}
+
+function normalizeReasoningLevel(level: ReasoningLevel): string | number {
+  if (typeof level === "number") {
+    if (!Number.isFinite(level) || level < 0 || level > 100) {
+      throw new MantyxError(
+        `reasoningLevel must be a string anchor or an integer in 0..100, got ${level}`,
+      );
+    }
+    return Math.trunc(level);
+  }
+  if (level === "off" || level === "low" || level === "medium" || level === "high") {
+    return level;
+  }
+  throw new MantyxError(
+    `reasoningLevel must be one of "off" | "low" | "medium" | "high" or a number 0..100, got ${JSON.stringify(level)}`,
+  );
 }
 
 function sleep(ms: number): Promise<void> {

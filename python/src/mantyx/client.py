@@ -9,18 +9,22 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import (
     Any,
-    Callable,
-    Optional,
     cast,
 )
 
 import httpx
 
+from ._local_resolver import (
+    _SyncMcpPortal,
+    sync_call_a2a,
+    sync_close_mcp_refs,
+    sync_resolve_local_refs,
+)
 from ._schema import parse_args_with_pydantic
 from ._version import SDK_VERSION
 from .errors import (
@@ -32,10 +36,11 @@ from .errors import (
 )
 from .sse import SseEvent, iter_sse
 from .tools import (
-    LocalTool,
-    ToolName,
+    ReasoningLevel,
     ToolRef,
+    _LocalHandlers,
     collect_local_handlers,
+    normalize_reasoning_level,
     serialize_tool_refs,
 )
 
@@ -142,6 +147,9 @@ class MantyxClient:
             timeout=httpx.Timeout(timeout, connect=10.0, read=None),
             headers={"User-Agent": f"mantyx-sdk-python/{SDK_VERSION}"},
         )
+        # Lazily started on the first `mcp_local` use so apps that never use
+        # MCP don't pay the daemon-thread cost. Closed by `close()`.
+        self._mcp_portal = _SyncMcpPortal()
 
     # ------------------------------------------------------------------ ctx
 
@@ -154,6 +162,7 @@ class MantyxClient:
     def close(self) -> None:
         if self._owns_http:
             self._http.close()
+        self._mcp_portal.close()
 
     # --------------------------------------------------------------- Models
 
@@ -173,36 +182,48 @@ class MantyxClient:
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
-        body = _serialize_agent_spec(
-            agent_id=agent_id,
-            system_prompt=system_prompt,
-            model_id=model_id,
-            name=name,
-            tools=list(tools) if tools else None,
-            budgets=budgets,
-            metadata=metadata,
-        )
-        if prompt is not None:
-            body["prompt"] = prompt
-        if messages is not None:
-            body["messages"] = list(messages)
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        # Resolve every `a2a_local` agent card and open every `mcp_local`
+        # transport before submitting; the resolver mutates the refs in
+        # place so the subsequent `_serialize_agent_spec` reads the
+        # resolved data.
+        sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
+        try:
+            body = _serialize_agent_spec(
+                agent_id=agent_id,
+                system_prompt=system_prompt,
+                model_id=model_id,
+                name=name,
+                tools=tools_list,
+                reasoning_level=reasoning_level,
+                budgets=budgets,
+                metadata=metadata,
+            )
+            if prompt is not None:
+                body["prompt"] = prompt
+            if messages is not None:
+                body["messages"] = list(messages)
 
-        created = self._request("POST", "/agent-runs", body)
-        run_id = str((created or {}).get("runId") or "")
-        if not run_id:
-            raise MantyxError("server did not return a runId")
-        handlers = collect_local_handlers(list(tools) if tools else None)
-        return self._drive_run(
-            run_id=run_id,
-            handlers=handlers,
-            on_assistant_delta=on_assistant_delta,
-            on_event=on_event,
-        )
+            created = self._request("POST", "/agent-runs", body)
+            run_id = str((created or {}).get("runId") or "")
+            if not run_id:
+                raise MantyxError("server did not return a runId")
+            handlers = collect_local_handlers(tools_list)
+            return self._drive_run(
+                run_id=run_id,
+                handlers=handlers,
+                on_assistant_delta=on_assistant_delta,
+                on_event=on_event,
+            )
+        finally:
+            # One-shot runs own their MCP transports; close on exit.
+            sync_close_mcp_refs(tools_list)
 
     def stream_agent(
         self,
@@ -214,15 +235,21 @@ class MantyxClient:
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Iterator[RunEvent]:
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
+        # We can't `try/finally` cleanup with an iterator return — wrap it
+        # in a generator that closes on exit.
         body = _serialize_agent_spec(
             agent_id=agent_id,
             system_prompt=system_prompt,
             model_id=model_id,
             name=name,
-            tools=list(tools) if tools else None,
+            tools=tools_list,
+            reasoning_level=reasoning_level,
             budgets=budgets,
             metadata=metadata,
         )
@@ -234,9 +261,17 @@ class MantyxClient:
         created = self._request("POST", "/agent-runs", body)
         run_id = str((created or {}).get("runId") or "")
         if not run_id:
+            sync_close_mcp_refs(tools_list)
             raise MantyxError("server did not return a runId")
-        handlers = collect_local_handlers(list(tools) if tools else None)
-        return self._stream_events(run_id, handlers)
+        handlers = collect_local_handlers(tools_list)
+
+        def _gen() -> Iterator[RunEvent]:
+            try:
+                yield from self._stream_events(run_id, handlers)
+            finally:
+                sync_close_mcp_refs(tools_list)
+
+        return _gen()
 
     def cancel_run(self, run_id: str) -> None:
         self._request("POST", f"/agent-runs/{_quote(run_id)}/cancel")
@@ -251,24 +286,35 @@ class MantyxClient:
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AgentSession:
-        body = _serialize_agent_spec(
-            agent_id=agent_id,
-            system_prompt=system_prompt,
-            model_id=model_id,
-            name=name,
-            tools=list(tools) if tools else None,
-            budgets=budgets,
-            metadata=metadata,
-        )
-        created = self._request("POST", "/agent-sessions", body) or {}
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        # Resolve once at session creation; the session keeps the resolved
+        # cards / live MCP connections for its lifetime.
+        sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
+        try:
+            body = _serialize_agent_spec(
+                agent_id=agent_id,
+                system_prompt=system_prompt,
+                model_id=model_id,
+                name=name,
+                tools=tools_list,
+                reasoning_level=reasoning_level,
+                budgets=budgets,
+                metadata=metadata,
+            )
+            created = self._request("POST", "/agent-sessions", body) or {}
+        except Exception:
+            sync_close_mcp_refs(tools_list)
+            raise
         session_id = str(created.get("sessionId") or "")
         if not session_id:
+            sync_close_mcp_refs(tools_list)
             raise MantyxError("server did not return a sessionId")
-        handlers = collect_local_handlers(list(tools) if tools else None)
-        return AgentSession(self, id=session_id, handlers=handlers)
+        handlers = collect_local_handlers(tools_list)
+        return AgentSession(self, id=session_id, handlers=handlers, tools_for_resume=tools_list)
 
     def resume_session(
         self,
@@ -278,13 +324,11 @@ class MantyxClient:
     ) -> AgentSession:
         # Verify the session exists.
         self.get_session_info(session_id)
-        handlers = collect_local_handlers(list(tools) if tools else None)
-        return AgentSession(
-            self,
-            id=session_id,
-            handlers=handlers,
-            tools_for_resume=list(tools) if tools else None,
-        )
+        tools_list: list[ToolRef] | None = list(tools) if tools else None
+        if tools_list:
+            sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
+        handlers = collect_local_handlers(tools_list)
+        return AgentSession(self, id=session_id, handlers=handlers, tools_for_resume=tools_list)
 
     def end_session(self, session_id: str) -> None:
         self._request("DELETE", f"/agent-sessions/{_quote(session_id)}")
@@ -299,7 +343,7 @@ class MantyxClient:
         self,
         *,
         run_id: str,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
@@ -331,7 +375,7 @@ class MantyxClient:
     def _stream_events(
         self,
         run_id: str,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
     ) -> Iterator[RunEvent]:
         """Open the SSE stream and yield typed events. Reconnects on
         non-terminal disconnects via ``Last-Event-ID`` + ``?lastSeq=``."""
@@ -378,22 +422,66 @@ class MantyxClient:
         self,
         run_id: str,
         ev: RunEvent,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
     ) -> None:
         name = str(ev.data.get("name") or "")
         tool_use_id = str(ev.data.get("toolUseId") or "")
         if not tool_use_id:
             return
-        handler = handlers.get(name)
-        if handler is None:
-            self._post_tool_result(
-                run_id, tool_use_id, error=f"No local handler registered for tool {name!r}"
-            )
-            return
+        kind = str(ev.data.get("kind") or "local")
         try:
+            if kind == "a2a_local":
+                a2a = handlers.a2a_tools.get(name)
+                if a2a is None:
+                    self._post_tool_result(
+                        run_id,
+                        tool_use_id,
+                        error=f"No local A2A handler registered for tool {name!r}",
+                    )
+                    return
+                args = ev.data.get("args") or {}
+                message = ""
+                if isinstance(args, dict):
+                    raw_msg = args.get("message")
+                    message = raw_msg if isinstance(raw_msg, str) else ""
+                text = sync_call_a2a(a2a, message, http=self._http)
+                self._post_tool_result(run_id, tool_use_id, result=text)
+                return
+            if kind == "mcp_local":
+                server_name = str(ev.data.get("mcpServer") or "")
+                tool_name = str(ev.data.get("mcpToolName") or "")
+                server = handlers.mcp_servers.get(server_name)
+                if server is None or server._resolved is None or server._resolved.call_sync is None:
+                    self._post_tool_result(
+                        run_id,
+                        tool_use_id,
+                        error=f"No local MCP server registered as {server_name!r}",
+                    )
+                    return
+                # The wire-prefixed tool name (`<server>_<tool>`) is what the
+                # model sees; the upstream MCP server uses the bare name.
+                # Strip the prefix before forwarding to `tools/call`.
+                upstream_name = (
+                    tool_name[len(server_name) + 1 :]
+                    if tool_name.startswith(f"{server_name}_")
+                    else tool_name
+                )
+                args_in = ev.data.get("args") or ev.data.get("input") or {}
+                args_dict: dict[str, Any] = (
+                    cast(dict[str, Any], args_in) if isinstance(args_in, dict) else {}
+                )
+                text = server._resolved.call_sync(upstream_name, args_dict)
+                self._post_tool_result(run_id, tool_use_id, result=text)
+                return
+            handler = handlers.local_tools.get(name)
+            if handler is None:
+                self._post_tool_result(
+                    run_id, tool_use_id, error=f"No local handler registered for tool {name!r}"
+                )
+                return
             args = parse_args_with_pydantic(
                 handler.parameters,
-                cast(Optional[dict[str, Any]], ev.data.get("args") or ev.data.get("input")),
+                cast(dict[str, Any] | None, ev.data.get("args") or ev.data.get("input")),
             )
             from .tools import call_handler_sync
 
@@ -404,7 +492,7 @@ class MantyxClient:
             self._post_tool_result(
                 run_id,
                 tool_use_id,
-                error=MantyxToolError(handler.name, str(e)).message,
+                error=MantyxToolError(_describe_handler(ev, name), str(e)).message,
             )
 
     def _post_tool_result(
@@ -492,12 +580,12 @@ class AgentSession:
         client: MantyxClient,
         *,
         id: str,
-        handlers: Mapping[ToolName, LocalTool],
+        handlers: _LocalHandlers,
         tools_for_resume: list[ToolRef] | None = None,
     ) -> None:
         self.client = client
         self.id = id
-        self._handlers: dict[ToolName, LocalTool] = dict(handlers)
+        self._handlers = handlers
         self._tools_for_resume = tools_for_resume
 
     def send(
@@ -505,14 +593,11 @@ class AgentSession:
         prompt: str,
         *,
         metadata: Mapping[str, str] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
-        body: dict[str, Any] = {"prompt": prompt}
-        if self._tools_for_resume:
-            body["tools"] = serialize_tool_refs(self._tools_for_resume)
-        if metadata:
-            body["metadata"] = dict(metadata)
+        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
         )
@@ -531,12 +616,9 @@ class AgentSession:
         prompt: str,
         *,
         metadata: Mapping[str, str] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
     ) -> Iterator[RunEvent]:
-        body: dict[str, Any] = {"prompt": prompt}
-        if self._tools_for_resume:
-            body["tools"] = serialize_tool_refs(self._tools_for_resume)
-        if metadata:
-            body["metadata"] = dict(metadata)
+        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
         )
@@ -544,6 +626,23 @@ class AgentSession:
         if not run_id:
             raise MantyxError("server did not return a runId")
         return self.client._stream_events(run_id, self._handlers)
+
+    def _build_message_body(
+        self,
+        prompt: str,
+        *,
+        metadata: Mapping[str, str] | None,
+        reasoning_level: ReasoningLevel | None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"prompt": prompt}
+        if self._tools_for_resume:
+            body["tools"] = serialize_tool_refs(self._tools_for_resume)
+        if metadata:
+            body["metadata"] = dict(metadata)
+        normalized = normalize_reasoning_level(reasoning_level)
+        if normalized is not None:
+            body["reasoningLevel"] = normalized
+        return body
 
     def history(self) -> list[dict[str, str]]:
         info = self.client.get_session_info(self.id)
@@ -553,7 +652,11 @@ class AgentSession:
         return self.client.get_session_info(self.id)
 
     def end(self) -> None:
-        self.client.end_session(self.id)
+        try:
+            self.client.end_session(self.id)
+        finally:
+            # Close any MCP transports the session opened.
+            sync_close_mcp_refs(self._tools_for_resume)
 
 
 # -------------------------------------------------------------------- Helpers
@@ -585,6 +688,7 @@ def _serialize_agent_spec(
     model_id: str | None,
     name: str | None,
     tools: list[ToolRef] | None,
+    reasoning_level: ReasoningLevel | None,
     budgets: Mapping[str, Any] | None,
     metadata: Mapping[str, str] | None,
 ) -> dict[str, Any]:
@@ -599,11 +703,23 @@ def _serialize_agent_spec(
         body["name"] = name
     if model_id:
         body["modelId"] = model_id
+    normalized_level = normalize_reasoning_level(reasoning_level)
+    if normalized_level is not None:
+        body["reasoningLevel"] = normalized_level
     if budgets:
         body["budgets"] = dict(budgets)
     if metadata:
         body["metadata"] = dict(metadata)
     return body
+
+
+def _describe_handler(ev: RunEvent, fallback: str) -> str:
+    if str(ev.data.get("kind") or "") == "mcp_local":
+        s = str(ev.data.get("mcpServer") or "")
+        t = str(ev.data.get("mcpToolName") or "")
+        if s and t:
+            return f"{s}/{t}"
+    return fallback
 
 
 def _to_run_event(sse_ev: SseEvent, last_seq: int) -> RunEvent:
@@ -675,7 +791,7 @@ def _parse_session_info(body: Mapping[str, Any]) -> SessionInfo:
         status=str(body.get("status") or ""),
         created_at=str(body.get("createdAt") or ""),
         last_used_at=str(body.get("lastUsedAt") or ""),
-        ended_at=cast(Optional[str], body.get("endedAt")),
+        ended_at=cast(str | None, body.get("endedAt")),
         agent_spec=cast(dict[str, Any], body.get("agentSpec") or {}),
         messages=messages,
         metadata=metadata,

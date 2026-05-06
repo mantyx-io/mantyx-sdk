@@ -3,8 +3,9 @@
 The official Python SDK for the [MANTYX](https://mantyx.com) agent runtime. Define ephemeral agents that mix server-side MANTYX tools with locally-executed tools, run them remotely, and stream events back into your process.
 
 - LLM loop runs on MANTYX (BYOK or platform-hosted models).
-- Server-side tools (`mantyx`, `mantyx_plugin`) execute inside MANTYX.
-- Local tools execute inside *your* Python process; the SDK shuttles inputs and outputs over an SSE stream + a tool-result POST.
+- Server-side tools (`mantyx`, `mantyx_plugin`, `mantyx_a2a`, `mantyx_mcp`) execute inside MANTYX.
+- Client-resolved tools (`define_local_tool`, `define_local_a2a`, `define_local_mcp`) execute inside *your* Python process; the SDK shuttles inputs and outputs over an SSE stream + a tool-result POST.
+- Tune the LLM's thinking budget per run with `reasoning_level` (`"off" | "low" | "medium" | "high"` or an int 0..100).
 - Sync **and** async clients (`MantyxClient`, `AsyncMantyxClient`), both backed by [`httpx`](https://www.python-httpx.org/).
 - One-shot runs and multi-turn sessions, both with persisted observability.
 - Authenticated with a single workspace API key.
@@ -19,7 +20,7 @@ pip install mantyx-sdk
 # or: poetry add mantyx-sdk
 ```
 
-Requires Python 3.9+ and runs on macOS, Linux, and Windows. The runtime dependencies are [`httpx`](https://www.python-httpx.org/) and [`pydantic`](https://docs.pydantic.dev/) v2.
+Requires Python 3.10+ and runs on macOS, Linux, and Windows. The runtime dependencies are [`httpx`](https://www.python-httpx.org/), [`pydantic`](https://docs.pydantic.dev/) v2, the official [`mcp`](https://pypi.org/project/mcp/) package (used internally by `define_local_mcp`), and [`anyio`](https://anyio.readthedocs.io/) (sync/async bridge for the MCP client).
 
 ## Quickstart
 
@@ -279,8 +280,151 @@ The async client returns awaitable / async-iterator equivalents (e.g. `await asy
 | Helper                       | Use case                                                              |
 | ---------------------------- | --------------------------------------------------------------------- |
 | `define_local_tool(...)`     | Define a local tool with a Pydantic parameter schema and handler.     |
+| `define_local_a2a(...)`      | Register an A2A peer by `agent_card_url`; the SDK fetches and dials it. |
+| `define_local_mcp(...)`      | Declare an MCP server by URL or stdio command; the SDK manages it.    |
 | `mantyx_tool(id)`            | Reference an existing MANTYX workspace tool by id.                    |
 | `mantyx_plugin_tool(name)`   | Reference an installed platform plugin tool by `@plugin/tool` name.   |
+| `mantyx_a2a(...)`            | Reference a remote A2A peer MANTYX dials directly.                    |
+| `mantyx_mcp(...)`            | Reference a remote MCP server (Streamable HTTP) MANTYX proxies.       |
+
+#### Agent2Agent delegation
+
+Two flavours, addressed identically by the model with `{ "message": str }`:
+
+```python
+from mantyx import define_local_a2a, mantyx_a2a
+
+remote_billing = mantyx_a2a(
+    name="billing_agent",
+    agent_card_url="https://billing.example.com/.well-known/agent-card.json",
+    description="Delegate billing questions to the public Acme billing agent.",
+    headers={"Authorization": "Bearer ..."},
+)
+
+local_hr = define_local_a2a(
+    name="intranet_hr_agent",
+    agent_card_url="https://hr.intranet.acme/.well-known/agent-card.json",
+    headers={"Authorization": "Bearer ..."},  # optional
+)
+```
+
+`mantyx_a2a` is server-resolved: MANTYX dials `agent_card_url` over A2A's
+`message/send` RPC and forwards the reply as the tool result.
+
+`define_local_a2a` is client-resolved but **URL-only**: you pass the
+`agent_card_url` (and optional `headers`), and the SDK takes care of the
+rest. On the first run / session, the SDK fetches the Agent Card with
+`httpx`, ships it inline with the agent spec (so MANTYX never reaches
+your intranet), and on every `local_tool_call` event with
+`kind: "a2a_local"` it speaks A2A's JSON-RPC `message/send` against
+`agent_card.url`, returning the reply text as the tool result. The
+fetched card is cached for the duration of the run / session.
+
+##### Exposing an agent over A2A
+
+The inverse direction also works: wrap a MANTYX agent (ephemeral spec or a
+persisted `agent_id`) and serve it as an Agent2Agent peer using the official
+[`a2a-sdk`](https://pypi.org/project/a2a-sdk/) Python package mounted on
+Starlette + uvicorn.
+
+```python
+import asyncio
+from mantyx import AsyncMantyxClient
+from mantyx.a2a_server import build_agent_card, serve_agent_over_a2a
+
+async def main() -> None:
+    async with AsyncMantyxClient(api_key="...", workspace_slug="acme") as client:
+        handle = await serve_agent_over_a2a(
+            client=client,
+            agent_card=build_agent_card(
+                name="Acme Support",
+                description="Customer support questions.",
+                version="1.0.0",
+                public_url="http://localhost:4000",
+            ),
+            agent_id="agent_cm6abc123",  # or system_prompt=..., model_id=..., tools=[...]
+            port=4000,
+        )
+        print(f"A2A peer up on {handle.url}")
+        await handle.serve_forever()
+
+asyncio.run(main())
+```
+
+`a2a-sdk[http-server]` and `uvicorn` ship as the **`[a2a-server]` extra**
+so the base wheel stays slim:
+
+```bash
+pip install "mantyx-sdk[a2a-server]"
+```
+
+Each unique A2A `context_id` opens a long-lived MANTYX session by default,
+so multi-turn `message/send` calls share conversational history. Pass
+`conversation="stateless"` to reduce every A2A request to a one-shot
+`run_agent` call. For lower-level integration (mounting the executor in
+your own Starlette / FastAPI app) `mantyx.a2a_server` also exports a
+`MantyxAgentExecutor` class implementing `a2a.server.agent_execution.AgentExecutor`.
+
+#### MCP connectors
+
+Tools surface to the model as `<server>_<tool>` regardless of flavour:
+
+```python
+from mantyx import define_local_mcp, mantyx_mcp
+
+
+remote_github = mantyx_mcp(
+    name="github",
+    url="https://api.example.com/mcp",
+    headers={"Authorization": "Bearer ..."},
+    tool_filter=["create_issue", "list_issues"],  # optional allow-list
+)
+
+# Streamable HTTP transport
+local_fs_http = define_local_mcp(
+    name="fs",
+    url="http://localhost:8080/mcp",
+    headers={"Authorization": "Bearer ..."},  # optional
+)
+
+# stdio transport
+local_fs_stdio = define_local_mcp(
+    name="fs",
+    command="mcp-server-filesystem",
+    args=["."],
+    env={"FOO": "bar"},  # optional
+    cwd="/workspace",     # optional
+)
+```
+
+`mantyx_mcp` is server-resolved: MANTYX speaks Streamable HTTP MCP to the
+upstream, lists its catalog, and proxies tool calls — prefixing every
+discovered tool name as `<server>_<tool>`.
+
+`define_local_mcp` is client-resolved but **URL-only** (or stdio
+`command`-only). You point at the server and the SDK does the rest using
+the official [`mcp`](https://pypi.org/project/mcp/) package: it opens the
+transport, runs `Initialize` + `tools/list` on the first `run_agent` /
+`session.send`, ships the resolved catalog (with `<server>_<tool>` names)
+inline so MANTYX can render the tools to the model, forwards every
+`local_tool_call` event with `kind: "mcp_local"` to the live MCP session
+via `tools/call`, and closes the transport when the run / session ends
+(`session.end()` for sessions, automatically for one-shot runs). Sync
+clients drive the async MCP SDK transparently via an `anyio.BlockingPortal`.
+
+#### Reasoning effort (`reasoning_level`)
+
+Pass `reasoning_level` on `run_agent` / `stream_agent` / `create_session`
+(and per-message via `session.send(prompt, reasoning_level=...)`) to dial
+provider thinking. Accepts a string anchor (`"off"`, `"low"`, `"medium"`,
+`"high"`) or an integer in `[0, 100]`. The SDK forwards the value as-is;
+MANTYX maps it onto each LLM's native dial — see
+`docs/agent-runs-protocol.md` §4.4.
+
+```python
+client.run_agent(system_prompt="...", prompt="...", reasoning_level="medium")
+client.run_agent(system_prompt="...", prompt="...", reasoning_level=80)
+```
 
 ### Errors
 
@@ -298,6 +442,8 @@ Self-contained example projects live under [`examples/`](./examples/):
 - `examples/oneshot-local-tool` — minimal one-shot run with a local tool.
 - `examples/session-chat` — interactive REPL on top of a session.
 - `examples/mixed-tools` — combines local, MANTYX, and plugin tools.
+- `examples/a2a-tools` — combines `mantyx_a2a` (remote) and `define_local_a2a` (intranet) peers.
+- `examples/mcp-tools` — combines `mantyx_mcp` (remote) and `define_local_mcp` (in-process).
 - `examples/streaming` — token streaming to stdout.
 - `examples/list-models` — model catalog + pick-and-run.
 - `examples/agent-by-id` — trigger a persisted MANTYX agent by id.

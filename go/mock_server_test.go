@@ -29,6 +29,12 @@ type mockServer struct {
 	runs                   map[string]*runState
 	sessions               map[string][]Message
 	sessionScripts         map[string]*runScript
+
+	// A2A test peer (served at /a2a/...).
+	a2aAgentCard    map[string]any // GET /a2a/agent-card.json
+	a2aReplyText    string         // text portion of POST /a2a/rpc reply
+	lastA2ARequest  []byte
+	a2aAuthHeader   string
 }
 
 type runScript struct {
@@ -78,6 +84,10 @@ func (m *mockServer) close() { m.srv.Close() }
 func (m *mockServer) baseURL() string { return m.srv.URL }
 
 func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/a2a/") {
+		m.handleA2A(w, r)
+		return
+	}
 	m.mu.Lock()
 	m.lastAuthHeader = r.Header.Get("Authorization")
 	failAuth := m.failAuth
@@ -160,6 +170,48 @@ func (m *mockServer) handleAgentRuns(w http.ResponseWriter, r *http.Request, res
 			state.mu.Unlock()
 		}
 		m.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "cancelled"})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (m *mockServer) handleA2A(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/a2a/agent-card.json" && r.Method == http.MethodGet:
+		m.mu.Lock()
+		card := m.a2aAgentCard
+		m.a2aAuthHeader = r.Header.Get("Authorization")
+		m.mu.Unlock()
+		if card == nil {
+			card = map[string]any{
+				"name": "mock-a2a-peer",
+				"url":  m.srv.URL + "/a2a/rpc",
+			}
+		}
+		m.writeJSON(w, http.StatusOK, card)
+	case r.URL.Path == "/a2a/rpc" && r.Method == http.MethodPost:
+		raw, _ := io.ReadAll(r.Body)
+		m.mu.Lock()
+		m.lastA2ARequest = raw
+		m.a2aAuthHeader = r.Header.Get("Authorization")
+		text := m.a2aReplyText
+		m.mu.Unlock()
+		if text == "" {
+			text = "ok"
+		}
+		var rpc map[string]any
+		_ = json.Unmarshal(raw, &rpc)
+		m.writeJSON(w, http.StatusOK, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      rpc["id"],
+			"result": map[string]any{
+				"messageId": "reply",
+				"role":      "agent",
+				"parts": []any{
+					map[string]any{"kind": "text", "text": text},
+				},
+			},
+		})
 	default:
 		http.NotFound(w, r)
 	}

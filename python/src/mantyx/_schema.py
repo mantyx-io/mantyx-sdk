@@ -8,12 +8,12 @@ already-shaped JSON Schema dicts. Anything else is rejected with a
 
 from __future__ import annotations
 
-from typing import Any, Union
+from typing import Any
 
 from pydantic import BaseModel
 
 JsonSchema = dict[str, Any]
-ParametersInput = Union[type[BaseModel], JsonSchema, None]
+ParametersInput = type[BaseModel] | JsonSchema | None
 
 
 def _strip_pydantic_metadata(schema: JsonSchema) -> JsonSchema:

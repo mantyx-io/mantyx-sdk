@@ -1,0 +1,20 @@
+{
+  "name": "mantyx-sdk-example-a2a-expose",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "^0.3.0",
+    "@mantyx/sdk": "file:../..",
+    "express": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

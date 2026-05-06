@@ -25,13 +25,17 @@ console.log(result.text);
 
 ## Adding tools
 
-Three flavours, all carried inside the agent spec:
+Seven flavours, all carried inside the agent spec. The split is along **who can reach the resource** — server-resolved tools run inside MANTYX; client-resolved tools run inside your SDK process and shuttle results back over the agent loop.
 
 | `kind` | Resolved by | Notes |
 | --- | --- | --- |
 | `mantyx` | server | A workspace `Tool` row referenced by id. See [MANTYX tools](/docs/tools/mantyx/). |
 | `mantyx_plugin` | server | A platform plugin tool referenced by `@plugin/tool` name. See [Plugin tools](/docs/tools/plugin/). |
+| `a2a` | server | A remote [Agent2Agent](/docs/tools/a2a/) peer MANTYX dials directly. |
+| `mcp` | server | A remote [MCP](/docs/tools/mcp/) server (Streamable HTTP) MANTYX lists and proxies. |
 | `local` | client | Defined and executed inside your SDK process. See [Local tools](/docs/tools/local/). |
+| `a2a_local` | client | An [A2A](/docs/tools/a2a/) peer only the SDK can reach (intranet, on-device). |
+| `mcp_local` | client | An [MCP](/docs/tools/mcp/) server only the SDK can reach (stdio, intranet). |
 
 ```ts
 import { defineLocalTool, mantyxTool, mantyxPluginTool } from "@mantyx/sdk";
@@ -58,6 +62,18 @@ await client.runAgent({
 ## Picking a model
 
 Pass `modelId` (TypeScript / Python) or `ModelID` (Go) to override the workspace default. See [Models](/docs/models/) for the supported shorthand syntax.
+
+## Tuning thinking effort
+
+Pass `reasoningLevel` (TypeScript) / `reasoning_level` (Python) / `ReasoningLevel` (Go) to dial provider extended thinking on reasoning models. The value is forwarded unchanged to the server, which maps it onto each LLM's native dial. Accepts a string anchor (`"off"`, `"low"`, `"medium"`, `"high"`) or an integer in `[0, 100]` — see [Reasoning level](/docs/reasoning/) for the full table.
+
+```ts
+await client.runAgent({
+  systemPrompt: "...",
+  prompt: "Plan a multi-week migration.",
+  reasoningLevel: "high",
+});
+```
 
 ## Budgeting tool turns
 

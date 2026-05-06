@@ -25,9 +25,9 @@ the one that matches your stack.
 | --- | --- | --- | --- |
 | Source | [`ts/`](./ts) | [`go/`](./go) | [`python/`](./python) |
 | Package | `@mantyx/sdk` | `github.com/mantyx-io/mantyx-go-sdk` | `mantyx-sdk` |
-| Install | `npm install @mantyx/sdk zod` | `go get github.com/mantyx-io/mantyx-go-sdk` | `pip install mantyx-sdk` |
+| Install | `npm install @mantyx/sdk` (bundles `zod` + `@modelcontextprotocol/sdk`) | `go get github.com/mantyx-io/mantyx-go-sdk` | `pip install mantyx-sdk` |
 | Import | `import { MantyxClient } from "@mantyx/sdk"` | `import mantyx "github.com/mantyx-io/mantyx-go-sdk"` | `import mantyx` |
-| Min runtime | Node.js 18.17+ | Go 1.22+ | Python 3.9+ |
+| Min runtime | Node.js 18.17+ | Go 1.24+ | Python 3.10+ |
 | Local tool params | Zod schema | tagged Go struct (via `invopop/jsonschema`) | Pydantic v2 model |
 | Async client | native `Promise` | `context.Context` | `AsyncMantyxClient` (httpx) |
 | Examples | [`ts/examples/`](./ts/examples) | [`go/examples/`](./go/examples) | [`python/examples/`](./python/examples) |
@@ -45,8 +45,19 @@ at <https://mantyx-io.github.io/mantyx-sdk/>.
   that single run.
 - **Maintain conversational sessions** — multi-turn agent runs whose history
   persists on the server, with optional per-turn tool refresh.
-- **Mix remote and local tools** — `mantyx` (workspace `Tool`), `mantyx_plugin`
-  (platform plugin tools), and `local` (executed in your process).
+- **Mix remote and local tools** — server-resolved `mantyx` (workspace
+  `Tool`), `mantyx_plugin` (platform plugin tools), `a2a` (Agent2Agent
+  peers), and `mcp` (Model Context Protocol servers); client-resolved
+  `local`, `a2a_local`, and `mcp_local` execute in your process and the
+  SDK shuttles results back over the agent loop.
+- **Expose a MANTYX agent as an A2A peer** — wrap an ephemeral spec or a
+  persisted `agentId` with the official A2A library (`@a2a-js/sdk`,
+  `a2a-sdk`, or `a2a-go`) so other agents can discover and call it via
+  `/.well-known/agent-card.json` + `message/send`. See `a2a-server` /
+  `mantyx.a2a_server` / `a2asrv` in each SDK.
+- **Tune thinking effort** — pass `reasoningLevel` /
+  `reasoning_level` (string anchor `"off"|"low"|"medium"|"high"` or an
+  integer in `[0, 100]`) to dial the LLM's reasoning budget per run.
 - **Stream tokens** — assistant deltas, thinking deltas, server tool results,
   local tool calls, and the terminal `result` event over SSE.
 - **Pick a model** — choose a workspace BYOK provider, a specific vendor
@@ -212,16 +223,18 @@ This directory is the unified source for the MANTYX SDK monorepo. Each SDK
 subfolder is **self-contained** and is what gets published to npm / shipped as
 a Go module / uploaded to PyPI:
 
-- [`ts/`](./ts) — TypeScript SDK (`@mantyx/sdk`) + Vitest tests + 6
-  self-contained example projects under `ts/examples/`.
+- [`ts/`](./ts) — TypeScript SDK (`@mantyx/sdk`) + Vitest tests +
+  self-contained example projects under `ts/examples/` (including
+  `a2a-tools/` and `mcp-tools/`).
 - [`go/`](./go) — Go SDK (`github.com/mantyx-io/mantyx-go-sdk`) + `httptest`
-  tests + 6 example modules under `go/examples/`, each with its own
-  `go.mod` and a `replace` directive that points back at this folder for
-  in-tree builds.
+  tests + example modules under `go/examples/` (including `a2a-tools/`
+  and `mcp-tools/`), each with its own `go.mod` and a `replace` directive
+  that points back at this folder for in-tree builds.
 - [`python/`](./python) — Python SDK (`mantyx-sdk` on PyPI, imported as
   `import mantyx`) — sync + async clients on `httpx`, Pydantic v2 for local
-  tool parameters, `pytest` suite under `python/tests/`, and 6 example
-  projects under `python/examples/`.
+  tool parameters, `pytest` suite under `python/tests/`, and example
+  projects under `python/examples/` (including `a2a-tools/` and
+  `mcp-tools/`).
 - [`site/`](./site) — Astro Starlight landing page + documentation site;
   deployed to GitHub Pages via [`.github/workflows/docs.yml`](./.github/workflows/docs.yml).
   Run locally with `cd site && npm install && npm run dev`.

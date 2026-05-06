@@ -32,6 +32,14 @@ export type MockEvent =
       toolUseId: string;
       name: string;
       args: Record<string, unknown>;
+      /** Discriminator forwarded to the SDK; defaults to `"local"` (omitted on the wire). */
+      kind?: "local" | "a2a_local" | "mcp_local";
+      /** Echo of the SDK-shipped A2A Agent Card (for `kind: "a2a_local"`). */
+      agentCard?: Record<string, unknown>;
+      mcpServer?: string;
+      mcpToolName?: string;
+      /** Echo of the SDK-shipped MCP `Implementation` block (for `kind: "mcp_local"`). */
+      mcpServerInfo?: Record<string, unknown>;
       /** When set, hold the SSE stream until the SDK posts a tool result. */
       awaitToolResult?: boolean;
     }
@@ -66,6 +74,12 @@ export class MockServer {
   lastSessionCreateBody: Record<string, unknown> | null = null;
   /** Latest body posted to POST /agent-sessions/:id/messages (turn). */
   lastSessionMessageBody: Record<string, unknown> | null = null;
+  /** Override for `GET /a2a/agent-card.json`. Defaults to `defaultMockAgentCard(baseUrl)`. */
+  a2aAgentCardResponse: Record<string, unknown> | null = null;
+  /** Override for the text returned by `POST /a2a/rpc`. Defaults to "peer reply to: <message>". */
+  a2aReplyText: string | null = null;
+  /** Latest A2A `message/send` body received. */
+  lastA2ARequest: { method: string; message: string; headers: Record<string, unknown> } | null = null;
   models: Array<Record<string, unknown>> = [
     {
       id: "platform:demo",
@@ -132,6 +146,42 @@ export class MockServer {
     }
     const url = new URL(req.url ?? "/", this.baseUrl());
     const parts = url.pathname.split("/").filter(Boolean);
+
+    // ── A2A peer simulation routes ──────────────────────────────────────
+    // Tests can use these to exercise the URL-only `defineLocalA2A` flow
+    // end-to-end without depending on a live A2A peer.
+    if (url.pathname === "/a2a/agent-card.json" && req.method === "GET") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(this.a2aAgentCardResponse ?? defaultMockAgentCard(this.baseUrl())));
+      return;
+    }
+    if (url.pathname === "/a2a/rpc" && req.method === "POST") {
+      const body = (await readJson(req)) as {
+        id: number | string;
+        method: string;
+        params: { message: { parts: Array<{ kind?: string; type?: string; text?: string }> } };
+      };
+      const text = (body.params?.message?.parts ?? [])
+        .map((p) => (typeof p.text === "string" ? p.text : ""))
+        .join("\n");
+      this.lastA2ARequest = { method: body.method, message: text, headers: req.headers };
+      const reply = this.a2aReplyText ?? `peer reply to: ${text}`;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            kind: "message",
+            role: "agent",
+            messageId: `m_${randomUUID()}`,
+            parts: [{ kind: "text", text: reply }],
+          },
+        }),
+      );
+      return;
+    }
+
     // expected: /api/v1/workspaces/<slug>/<rest...>
     if (parts.length < 4 || parts[0] !== "api" || parts[1] !== "v1" || parts[2] !== "workspaces") {
       res.statusCode = 404;
@@ -303,15 +353,18 @@ export class MockServer {
     while (run.pendingScript.length > 0) {
       const ev = run.pendingScript.shift()!;
       if (ev.type === "local_tool_call" && ev.awaitToolResult) {
-        // Emit the local_tool_call event, then pause until tool result arrives.
-        this.appendEvent(run, ev.type, {
-          toolUseId: ev.toolUseId,
-          name: ev.name,
-          args: ev.args,
-        });
+        const { type: _type, awaitToolResult: _await, ...payload } = ev;
+        void _type;
+        void _await;
+        this.appendEvent(run, "local_tool_call", payload as Record<string, unknown>);
         await new Promise<void>((resolve) => {
           run.pendingToolResults.set(ev.toolUseId, () => resolve());
         });
+      } else if (ev.type === "local_tool_call") {
+        const { type: _type, awaitToolResult: _await, ...payload } = ev;
+        void _type;
+        void _await;
+        this.appendEvent(run, "local_tool_call", payload as Record<string, unknown>);
       } else {
         const { type, ...payload } = ev as { type: string } & Record<string, unknown>;
         this.appendEvent(run, type, payload);
@@ -412,6 +465,18 @@ function readJson(req: IncomingMessage): Promise<unknown> {
     });
     req.on("error", reject);
   });
+}
+
+function defaultMockAgentCard(baseUrl: string): Record<string, unknown> {
+  return {
+    name: "Acme HR",
+    description: "Answers HR policy and PTO questions.",
+    url: `${baseUrl}/a2a/rpc`,
+    protocolVersion: "0.3.0",
+    skills: [
+      { id: "pto_lookup", name: "PTO lookup", description: "Find remaining PTO days." },
+    ],
+  };
 }
 
 function lastResultText(script: MockRunScript): string | null {

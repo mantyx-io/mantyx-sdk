@@ -80,12 +80,14 @@ for ev := range ch {
 | Event | When | Payload |
 | --- | --- | --- |
 | `assistant_delta` | Streaming assistant tokens | `{ text }` |
-| `thinking_delta` | Some providers expose chain-of-thought tokens | `{ text }` |
+| `thinking_delta` | Reasoning models with [`reasoningLevel`](/docs/reasoning/) > 0 emit chain-of-thought tokens | `{ text }` |
 | `assistant_message` | Full assistant turn (text + tool calls) | `{ text, toolCalls }` |
 | `tool_call` / `tool_result` | Server-side tool execution | `{ toolUseId, name, ... }` |
-| `local_tool_call` | The SDK should run a handler | `{ toolUseId, name, input }` |
+| `local_tool_call` | The SDK should run a handler | `{ toolUseId, name, args, kind?, ... }` |
 | `local_tool_result_in` | Echo of the SDK's result | `{ toolUseId, output }` |
 | `result` | Terminal | `{ subtype, text?, error? }` |
 | `cancelled` | Terminal (after `cancelRun`) | `{}` |
 
-The full list lives in [Wire protocol](/docs/protocol/) §7. The SDKs all reconnect automatically via `Last-Event-ID` + `?lastSeq=` if the SSE stream drops.
+The `local_tool_call` payload carries a `kind` discriminator (`"local"` when omitted, `"a2a_local"`, or `"mcp_local"`) plus extra metadata for the specialised kinds. The SDKs route to the right handler automatically; you only need to care about this if you're implementing a third-party client. The full event vocabulary is documented in [Wire protocol §7](/docs/protocol/).
+
+The SDKs all reconnect automatically via `Last-Event-ID` + `?lastSeq=` if the SSE stream drops.

@@ -11,13 +11,15 @@ replace github.com/mantyx-io/mantyx-go-sdk => ../..
 To run any example after publishing the SDK as a real Go module, delete the
 `replace` line in `go.mod` and run `go get github.com/mantyx-io/mantyx-go-sdk@latest`.
 
-| Folder           | What it shows                                                              |
-| ---------------- | -------------------------------------------------------------------------- |
-| `oneshot/`       | A one-shot run with one local tool.                                        |
-| `agent-by-id/`   | Trigger a persisted MANTYX agent by `AgentID` and merge in a `LocalTool`.  |
-| `session-chat/`  | Multi-turn `Session` driving an interactive REPL.                          |
-| `mixed-tools/`   | Combine `MantyxTool`, `MantyxPluginTool`, and a local tool in one agent.   |
-| `streaming/`     | Use `Client.StreamAgent()` and select on the event channel.                |
-| `list-models/`   | Call `Client.ListModels()`, pretty-print, then run an agent on the first. |
+| Folder           | What it shows                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| `oneshot/`       | A one-shot run with one local tool.                                                    |
+| `agent-by-id/`   | Trigger a persisted MANTYX agent by `AgentID` and merge in a `LocalTool`.              |
+| `session-chat/`  | Multi-turn `Session` driving an interactive REPL.                                      |
+| `mixed-tools/`   | Combine `MantyxTool`, `MantyxPluginTool`, and a local tool in one agent.               |
+| `streaming/`     | Use `Client.StreamAgent()` and select on the event channel.                            |
+| `list-models/`   | Call `Client.ListModels()`, pretty-print, then run an agent on the first.              |
+| `a2a-tools/`     | Combine remote (`MantyxA2A`) + local (`LocalA2A`) Agent2Agent peers.                   |
+| `mcp-tools/`     | Combine remote (`MantyxMcp`) + local (`LocalMcp`) MCP servers.                         |
 
 All examples use `MANTYX_API_KEY` and `MANTYX_WORKSPACE_SLUG` env vars.

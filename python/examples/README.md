@@ -8,6 +8,8 @@ Each subdirectory is a **self-contained project** with its own `pyproject.toml` 
 | `agent-by-id/`        | Trigger a persisted MANTYX agent by `agent_id` and merge in a local tool.    |
 | `session-chat/`       | Multi-turn `AgentSession` driving an interactive REPL.                       |
 | `mixed-tools/`        | Combine `mantyx_tool`, `mantyx_plugin_tool`, and a local tool in one agent.  |
+| `a2a-tools/`          | Combine `mantyx_a2a` (remote peer) and `define_local_a2a` (intranet peer).   |
+| `mcp-tools/`          | Combine `mantyx_mcp` (remote MCP server) and `define_local_mcp` (in-process).|
 | `streaming/`          | Use `client.stream_agent()` to print assistant deltas to stdout.             |
 | `list-models/`        | Call `client.list_models()`, pretty-print, then run an agent on the first.   |
 

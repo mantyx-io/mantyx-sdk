@@ -1,6 +1,6 @@
 {
   "name": "@mantyx/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MANTYX as a hosted agent runtime: define ephemeral agents, mix server-side MANTYX tools with locally-executed tools, run them remotely.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./a2a-server": {
+      "types": "./dist/a2a-server.d.ts",
+      "import": "./dist/a2a-server.js",
+      "require": "./dist/a2a-server.cjs"
     }
   },
   "files": [
@@ -23,8 +28,8 @@
   ],
   "scripts": {
     "sync-version": "node ../scripts/sync-version.mjs",
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean --sourcemap",
-    "dev": "tsup src/index.ts --format esm,cjs --dts --watch",
+    "build": "tsup --config tsup.config.ts",
+    "dev": "tsup --config tsup.config.ts --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -34,10 +39,26 @@
     "node": ">=18.17.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.23.8"
   },
+  "peerDependencies": {
+    "@a2a-js/sdk": "^0.3.0",
+    "express": "^4.0.0 || ^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@a2a-js/sdk": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@a2a-js/sdk": "^0.3.0",
+    "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
+    "express": "^5.0.0",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

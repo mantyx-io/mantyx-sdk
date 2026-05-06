@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mantyx-sdk-example-a2a-expose"
+version = "0.0.0"
+description = "Expose a MANTYX agent as an Agent2Agent (A2A) peer."
+requires-python = ">=3.10"
+dependencies = ["mantyx-sdk[a2a-server]"]
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.uv.sources]
+mantyx-sdk = { path = "../..", editable = true }

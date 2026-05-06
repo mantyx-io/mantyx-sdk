@@ -67,6 +67,17 @@ class MockServer:
         self.session_scripts: dict[str, RunScript] = {}
         self.sessions: dict[str, list[dict[str, str]]] = {}
         self.runs: dict[str, _RunState] = {}
+        # Mock A2A peer state — used by define_local_a2a tests so the SDK
+        # can fetch a card and POST `message/send` against the same mock.
+        self.a2a_agent_card: dict[str, Any] = {
+            "name": "Acme HR",
+            "description": "Answers HR policy and PTO questions.",
+            "url": "http://mock/a2a/rpc",
+            "protocolVersion": "0.3.0",
+            "skills": [{"id": "pto_lookup", "name": "PTO lookup"}],
+        }
+        self.a2a_reply_text: str = ""
+        self.last_a2a_request: dict[str, Any] | None = None
         self.models = {
             "models": [
                 {
@@ -88,14 +99,46 @@ class MockServer:
         with self.lock:
             self.last_auth_header = request.headers.get("authorization")
             fail_auth = self.fail_auth
+        path = request.url.path
+        method = request.method
+        # ── A2A peer simulation routes ─────────────────────────────────
+        if path == "/a2a/agent-card.json" and method == "GET":
+            return httpx.Response(200, json=self.a2a_agent_card)
+        if path == "/a2a/rpc" and method == "POST":
+            body = json.loads(request.content or b"{}")
+            params = body.get("params") or {}
+            message = params.get("message") or {}
+            parts_in = message.get("parts") or []
+            text = "\n".join(
+                p.get("text", "") for p in parts_in if isinstance(p, dict) and p.get("kind") == "text"
+            )
+            with self.lock:
+                self.last_a2a_request = {
+                    "method": body.get("method"),
+                    "message": text,
+                    "headers": dict(request.headers),
+                }
+                reply = self.a2a_reply_text or f"peer reply to: {text}"
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body.get("id"),
+                    "result": {
+                        "kind": "message",
+                        "role": "agent",
+                        "messageId": "m_test",
+                        "parts": [{"kind": "text", "text": reply}],
+                    },
+                },
+            )
+
         if fail_auth:
             return httpx.Response(401, json={"error": "Invalid API key"})
-        path = request.url.path
         parts = [p for p in path.strip("/").split("/") if p]
         if len(parts) < 4 or parts[0] != "api" or parts[1] != "v1" or parts[2] != "workspaces":
             return httpx.Response(404, json={"error": "not_found"})
         rest = parts[4:]
-        method = request.method
         if rest == ["models"] and method == "GET":
             return httpx.Response(200, json=self.models)
         if rest and rest[0] == "agent-runs":

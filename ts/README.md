@@ -6,13 +6,20 @@ locally-executed tools, run them remotely, and stream events back into your
 process.
 
 - LLM loop runs on MANTYX (BYOK or platform-hosted models).
-- Server-side tools (`mantyx`, `mantyx_plugin`) execute inside MANTYX.
-- Local tools execute inside *your* process; the SDK shuttles inputs and
-  outputs over an SSE stream + a tool-result POST.
+- Server-resolved tools (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) execute
+  inside MANTYX — including remote Agent2Agent peers and remote MCP servers.
+- Client-resolved tools (`local`, `a2a_local`, `mcp_local`) execute inside
+  *your* process; the SDK shuttles inputs and outputs over an SSE stream +
+  a tool-result POST.
+- Tunable provider thinking via `reasoningLevel` (string anchors or 0–100).
 - One-shot runs and multi-turn sessions, both with persisted observability.
 - Authenticated with a single workspace API key.
 
-For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md).
+For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md)
+and the messaging-layer reference in [`docs/wire-protocol.md`](./docs/wire-protocol.md)
+— the latter pins down the exact `local_tool_call` event shape and the
+resolved data structures (`a2a_local` Agent Card, `mcp_local` `Tool[]`)
+that this SDK ships.
 
 ## Install
 
@@ -22,9 +29,11 @@ npm install @mantyx/sdk zod
 # or: yarn add @mantyx/sdk zod
 ```
 
-Requires Node.js 18.17+ (for `fetch` and `ReadableStream`). `zod` is the only
-runtime dependency the SDK adds; the rest is the standard library and your
-own modules.
+Requires Node.js 18.17+ (for `fetch` and `ReadableStream`). The SDK depends
+on `zod` (parameter schemas) and `@modelcontextprotocol/sdk` (the official
+MCP TypeScript SDK that powers `defineLocalMcp`'s stdio + Streamable HTTP
+transports). The MCP SDK is loaded lazily — apps that never use
+`defineLocalMcp` don't pay its startup cost.
 
 ## Quickstart
 
@@ -102,6 +111,190 @@ Notes:
 
 The same `agentId` field works on `client.createSession({ ... })` for
 multi-turn conversations against a persisted agent.
+
+## Agent2Agent delegation
+
+Hand a turn off to another agent — either a remote peer MANTYX dials directly
+(`mantyxA2A`) or a peer that only the SDK can reach (`defineLocalA2A`). The
+model addresses both with the same `{ message: string }` argument shape, so
+an agent prompt that uses one works unchanged with the other.
+
+`defineLocalA2A` is fully URL-driven: pass the Agent Card URL and the SDK
+takes care of the rest — fetching the card on the first run, shipping it
+inline as part of the spec, and POSTing JSON-RPC `message/send` to the
+card's `url` whenever MANTYX emits a `local_tool_call`. You don't write any
+A2A code yourself.
+
+```ts
+import { MantyxClient, defineLocalA2A, mantyxA2A } from "@mantyx/sdk";
+
+const client = new MantyxClient({ apiKey: "...", workspaceSlug: "acme" });
+
+await client.runAgent({
+  systemPrompt: "You are a helpful router. Delegate billing to billing_agent.",
+  prompt: "Why was I charged twice last month?",
+  tools: [
+    // Public peer MANTYX dials directly.
+    mantyxA2A({
+      name: "billing_agent",
+      description: "Delegate billing questions to the Acme billing agent.",
+      agentCardUrl: "https://billing.acme.com/.well-known/agent-card.json",
+      headers: { Authorization: `Bearer ${process.env.BILLING_TOKEN}` },
+    }),
+    // Intranet peer the SDK reaches on MANTYX's behalf — URL only.
+    defineLocalA2A({
+      name: "intranet_hr",
+      agentCardUrl: "https://hr.intranet.acme/.well-known/agent-card.json",
+      headers: { Authorization: `Bearer ${process.env.HR_TOKEN}` },
+    }),
+  ],
+});
+```
+
+The same `headers` are sent on both the card fetch *and* every subsequent
+`message/send` POST, which is typically what intranet peers want. The SDK
+caches the resolved card on the tool ref for the duration of the run /
+session — re-construct the ref to force a refetch.
+
+> **Headers and secrets.** The `headers` you pass to `mantyxA2A` are forwarded
+> as-is. For long-lived credentials, register the peer as a workspace
+> `ExternalAgent` instead — those headers support `{{secret:NAME}}`
+> placeholders. Use `mantyxA2A` for short-lived, per-run tokens minted by
+> your application.
+
+### Exposing an agent over A2A
+
+The inverse direction also works: wrap a MANTYX agent (ephemeral spec or a
+persisted `agentId`) and serve it as an Agent2Agent peer using the official
+[`@a2a-js/sdk`](https://www.npmjs.com/package/@a2a-js/sdk) library. Other
+agents can then discover it at `/.well-known/agent-card.json` and call
+`message/send` over JSON-RPC — including MANTYX agents elsewhere in your
+estate consuming this one via `mantyxA2A` or `defineLocalA2A`.
+
+```ts
+import { MantyxClient } from "@mantyx/sdk";
+import { serveAgentOverA2A } from "@mantyx/sdk/a2a-server";
+
+const client = new MantyxClient({ apiKey: "...", workspaceSlug: "acme" });
+
+const handle = await serveAgentOverA2A({
+  client,
+  agent: { agentId: "agent_cm6abc123" }, // or { systemPrompt, modelId, tools }
+  port: 4000,
+  agentCard: {
+    name: "Acme Support",
+    description: "Customer support questions.",
+    protocolVersion: "0.3.0",
+    version: "1.0.0",
+    url: "http://localhost:4000",
+    skills: [{ id: "support", name: "Support", tags: ["support"] }],
+    capabilities: { streaming: true, pushNotifications: false },
+    defaultInputModes: ["text"],
+    defaultOutputModes: ["text"],
+  },
+});
+
+console.log(`A2A peer up on ${handle.url}`);
+// later: await handle.close();
+```
+
+`@a2a-js/sdk` and `express` are declared as **optional peer dependencies**,
+so apps that don't expose an A2A server pay zero bundle cost. Install them
+on demand:
+
+```bash
+npm install @a2a-js/sdk express
+```
+
+Each unique A2A `contextId` opens a long-lived MANTYX session by default, so
+multi-turn `message/send` calls share conversational history. Pass
+`conversation: "stateless"` to reduce every A2A request to a one-shot
+`runAgent` call.
+
+For lower-level integration (mounting the executor in your own Express /
+Fastify / Connect app), `@mantyx/sdk/a2a-server` also exports a
+`MantyxAgentExecutor` class implementing `@a2a-js/sdk/server`'s
+`AgentExecutor` interface.
+
+## MCP connectors
+
+Expose every tool published by an MCP server to the agent loop in one go,
+without listing them individually.
+
+```ts
+import { MantyxClient, mantyxMcp, defineLocalMcp } from "@mantyx/sdk";
+
+const client = new MantyxClient({ apiKey: "...", workspaceSlug: "acme" });
+
+await client.runAgent({
+  systemPrompt: "You are a developer assistant with GitHub + filesystem access.",
+  prompt: "Summarize the latest 5 issues on octocat/hello-world.",
+  tools: [
+    // Remote MCP server (Streamable HTTP) — MANTYX lists the catalog at run
+    // start and proxies every call. Tools surface as `github_<tool>`.
+    mantyxMcp({
+      name: "github",
+      url: "https://mcp.github.com/v1",
+      headers: { Authorization: `Bearer ${process.env.GH_PAT}` },
+      toolFilter: ["search_issues", "get_repo"],
+    }),
+    // Local MCP server — fully managed by the SDK. Pass either a
+    // Streamable HTTP `url` *or* an stdio `command`; the SDK opens the
+    // transport, runs `Initialize` + `tools/list`, ships the resolved
+    // catalog inline, and forwards every invocation to `tools/call`. The
+    // model sees `<server>_<tool>` (`fs_read_file`, `fs_list_dir`, …) —
+    // same shape as `mantyxMcp` above.
+
+    // (a) Streamable HTTP MCP server.
+    defineLocalMcp({
+      name: "fs",
+      url: "http://localhost:8080/mcp",
+      headers: { Authorization: `Bearer ${process.env.FS_TOKEN}` },
+    }),
+
+    // (b) stdio MCP server — the SDK spawns the process for you.
+    // defineLocalMcp({
+    //   name: "fs",
+    //   command: "mcp-server-filesystem",
+    //   args: ["/workspace"],
+    //   env: { LOG_LEVEL: "info" },
+    // }),
+  ],
+});
+```
+
+The MCP transport is opened lazily on the first `runAgent` / first
+`session.send`, kept warm for subsequent calls within the same run /
+session, and closed when the run completes or `session.end()` is called.
+If the MCP server can't be reached, the SDK throws before submitting the
+spec — you get the failure synchronously rather than mid-conversation.
+
+If a remote (`kind: "mcp"`) MCP server is unreachable when the run starts,
+MANTYX still exposes a single `<server>_unavailable` stub so the model can
+tell the user why the connector is missing.
+
+## Reasoning effort (`reasoningLevel`)
+
+Crank up provider thinking on reasoning models without writing
+provider-specific code:
+
+```ts
+await client.runAgent({
+  systemPrompt: "...",
+  prompt: "Plan a multi-week migration.",
+  reasoningLevel: "high", // or 80, etc.
+});
+```
+
+| Form         | Values                                       | Notes |
+| ------------ | -------------------------------------------- | ----- |
+| String       | `"off"`, `"low"`, `"medium"`, `"high"`        | Snaps to the same anchors the web composer uses (Fast=30, Moderate=50, Smart=80; off=0). |
+| Number       | integer `0`–`100`                             | `0` explicitly disables provider thinking on reasoning models. |
+
+The server maps this onto each LLM's native dial — `reasoning.effort` for
+OpenAI, `thinkingConfig` for Gemini, extended-thinking budget for Anthropic.
+Non-reasoning models silently ignore it. On sessions, `reasoningLevel`
+inherits from the session and can be overridden per `session.send`.
 
 ## Picking a model
 
@@ -248,11 +441,15 @@ interface MantyxClientOptions {
 
 ### Tools
 
-| Helper                     | Use case                                                     |
-| -------------------------- | ------------------------------------------------------------ |
-| `defineLocalTool(opts)`    | Define a local tool with a Zod parameter schema and handler. |
-| `mantyxTool(id)`           | Reference an existing MANTYX tool by id.                     |
-| `mantyxPluginTool(name)`   | Reference an installed platform plugin tool by name.         |
+| Helper                     | Use case                                                                |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `defineLocalTool(opts)`    | Define a local tool with a Zod parameter schema and handler.            |
+| `defineLocalA2A(opts)`     | Local Agent2Agent peer — pass an `agentCardUrl`; the SDK fetches the card and speaks `message/send` for you. |
+| `defineLocalMcp(opts)`     | Local MCP server — pass either a Streamable HTTP `url` or an stdio `command`; the SDK runs `Initialize` + `tools/list` + `tools/call` for you. |
+| `mantyxTool(id)`           | Reference an existing MANTYX tool by id.                                |
+| `mantyxPluginTool(name)`   | Reference an installed platform plugin tool by name.                    |
+| `mantyxA2A(opts)`          | Remote Agent2Agent peer reachable from MANTYX (server-resolved).        |
+| `mantyxMcp(opts)`          | Remote MCP server (Streamable HTTP) MANTYX dials and proxies for you.   |
 
 ### Errors
 
@@ -272,6 +469,8 @@ Self-contained example projects live under [`examples/`](./examples/):
 - `examples/mixed-tools` — combines local, MANTYX, and plugin tools.
 - `examples/streaming` — token streaming to stdout.
 - `examples/list-models` — model catalog + pick-and-run.
+- `examples/a2a-tools` — remote (`mantyxA2A`) + local (`defineLocalA2A`) Agent2Agent peers.
+- `examples/mcp-tools` — remote (`mantyxMcp`) + local (`defineLocalMcp`) MCP servers.
 
 Each example is its own project (`package.json`, `tsconfig.json`, `README.md`)
 so you can copy any one of them out of the repo and run it standalone.
