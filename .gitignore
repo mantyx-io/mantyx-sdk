@@ -33,6 +33,14 @@ dist/
 build/
 *.egg-info/
 
+# Python bytecode / tooling caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 # Test / coverage
 coverage/
 .nyc_output/
