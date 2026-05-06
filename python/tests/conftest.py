@@ -110,7 +110,9 @@ class MockServer:
             message = params.get("message") or {}
             parts_in = message.get("parts") or []
             text = "\n".join(
-                p.get("text", "") for p in parts_in if isinstance(p, dict) and p.get("kind") == "text"
+                p.get("text", "")
+                for p in parts_in
+                if isinstance(p, dict) and p.get("kind") == "text"
             )
             with self.lock:
                 self.last_a2a_request = {

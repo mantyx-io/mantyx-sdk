@@ -213,9 +213,7 @@ def test_build_agent_card_round_trip() -> None:
         description="test",
         version="1.0.0",
         public_url="https://example.com/a2a",
-        skills=[
-            {"id": "lookup", "name": "Lookup", "description": "Look stuff up", "tags": ["q"]}
-        ],
+        skills=[{"id": "lookup", "name": "Lookup", "description": "Look stuff up", "tags": ["q"]}],
     )
     assert card.name == "Acme Bot"
     assert card.version == "1.0.0"

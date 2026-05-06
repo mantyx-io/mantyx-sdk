@@ -57,9 +57,7 @@ async def main() -> None:
         public_url=public_url,
     )
 
-    async with AsyncMantyxClient(
-        api_key=api_key, workspace_slug=workspace_slug
-    ) as client:
+    async with AsyncMantyxClient(api_key=api_key, workspace_slug=workspace_slug) as client:
         agent_id = os.environ.get("MANTYX_AGENT_ID")
         if agent_id:
             handle = await serve_agent_over_a2a(

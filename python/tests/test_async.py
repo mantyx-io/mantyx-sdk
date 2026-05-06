@@ -203,9 +203,7 @@ async def test_async_local_mcp_dispatch(
 async def test_async_reasoning_level_forwarded(
     async_mantyx_client: AsyncMantyxClient, mock_server: MockServer
 ) -> None:
-    await async_mantyx_client.run_agent(
-        system_prompt="x", prompt="y", reasoning_level="medium"
-    )
+    await async_mantyx_client.run_agent(system_prompt="x", prompt="y", reasoning_level="medium")
     body = mock_server.last_run_create_body
     assert body is not None
     assert body["reasoningLevel"] == "medium"

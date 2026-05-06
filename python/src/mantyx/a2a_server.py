@@ -177,9 +177,7 @@ def build_agent_card(
     card.description = description
     card.version = version
     if skills is None:
-        skills = [
-            {"id": "chat", "name": "Chat", "description": description, "tags": ["chat"]}
-        ]
+        skills = [{"id": "chat", "name": "Chat", "description": description, "tags": ["chat"]}]
     for s in skills:
         sk = AgentSkill()
         sk.id = str(s["id"])
@@ -252,9 +250,7 @@ class MantyxAgentExecutor(_BaseAgentExecutor):
                 _build_initial_task(task_id, context_id, context.message),
             )
         await event_queue.enqueue_event(
-            _build_status_update(
-                task_id, context_id, TaskState.TASK_STATE_WORKING, final=False
-            ),
+            _build_status_update(task_id, context_id, TaskState.TASK_STATE_WORKING, final=False),
         )
 
         if task_id in self._cancelled:
@@ -276,9 +272,7 @@ class MantyxAgentExecutor(_BaseAgentExecutor):
                 if asyncio.iscoroutine(result):
                     await result
                 return
-            await event_queue.enqueue_event(
-                _build_delta_status_update(task_id, context_id, delta)
-            )
+            await event_queue.enqueue_event(_build_delta_status_update(task_id, context_id, delta))
 
         try:
             text = await self._run_once(context_id, user_text, _on_delta)
@@ -577,7 +571,11 @@ def _build_delta_status_update(
     delta: str,
 ) -> TaskStatusUpdateEvent:
     return _build_status_update(
-        task_id, context_id, TaskState.TASK_STATE_WORKING, final=False, text=delta,
+        task_id,
+        context_id,
+        TaskState.TASK_STATE_WORKING,
+        final=False,
+        text=delta,
     )
 
 

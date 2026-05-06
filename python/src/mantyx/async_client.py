@@ -241,7 +241,9 @@ class AsyncMantyxClient:
             await async_close_mcp_refs(tools_list)
             raise MantyxError("server did not return a sessionId")
         handlers = collect_local_handlers(tools_list)
-        return AsyncAgentSession(self, id=session_id, handlers=handlers, tools_for_resume=tools_list)
+        return AsyncAgentSession(
+            self, id=session_id, handlers=handlers, tools_for_resume=tools_list
+        )
 
     async def resume_session(
         self,

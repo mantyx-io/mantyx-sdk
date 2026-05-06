@@ -50,9 +50,7 @@ _PLUGIN_TOOL_NAME_RE = re.compile(r"^@[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$")
 
 def _assert_tool_name(name: str) -> None:
     if not isinstance(name, str) or not _LOCAL_TOOL_NAME_RE.match(name):
-        raise ValueError(
-            f"Invalid tool name {name!r}: must match /^[a-zA-Z0-9_]{{1,64}}$/"
-        )
+        raise ValueError(f"Invalid tool name {name!r}: must match /^[a-zA-Z0-9_]{{1,64}}$/")
 
 
 def _prefixed_mcp_tool_name(server_name: str, tool_name: str) -> str:
@@ -552,8 +550,7 @@ def serialize_tool_refs(tools: list[ToolRef] | None) -> list[dict[str, Any]]:
         elif isinstance(t, LocalMcpServer):
             if t._resolved is None:
                 raise ValueError(
-                    f"define_local_mcp({t.name!r}): MCP server has not been "
-                    "initialised yet"
+                    f"define_local_mcp({t.name!r}): MCP server has not been initialised yet"
                 )
             wire_tools: list[dict[str, Any]] = []
             for tool in t._resolved.tools:
@@ -594,9 +591,7 @@ def normalize_reasoning_level(level: ReasoningLevel | None) -> str | int | None:
         )
     if isinstance(level, int):
         if level < 0 or level > 100:
-            raise ValueError(
-                f"reasoning_level integer must be in [0, 100]; got {level}"
-            )
+            raise ValueError(f"reasoning_level integer must be in [0, 100]; got {level}")
         return int(level)
     if isinstance(level, str) and level in ("off", "low", "medium", "high"):
         return level

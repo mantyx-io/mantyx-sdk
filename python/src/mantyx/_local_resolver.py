@@ -40,22 +40,17 @@ async def _async_fetch_agent_card(
     url: str,
     headers: dict[str, str] | None,
 ) -> dict[str, Any]:
-    resp = await client.get(
-        url, headers={"Accept": "application/json", **(headers or {})}
-    )
+    resp = await client.get(url, headers={"Accept": "application/json", **(headers or {})})
     if resp.status_code >= 300:
         raise ValueError(
-            f"Agent Card fetch from {url} returned {resp.status_code} "
-            f"{resp.reason_phrase}"
+            f"Agent Card fetch from {url} returned {resp.status_code} {resp.reason_phrase}"
         )
     try:
         body = resp.json()
     except ValueError as exc:
         raise ValueError(f"Agent Card at {url} did not return valid JSON") from exc
     if not isinstance(body, dict) or not isinstance(body.get("name"), str) or not body.get("name"):
-        raise ValueError(
-            f"Agent Card at {url} did not include the spec-required `name` field"
-        )
+        raise ValueError(f"Agent Card at {url} did not include the spec-required `name` field")
     return body
 
 
@@ -67,17 +62,14 @@ def _sync_fetch_agent_card(
     resp = client.get(url, headers={"Accept": "application/json", **(headers or {})})
     if resp.status_code >= 300:
         raise ValueError(
-            f"Agent Card fetch from {url} returned {resp.status_code} "
-            f"{resp.reason_phrase}"
+            f"Agent Card fetch from {url} returned {resp.status_code} {resp.reason_phrase}"
         )
     try:
         body = resp.json()
     except ValueError as exc:
         raise ValueError(f"Agent Card at {url} did not return valid JSON") from exc
     if not isinstance(body, dict) or not isinstance(body.get("name"), str) or not body.get("name"):
-        raise ValueError(
-            f"Agent Card at {url} did not include the spec-required `name` field"
-        )
+        raise ValueError(f"Agent Card at {url} did not include the spec-required `name` field")
     return body
 
 
@@ -146,9 +138,7 @@ async def async_call_a2a(
 ) -> str:
     """POST `message/send` to the resolved Agent Card URL and return the reply text."""
     if tool._resolved_card is None:
-        raise ValueError(
-            f"define_local_a2a({tool.name!r}): agent card has not been resolved"
-        )
+        raise ValueError(f"define_local_a2a({tool.name!r}): agent card has not been resolved")
     url = tool._resolved_card.get("url")
     if not isinstance(url, str) or not url:
         url = tool.agent_card_url
@@ -169,12 +159,8 @@ async def async_call_a2a(
     payload = resp.json()
     if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
         err = payload["error"]
-        raise ValueError(
-            f"A2A peer reported error {err.get('code')!r}: {err.get('message')!r}"
-        )
-    return _extract_a2a_reply_text(
-        payload.get("result") if isinstance(payload, dict) else None
-    )
+        raise ValueError(f"A2A peer reported error {err.get('code')!r}: {err.get('message')!r}")
+    return _extract_a2a_reply_text(payload.get("result") if isinstance(payload, dict) else None)
 
 
 def sync_call_a2a(
@@ -185,9 +171,7 @@ def sync_call_a2a(
 ) -> str:
     """Synchronous twin of :func:`async_call_a2a`."""
     if tool._resolved_card is None:
-        raise ValueError(
-            f"define_local_a2a({tool.name!r}): agent card has not been resolved"
-        )
+        raise ValueError(f"define_local_a2a({tool.name!r}): agent card has not been resolved")
     url = tool._resolved_card.get("url")
     if not isinstance(url, str) or not url:
         url = tool.agent_card_url
@@ -208,12 +192,8 @@ def sync_call_a2a(
     payload = resp.json()
     if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
         err = payload["error"]
-        raise ValueError(
-            f"A2A peer reported error {err.get('code')!r}: {err.get('message')!r}"
-        )
-    return _extract_a2a_reply_text(
-        payload.get("result") if isinstance(payload, dict) else None
-    )
+        raise ValueError(f"A2A peer reported error {err.get('code')!r}: {err.get('message')!r}")
+    return _extract_a2a_reply_text(payload.get("result") if isinstance(payload, dict) else None)
 
 
 # ---------------------------------------------------------------------------
@@ -270,9 +250,7 @@ async def _open_mcp_session(server: LocalMcpServer) -> tuple[Any, AsyncExitStack
         result = await stack.enter_async_context(ctx)
         read, write = result[0], result[1]
     else:
-        raise ValueError(
-            f"define_local_mcp({server.name!r}): missing transport"
-        )
+        raise ValueError(f"define_local_mcp({server.name!r}): missing transport")
     session = await stack.enter_async_context(ClientSession(read, write))
     await session.initialize()
     return session, stack
