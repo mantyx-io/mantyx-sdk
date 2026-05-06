@@ -101,6 +101,10 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
   "tools": [ /* tool refs — see §3 */ ],
   "reasoningLevel": "medium",          // optional; see §6
   "budgets": { "maxToolTurns": 32 },
+  "outputSchema": {                    // optional; see §7
+    "name": "weather_report",          //   defaults to "output"
+    "schema": { /* JSON Schema */ }
+  },
   "metadata": { "customer": "acme" }   // optional, free-form k/v
 }
 ```
@@ -108,9 +112,9 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
 ### 2.2 Sessions
 
 Same body shape, posted to `POST /agent-sessions/:id/messages`. The session
-keeps the conversation history; per-message `tools` and `reasoningLevel`
-*replace* the session's defaults for that single run only — the next run
-falls back to whatever the session was created with.
+keeps the conversation history; per-message `tools`, `reasoningLevel`, and
+`outputSchema` *replace* the session's defaults for that single run only —
+the next run falls back to whatever the session was created with.
 
 ---
 
@@ -188,14 +192,6 @@ the `agentCard` field. MANTYX never reaches out to discover it.
   treats every spec submission as a fresh snapshot, so new cards take
   effect on the next run / message.
 
-**SDK-facing API.** The reference SDKs (`@mantyx/sdk`, `mantyx`,
-`mantyx-go-sdk`) intentionally hide this resolution from end-users. They
-accept an `agentCardUrl` (plus optional `headers`) and run the fetch
-internally on the first `RunAgent` / `Session.Send`, caching the result
-for the lifetime of the run / session. New SDKs are encouraged to expose
-the same URL-first surface and treat the fetch as an internal
-implementation detail; the wire shape above is what they ultimately ship.
-
 **What MANTYX does with `agentCard`:**
 
 | Field                    | Used for | Notes |
@@ -257,20 +253,6 @@ const ref = {
   tools: list.tools,
 };
 ```
-
-**SDK-facing API.** The reference SDKs (`@mantyx/sdk`, `mantyx`,
-`mantyx-go-sdk`) accept transport options instead of a pre-resolved
-catalog: a Streamable HTTP `url` (+ optional `headers`) **or** an stdio
-`command` (+ `args`/`env`/`cwd`). On the first run / session they open
-the transport with the official MCP SDK for the language
-(`@modelcontextprotocol/sdk` for TS, `mcp` for Python,
-`github.com/modelcontextprotocol/go-sdk` for Go), run `Initialize` +
-`tools/list`, ship the resolved `serverInfo` + `tools[]` inline, and
-keep the live MCP session around so subsequent `local_tool_call` events
-dispatch into `tools/call` against the same connection. The transport
-closes when the run / session ends. New SDKs are encouraged to expose a
-similar URL-/command-first surface; the wire shape above is what they
-ultimately ship.
 
 **What MANTYX does with the catalog:**
 
@@ -548,7 +530,60 @@ will include `thinking_delta` events alongside `assistant_delta`.
 
 ---
 
-## 7. Cancellation
+## 7. `outputSchema` (structured final reply)
+
+`outputSchema` constrains the final assistant message to a JSON document
+conforming to a JSON Schema. When set, the run's terminal `result` event
+still carries the reply as `data.text: string`, but that string is
+guaranteed-parseable JSON matching the supplied schema.
+
+```jsonc
+"outputSchema": {
+  "name":   "weather_report",          // optional; default "output"; /^[a-zA-Z0-9_-]{1,64}$/
+  "schema": { /* JSON Schema */ }      // required, root must be a JSON object
+}
+```
+
+| Field    | Type   | Required | Notes |
+| -------- | ------ | -------- | ----- |
+| `name`   | string | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`. |
+| `schema` | object | yes      | JSON Schema for the assistant text. Root must be a JSON object — most providers reject array/scalar roots in structured-output mode. Passed through verbatim; MANTYX does not validate the schema's contents. |
+
+Per provider:
+
+| Provider                       | How the schema is enforced |
+| ------------------------------ | -------------------------- |
+| OpenAI Responses (o-series, GPT-5.x, …) | `text.format = { type: "json_schema", strict: true, name, schema }` on every `completeTurn` (compatible with tool calls). |
+| Gemini ≥ 2.5                   | `responseMimeType: "application/json"` + `responseJsonSchema` on no-tools turns (Gemini rejects schemas alongside `functionDeclarations`). |
+| Anthropic / Bedrock-Anthropic  | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text. |
+| xAI Grok, others               | Ignored — the model returns plain text. |
+
+Validation (server-side, `400 invalid_request` on violation):
+
+| Constraint                                | Limit |
+| ----------------------------------------- | ----- |
+| Serialized JSON size of `outputSchema`    | ≤ 32 KB |
+| `name` regex                              | `/^[a-zA-Z0-9_-]{1,64}$/` |
+| `schema` shape                            | non-`null`, non-array JSON object |
+
+**SDK guidance.** Even though the server enforces JSON shape via the
+provider, transient model errors (refusal text, truncation under
+`max_tokens` pressure, exotic Unicode normalisation) can still produce
+a string that fails to `JSON.parse` in rare cases. Reference SDKs should:
+
+1. Pass the schema through unchanged from the developer's API.
+2. `JSON.parse` the terminal `result.data.text`.
+3. Re-validate against their source-of-truth Zod / Pydantic / JSON Schema
+   validator and surface a typed parse error instead of crashing.
+
+`outputSchema` works for both ephemeral runs (`systemPrompt`-defined) and
+`agentId`-backed runs — the runner applies the schema to whichever
+`AgentSpec` it built. `outputSchema` is independent of `reasoningLevel`:
+the model can think extensively *and* emit JSON.
+
+---
+
+## 8. Cancellation
 
 ```http
 POST /api/v1/workspaces/{slug}/agent-runs/{runId}/cancel
@@ -563,7 +598,7 @@ terminal event.
 
 ---
 
-## 8. Reconnects & at-least-once delivery
+## 9. Reconnects & at-least-once delivery
 
 - Every event has a monotonically-increasing `seq` per run, persisted to
   `EphemeralAgentRunEvent`. Reopen with `Last-Event-ID: <seq>` to resume.
@@ -579,7 +614,7 @@ terminal event.
 
 ---
 
-## 9. Full worked example: `a2a_local` round-trip
+## 10. Full worked example: `a2a_local` round-trip
 
 ```ts
 import { fetch } from "undici";
@@ -628,7 +663,7 @@ for await (const ev of parseSSE(stream)) {
 
 ---
 
-## 10. Full worked example: `mcp_local` round-trip
+## 11. Full worked example: `mcp_local` round-trip
 
 ```ts
 // ── 1. Connect + resolve catalog locally ────────────────────────────────
@@ -679,13 +714,19 @@ for await (const ev of parseSSE(streamFromUrl(streamUrl, apiKey))) {
 
 ---
 
-## 11. Compliance checklist for SDK implementers
+## 12. Compliance checklist for SDK implementers
 
 A reference SDK should:
 
 - [ ] Accept `reasoningLevel` from the caller in either string or number
       form and pass it through unchanged. Do not translate it to a
       vendor-specific knob — the server owns that mapping.
+- [ ] Accept `outputSchema` from the caller as `{ name?, schema }` and pass
+      it through unchanged. After the run terminates, `JSON.parse` the
+      `result.data.text` and re-validate against the caller's
+      source-of-truth schema (Zod / Pydantic / etc.) — the server enforces
+      JSON shape via the provider, but transient model errors can still
+      produce strings that fail to parse in rare cases.
 - [ ] Maintain three local-callback registries (or one tagged-union
       registry), keyed by `name`:
       - generic local tools (`kind: "local"`),
@@ -694,16 +735,10 @@ A reference SDK should:
       - local MCP servers (`kind: "mcp_local"`, indexed by the SDK-side
         server label that matches `local_tool_call.mcpServer`).
 - [ ] For `a2a_local`, **resolve the Agent Card locally** and ship it as
-      `agentCard`. Don't expect MANTYX to fetch anything. The recommended
-      developer surface is a URL-first one (the user passes
-      `agentCardUrl`; the SDK fetches it internally and caches it).
+      `agentCard`. Don't expect MANTYX to fetch anything.
 - [ ] For `mcp_local`, **speak `Initialize` + `tools/list` locally** and
       ship the verbatim result as `serverInfo` + `tools[]`. Don't expect
-      MANTYX to discover anything. The recommended developer surface is
-      a transport-first one (the user passes a Streamable HTTP `url` or
-      stdio `command` and the SDK uses the official MCP client for the
-      language to drive the session for the lifetime of the run /
-      session).
+      MANTYX to discover anything.
 - [ ] On `local_tool_call`, dispatch by the event's `kind` discriminator
       (defaulting to `"local"` when omitted). Validate args against the
       tool's schema, run it, POST the result back to `.../tool-results`.
@@ -717,7 +752,7 @@ A reference SDK should:
 
 ---
 
-## 12. See also
+## 13. See also
 
 - [`agent-runs-protocol.md`](./agent-runs-protocol.md) — HTTP routes, auth,
   full body shapes, sessions, error codes.

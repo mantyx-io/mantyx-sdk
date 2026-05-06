@@ -298,6 +298,54 @@ Anthropic. Non-reasoning models silently ignore it. On sessions, pass
 `mantyx.WithReasoningLevel(...)` to `Session.Send` to override the
 session-wide value for one turn.
 
+## Structured output (`OutputSchema`)
+
+Constrain the assistant's **final reply** to a JSON document matching a
+JSON Schema, and decode it into a Go struct with `mantyx.ParseRunOutput`:
+
+```go
+weatherSchema := map[string]any{
+    "type": "object",
+    "properties": map[string]any{
+        "city":          map[string]any{"type": "string"},
+        "temperature_c": map[string]any{"type": "number"},
+    },
+    "required":             []any{"city", "temperature_c"},
+    "additionalProperties": false,
+}
+
+result, err := client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt: "Return the weather as JSON.",
+    Prompt:       "What's the weather in San Francisco right now?",
+    OutputSchema: &mantyx.OutputSchema{Name: "weather_report", Schema: weatherSchema},
+})
+if err != nil { /* ... */ }
+
+var report struct {
+    City         string  `json:"city"`
+    TemperatureC float64 `json:"temperature_c"`
+}
+if err := mantyx.ParseRunOutput(result, &report); err != nil {
+    var pe *mantyx.ParseError
+    if errors.As(err, &pe) {
+        log.Printf("model returned non-JSON: %q", pe.Text)
+    }
+    return err
+}
+```
+
+The SDK validates `Name` (regex `^[a-zA-Z0-9_-]{1,64}$`), schema shape
+(non-nil JSON object), and total size (≤ 32 KB) locally so you get a
+typed `*mantyx.Error` up front instead of a server round-trip rejection.
+On parse failure, `ParseRunOutput` returns `*mantyx.ParseError` with the
+raw model text preserved on `Text`.
+
+`OutputSchema` is independent of `ReasoningLevel` — combine the two for
+deep-reasoning JSON outputs. On sessions it inherits from
+`SessionSpec.OutputSchema` and can be overridden per turn via
+`session.Send(ctx, prompt, mantyx.WithOutputSchema(...))`. See
+`docs/wire-protocol.md` §7 for the full per-provider mapping.
+
 ## Picking a model
 
 ```go

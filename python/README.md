@@ -426,6 +426,48 @@ client.run_agent(system_prompt="...", prompt="...", reasoning_level="medium")
 client.run_agent(system_prompt="...", prompt="...", reasoning_level=80)
 ```
 
+#### Structured output (`output_schema`)
+
+Constrain the assistant's **final reply** to a JSON document matching a
+JSON Schema, and decode it with a Pydantic (or any) validator via
+`parse_run_output`:
+
+```python
+from pydantic import BaseModel
+from mantyx import MantyxClient, parse_run_output
+
+class Weather(BaseModel):
+    city: str
+    temperature_c: float
+
+WEATHER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "city":          {"type": "string"},
+        "temperature_c": {"type": "number"},
+    },
+    "required": ["city", "temperature_c"],
+    "additionalProperties": False,
+}
+
+result = client.run_agent(
+    system_prompt="Return the weather as JSON.",
+    prompt="What's the weather in San Francisco right now?",
+    output_schema={"name": "weather_report", "schema": WEATHER_SCHEMA},
+)
+report = parse_run_output(result, Weather.model_validate)
+# report.city / report.temperature_c are typed.
+```
+
+`output_schema` validates the `name` regex (`^[a-zA-Z0-9_-]{1,64}$`),
+schema shape, and serialised size (≤ 32 KB) locally so you get a typed
+`ValueError` up front. On rare parse failures `parse_run_output` raises
+`MantyxParseError` with the raw text preserved on the `text` attribute.
+Available on both sync and async clients, on `run_agent` /
+`stream_agent` / `create_session`, and as a per-message override on
+`session.send` / `session.stream`. See `docs/wire-protocol.md` §7 for
+the per-provider mapping.
+
 ### Errors
 
 All raised errors extend `MantyxError`. Common subclasses:
@@ -434,6 +476,8 @@ All raised errors extend `MantyxError`. Common subclasses:
 - `MantyxNetworkError` — transport-layer failures.
 - `MantyxRunError` — the agent loop terminated with an error.
 - `MantyxToolError` — a local tool handler raised or timed out.
+- `MantyxParseError` — `parse_run_output` failed to JSON-decode the run's
+  terminal text (or the user-supplied validator rejected it).
 
 ## Examples
 

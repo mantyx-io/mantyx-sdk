@@ -64,3 +64,19 @@ func (e *RunError) Error() string {
 	}
 	return fmt.Sprintf("mantyx: run %s failed: %s", e.RunID, e.Message)
 }
+
+// ParseError is returned by ParseRunOutput when the run's terminal text
+// cannot be JSON-parsed (or fails the user-supplied json.Unmarshal target).
+// The original assistant text is preserved on the Text field so callers can
+// log the raw model output for debugging.
+type ParseError struct {
+	RunID string
+	Text  string
+	Cause error
+}
+
+func (e *ParseError) Error() string {
+	return fmt.Sprintf("mantyx: run %s output failed to parse: %v", e.RunID, e.Cause)
+}
+
+func (e *ParseError) Unwrap() error { return e.Cause }

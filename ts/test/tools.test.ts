@@ -269,6 +269,162 @@ describe("reasoningLevel forwarding", () => {
   });
 });
 
+describe("outputSchema forwarding + parseRunOutput", () => {
+  const weatherSchema = {
+    type: "object",
+    properties: {
+      city: { type: "string" },
+      temperature_c: { type: "number" },
+    },
+    required: ["city", "temperature_c"],
+    additionalProperties: false,
+  } as const;
+
+  it("forwards outputSchema verbatim on a one-shot run", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: '{"city":"SF","temperature_c":17}' }],
+    };
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      outputSchema: { name: "weather_report", schema: weatherSchema },
+    });
+    expect(server.lastRunCreateBody?.outputSchema).toEqual({
+      name: "weather_report",
+      schema: weatherSchema,
+    });
+  });
+
+  it("omits the field entirely when not set", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    expect(server.lastRunCreateBody?.outputSchema).toBeUndefined();
+  });
+
+  it("rejects bad outputSchema shapes locally", async () => {
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        outputSchema: { name: "bad name!", schema: weatherSchema },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        outputSchema: { schema: [] as unknown as Record<string, unknown> },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        outputSchema: { schema: null as unknown as Record<string, unknown> },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+  });
+
+  it("rejects an outputSchema that exceeds the 32 KB wire limit", async () => {
+    const huge: Record<string, unknown> = { type: "object", properties: {} };
+    const props = huge.properties as Record<string, unknown>;
+    for (let i = 0; i < 4000; i += 1) {
+      props[`f_${i}`] = {
+        type: "string",
+        description: "x".repeat(8),
+      };
+    }
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        outputSchema: { schema: huge },
+      }),
+    ).rejects.toMatchObject({ message: expect.stringMatching(/32 KB/) });
+  });
+
+  it("forwards outputSchema on session create and per-message override", async () => {
+    server.scriptForNextSessionRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    const session = await client.createSession({
+      systemPrompt: "x",
+      outputSchema: { schema: weatherSchema },
+    });
+    expect(server.lastSessionCreateBody?.outputSchema).toEqual({ schema: weatherSchema });
+
+    const overrideSchema = {
+      type: "object",
+      properties: { ok: { type: "boolean" } },
+      required: ["ok"],
+    };
+    await session.send("hi", { outputSchema: { name: "ack", schema: overrideSchema } });
+    expect(server.lastSessionMessageBody?.outputSchema).toEqual({
+      name: "ack",
+      schema: overrideSchema,
+    });
+  });
+});
+
+describe("parseRunOutput", () => {
+  it("JSON.parses the result text and returns the value", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: '{"a":1,"b":"two"}' }],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    const { parseRunOutput } = await import("../src/index.js");
+    expect(parseRunOutput(result)).toEqual({ a: 1, b: "two" });
+  });
+
+  it("runs an optional validator (e.g. zod's parse) and returns its output", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: '{"city":"SF","temp":17}' }],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    const { parseRunOutput } = await import("../src/index.js");
+    const Schema = z.object({ city: z.string(), temp: z.number() });
+    const parsed = parseRunOutput(result, (v) => Schema.parse(v));
+    expect(parsed).toEqual({ city: "SF", temp: 17 });
+  });
+
+  it("throws MantyxParseError on non-JSON text", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "result",
+          subtype: "success",
+          text: "I refuse to answer in JSON.",
+        },
+      ],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    const { parseRunOutput, MantyxParseError } = await import("../src/index.js");
+    try {
+      parseRunOutput(result);
+      expect.fail("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MantyxParseError);
+      expect((err as InstanceType<typeof MantyxParseError>).text).toBe(
+        "I refuse to answer in JSON.",
+      );
+    }
+  });
+
+  it("throws MantyxParseError when the validator rejects", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: '{"city":42}' }],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    const { parseRunOutput, MantyxParseError } = await import("../src/index.js");
+    const Schema = z.object({ city: z.string(), temp: z.number() });
+    expect(() => parseRunOutput(result, (v) => Schema.parse(v))).toThrow(MantyxParseError);
+  });
+});
+
 describe("local_tool_call dispatch", () => {
   it("dispatches `kind: \"a2a_local\"` events by POSTing message/send to the resolved Agent Card URL", async () => {
     server.scriptForNextRun = {

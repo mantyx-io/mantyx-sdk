@@ -30,6 +30,7 @@ export {
   MantyxClient,
   AgentSession,
   DEFAULT_BASE_URL,
+  parseRunOutput,
 } from "./client.js";
 export type {
   MantyxClientOptions,
@@ -38,6 +39,7 @@ export type {
   AgentSpecBase,
   RunSpec,
   SessionSpec,
+  OutputSchema,
   RunResult,
   RunEvent,
   RunEventBase,
@@ -90,6 +92,7 @@ export {
   MantyxError,
   MantyxAuthError,
   MantyxNetworkError,
+  MantyxParseError,
   MantyxToolError,
   MantyxRunError,
 } from "./errors.js";

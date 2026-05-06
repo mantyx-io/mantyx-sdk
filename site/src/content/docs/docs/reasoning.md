@@ -101,3 +101,7 @@ When `reasoningLevel > 0` (and the active provider exposes thought parts — Ant
 - **`"high"` / 80–100** — deep planning, debugging, math. Latency and token cost rise meaningfully.
 
 Non-reasoning models (most fast-tier offerings, xAI Grok) silently ignore the value, so it's safe to set unconditionally.
+
+## See also
+
+- [`outputSchema`](/docs/output-schema/) — independent dial that constrains the model's final reply to a JSON document. Combine the two for deep-reasoning JSON outputs (`reasoningLevel: "high"` + `outputSchema: { schema }`).

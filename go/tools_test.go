@@ -3,9 +3,16 @@ package mantyx
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
+	"fmt"
 	"strings"
 	"testing"
 )
+
+// errorsAs is a tiny shim around errors.As so we don't have to rename the
+// existing `errors` field in struct literals (the new test file above
+// wants both).
+func errorsAs(err error, target any) bool { return stderrors.As(err, target) }
 
 // seedMcpResolution short-circuits the MCP transport handshake for tests by
 // dropping a hand-rolled `resolvedMcp` onto the LocalMcp tool ref. Tests use
@@ -445,6 +452,201 @@ func TestReasoningEffort_PanicsOutOfRange(t *testing.T) {
 		}
 	}()
 	_ = ReasoningEffort(200)
+}
+
+// ---------- OutputSchema --------------------------------------------------
+
+func weatherSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"city":          map[string]any{"type": "string"},
+			"temperature_c": map[string]any{"type": "number"},
+		},
+		"required":             []any{"city", "temperature_c"},
+		"additionalProperties": false,
+	}
+}
+
+func TestOutputSchema_ForwardedOnRun(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "{}"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		OutputSchema: &OutputSchema{Name: "weather_report", Schema: weatherSchema()},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !strings.Contains(string(server.lastRunCreateBody), `"outputSchema"`) ||
+		!strings.Contains(string(server.lastRunCreateBody), `"name":"weather_report"`) ||
+		!strings.Contains(string(server.lastRunCreateBody), `"temperature_c"`) {
+		t.Fatalf("expected outputSchema in body: %s", server.lastRunCreateBody)
+	}
+}
+
+func TestOutputSchema_OmittedWhenNil(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	if _, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if strings.Contains(string(server.lastRunCreateBody), "outputSchema") {
+		t.Fatalf("expected outputSchema omitted: %s", server.lastRunCreateBody)
+	}
+}
+
+func TestOutputSchema_LocalValidationRejectsBadShape(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+
+	// Bad name.
+	_, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{Name: "bad name!", Schema: weatherSchema()},
+	})
+	if err == nil {
+		t.Fatalf("expected error for invalid name")
+	}
+
+	// Missing schema.
+	_, err = client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{Schema: nil},
+	})
+	if err == nil {
+		t.Fatalf("expected error for nil Schema")
+	}
+}
+
+func TestOutputSchema_RejectedAtSizeLimit(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+
+	huge := map[string]any{"type": "object"}
+	props := map[string]any{}
+	for i := 0; i < 4000; i++ {
+		props[fmt.Sprintf("f_%d", i)] = map[string]any{
+			"type":        "string",
+			"description": "xxxxxxxx",
+		}
+	}
+	huge["properties"] = props
+
+	_, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{Schema: huge},
+	})
+	if err == nil || !strings.Contains(err.Error(), "32 KB") {
+		t.Fatalf("expected 32 KB limit error, got: %v", err)
+	}
+}
+
+func TestOutputSchema_InSessionCreateAndPerMessageOverride(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	session, err := client.CreateSession(context.Background(), SessionSpec{
+		SystemPrompt: "x",
+		OutputSchema: &OutputSchema{Schema: weatherSchema()},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if !strings.Contains(string(server.lastSessionCreateBody), `"outputSchema"`) {
+		t.Fatalf("expected outputSchema in session body: %s", server.lastSessionCreateBody)
+	}
+	override := &OutputSchema{
+		Name: "ack",
+		Schema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"ok": map[string]any{"type": "boolean"}},
+			"required":   []any{"ok"},
+		},
+	}
+	if _, err := session.Send(context.Background(), "hi", WithOutputSchema(override)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if !strings.Contains(string(server.lastSessionMessageBody), `"name":"ack"`) {
+		t.Fatalf("expected outputSchema override in send body: %s", server.lastSessionMessageBody)
+	}
+}
+
+// ---------- ParseRunOutput ------------------------------------------------
+
+func TestParseRunOutput_DecodesIntoStruct(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{
+			kind: "result",
+			data: map[string]any{
+				"subtype": "success",
+				"text":    `{"city":"SF","temperature_c":17.5}`,
+			},
+		}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	result, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{Schema: weatherSchema()},
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var report struct {
+		City         string  `json:"city"`
+		TemperatureC float64 `json:"temperature_c"`
+	}
+	if err := ParseRunOutput(result, &report); err != nil {
+		t.Fatalf("ParseRunOutput: %v", err)
+	}
+	if report.City != "SF" || report.TemperatureC != 17.5 {
+		t.Fatalf("decoded wrong values: %+v", report)
+	}
+}
+
+func TestParseRunOutput_ReturnsParseErrorOnNonJSON(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{
+			kind: "result",
+			data: map[string]any{
+				"subtype": "success",
+				"text":    "I refuse to answer in JSON.",
+			},
+		}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	result, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var dest map[string]any
+	err = ParseRunOutput(result, &dest)
+	if err == nil {
+		t.Fatalf("expected ParseError, got nil")
+	}
+	var pe *ParseError
+	if !errorsAs(err, &pe) {
+		t.Fatalf("expected *ParseError, got %T (%v)", err, err)
+	}
+	if pe.Text != "I refuse to answer in JSON." {
+		t.Fatalf("ParseError.Text not preserved: %q", pe.Text)
+	}
 }
 
 // ---------- Local-tool-call dispatch by `kind` -----------------------------

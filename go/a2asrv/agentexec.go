@@ -42,6 +42,7 @@ type AgentSpec struct {
 	Name           string
 	Tools          []mantyx.ToolRef
 	ReasoningLevel *mantyx.ReasoningLevel
+	OutputSchema   *mantyx.OutputSchema
 	Metadata       map[string]string
 	Budgets        map[string]any
 }
@@ -285,6 +286,7 @@ func (e *Executor) runSpec(prompt string) mantyx.RunSpec {
 		Tools:          e.agent.Tools,
 		Prompt:         prompt,
 		ReasoningLevel: e.agent.ReasoningLevel,
+		OutputSchema:   e.agent.OutputSchema,
 		Metadata:       cloneMap(e.agent.Metadata),
 	}
 }
@@ -304,6 +306,7 @@ func (e *Executor) sessionSpec(contextID string) mantyx.SessionSpec {
 		Name:           e.agent.Name,
 		Tools:          e.agent.Tools,
 		ReasoningLevel: e.agent.ReasoningLevel,
+		OutputSchema:   e.agent.OutputSchema,
 		Metadata:       meta,
 	}
 }

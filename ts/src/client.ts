@@ -5,6 +5,7 @@ import {
   MantyxAuthError,
   MantyxError,
   MantyxNetworkError,
+  MantyxParseError,
   MantyxRunError,
   MantyxToolError,
 } from "./errors.js";
@@ -80,6 +81,25 @@ export interface AgentSpecBase {
   reasoningLevel?: ReasoningLevel;
   budgets?: { maxToolTurns?: number };
   /**
+   * Constrains the model's **final assistant text** to a JSON document
+   * matching a JSON Schema. The terminal `result` event still carries the
+   * reply as `text: string`, but that string is guaranteed-parseable JSON.
+   *
+   * `name` (optional) is a stable identifier the server forwards to the
+   * provider (OpenAI `text.format.name`, Anthropic synthetic-tool name).
+   * Defaults to `"output"`. Must match `/^[a-zA-Z0-9_-]{1,64}$/`.
+   *
+   * `schema` is a JSON Schema describing the final assistant text. Its
+   * root must be a JSON **object** — most providers reject array / scalar
+   * roots in structured-output mode. The schema is shipped verbatim;
+   * MANTYX does not validate its contents (the provider does).
+   *
+   * Use {@link parseRunOutput} on the resulting `RunResult` to JSON.parse
+   * the reply (and optionally re-validate against your own zod / typebox /
+   * ajv schema). See `docs/wire-protocol.md` §7.
+   */
+  outputSchema?: OutputSchema;
+  /**
    * Flat string→string KV carried alongside the run / session for
    * observability. Use it to tag runs with your own application identifiers
    * (customer id, environment, workflow name, …) — the values are visible in
@@ -105,6 +125,18 @@ export interface RunSpec extends AgentSpecBase {
 }
 
 export type SessionSpec = AgentSpecBase;
+
+/**
+ * Constrains the final assistant text to a JSON document matching a
+ * JSON Schema. See {@link AgentSpecBase.outputSchema} for the full
+ * semantics.
+ */
+export interface OutputSchema {
+  /** Optional. Defaults to `"output"`. Must match `/^[a-zA-Z0-9_-]{1,64}$/`. */
+  name?: string;
+  /** Required. JSON Schema describing the final assistant text. Root must be a JSON object. */
+  schema: Record<string, unknown>;
+}
 
 export interface RunResult {
   runId: string;
@@ -666,6 +698,11 @@ export class AgentSession {
        * and does not mutate the session's stored value.
        */
       reasoningLevel?: ReasoningLevel;
+      /**
+       * Per-message override for `outputSchema`. Applies only to this run
+       * and does not mutate the session's stored value.
+       */
+      outputSchema?: OutputSchema;
     } = {},
   ): Promise<RunResult> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -685,6 +722,7 @@ export class AgentSession {
       signal?: AbortSignal;
       metadata?: Record<string, string>;
       reasoningLevel?: ReasoningLevel;
+      outputSchema?: OutputSchema;
     } = {},
   ): AsyncGenerator<RunEvent, void, void> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -697,13 +735,20 @@ export class AgentSession {
 
   private buildSessionMessageBody(
     prompt: string,
-    opts: { metadata?: Record<string, string>; reasoningLevel?: ReasoningLevel },
+    opts: {
+      metadata?: Record<string, string>;
+      reasoningLevel?: ReasoningLevel;
+      outputSchema?: OutputSchema;
+    },
   ): Record<string, unknown> {
     const body: Record<string, unknown> = { prompt };
     if (this.tools.length > 0) body.tools = serializeToolRefs(this.tools);
     if (opts.metadata && Object.keys(opts.metadata).length > 0) body.metadata = opts.metadata;
     if (opts.reasoningLevel !== undefined) {
       body.reasoningLevel = normalizeReasoningLevel(opts.reasoningLevel);
+    }
+    if (opts.outputSchema !== undefined) {
+      body.outputSchema = normalizeOutputSchema(opts.outputSchema);
     }
     return body;
   }
@@ -745,6 +790,9 @@ function serializeAgentSpec(
   if (spec.modelId) body.modelId = spec.modelId;
   if (spec.reasoningLevel !== undefined) {
     body.reasoningLevel = normalizeReasoningLevel(spec.reasoningLevel);
+  }
+  if (spec.outputSchema !== undefined) {
+    body.outputSchema = normalizeOutputSchema(spec.outputSchema);
   }
   if (spec.budgets) body.budgets = spec.budgets;
   if (spec.metadata && Object.keys(spec.metadata).length > 0) body.metadata = spec.metadata;
@@ -879,6 +927,112 @@ function normalizeReasoningLevel(level: ReasoningLevel): string | number {
   throw new MantyxError(
     `reasoningLevel must be one of "off" | "low" | "medium" | "high" or a number 0..100, got ${JSON.stringify(level)}`,
   );
+}
+
+const OUTPUT_SCHEMA_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const OUTPUT_SCHEMA_MAX_BYTES = 32 * 1024;
+
+/**
+ * Validate an `OutputSchema` value and return the wire-shaped object.
+ *
+ * Mirrors the server-side `400 invalid_request` checks (name regex, schema
+ * shape, ≤ 32 KB serialized) so callers get an early local error instead of
+ * a round-trip rejection.
+ */
+function normalizeOutputSchema(value: OutputSchema): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MantyxError(
+      `outputSchema must be an object of shape { name?, schema }, got ${JSON.stringify(value)}`,
+    );
+  }
+  const out: Record<string, unknown> = {};
+  if (value.name !== undefined) {
+    if (typeof value.name !== "string" || !OUTPUT_SCHEMA_NAME_RE.test(value.name)) {
+      throw new MantyxError(
+        `outputSchema.name must match /^[a-zA-Z0-9_-]{1,64}$/, got ${JSON.stringify(value.name)}`,
+      );
+    }
+    out.name = value.name;
+  }
+  const schema = value.schema;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new MantyxError(
+      `outputSchema.schema must be a non-null JSON object (the JSON Schema root)`,
+    );
+  }
+  out.schema = schema;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(out);
+  } catch (err) {
+    throw new MantyxError(
+      `outputSchema is not JSON-serialisable: ${(err as Error).message ?? String(err)}`,
+    );
+  }
+  if (serialized.length > OUTPUT_SCHEMA_MAX_BYTES) {
+    throw new MantyxError(
+      `outputSchema serialised JSON is ${serialized.length} bytes; the server enforces a 32 KB limit`,
+    );
+  }
+  return out;
+}
+
+/**
+ * Parse the terminal text of a `RunResult` as JSON.
+ *
+ * When the run was submitted with `outputSchema`, MANTYX (via the LLM
+ * provider) guarantees the reply parses as JSON in the *vast* majority of
+ * cases. Transient model errors (refusal text, truncation under
+ * `max_tokens` pressure, exotic Unicode) can still produce strings that
+ * fail to `JSON.parse` in rare edge cases — this helper centralises that
+ * brittle step and surfaces a typed {@link MantyxParseError} on failure
+ * with the original text preserved on `err.text`.
+ *
+ * Pass an optional `validator` (zod's `.parse`, an Ajv compiled validator,
+ * or any function) to re-validate against your source-of-truth schema. The
+ * validator's return value (or thrown error) is forwarded to the caller.
+ *
+ * @example
+ * ```ts
+ * import { z } from "zod";
+ * import { parseRunOutput } from "@mantyx/sdk";
+ *
+ * const Schema = z.object({ city: z.string(), temperature_c: z.number() });
+ * const result = await client.runAgent({
+ *   systemPrompt: "...",
+ *   prompt: "What's the weather in SF?",
+ *   outputSchema: { name: "weather_report", schema: weatherJsonSchema },
+ * });
+ * const report = parseRunOutput(result, Schema.parse.bind(Schema));
+ * //    ^? { city: string; temperature_c: number }
+ * ```
+ */
+export function parseRunOutput<T = unknown>(
+  result: RunResult,
+  validator?: (value: unknown) => T,
+): T {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.text);
+  } catch (err) {
+    throw new MantyxParseError(
+      `Run ${result.runId} returned non-JSON text; cannot satisfy outputSchema`,
+      result.text,
+      { cause: err },
+    );
+  }
+  if (validator) {
+    try {
+      return validator(parsed);
+    } catch (err) {
+      throw new MantyxParseError(
+        `Run ${result.runId} output failed validation: ${(err as Error).message ?? String(err)}`,
+        result.text,
+        { cause: err },
+      );
+    }
+  }
+  return parsed as T;
 }
 
 function sleep(ms: number): Promise<void> {

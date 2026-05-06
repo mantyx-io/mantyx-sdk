@@ -80,6 +80,7 @@ export default defineConfig({
           items: [
             { label: "Models", link: "/docs/models/" },
             { label: "Reasoning level", link: "/docs/reasoning/" },
+            { label: "Output schema", link: "/docs/output-schema/" },
             { label: "Streaming", link: "/docs/streaming/" },
             { label: "Errors", link: "/docs/errors/" },
             { label: "Metadata", link: "/docs/metadata/" },

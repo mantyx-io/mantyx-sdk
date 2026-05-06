@@ -58,6 +58,11 @@ at <https://mantyx-io.github.io/mantyx-sdk/>.
 - **Tune thinking effort** — pass `reasoningLevel` /
   `reasoning_level` (string anchor `"off"|"low"|"medium"|"high"` or an
   integer in `[0, 100]`) to dial the LLM's reasoning budget per run.
+- **Constrain replies to JSON** — pass `outputSchema` /
+  `output_schema` / `OutputSchema` (a JSON Schema) and the model's final
+  message is guaranteed to be parseable JSON. Each SDK ships a
+  `parseRunOutput` / `parse_run_output` / `ParseRunOutput` helper that
+  decodes it into your own typed value.
 - **Stream tokens** — assistant deltas, thinking deltas, server tool results,
   local tool calls, and the terminal `result` event over SSE.
 - **Pick a model** — choose a workspace BYOK provider, a specific vendor

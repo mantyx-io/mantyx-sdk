@@ -63,10 +63,32 @@ class MantyxRunError(MantyxError):
         self.subtype = subtype
 
 
+class MantyxParseError(MantyxError):
+    """Raised by :func:`mantyx.parse_run_output` when the run's terminal text
+    cannot be JSON-parsed (or fails the user-supplied validator).
+
+    The original assistant text is preserved on the ``text`` attribute so
+    callers can log the raw model output for debugging.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        text: str,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message, code="output_parse_failed")
+        self.text = text
+        if cause is not None:
+            self.__cause__ = cause
+
+
 __all__ = [
     "MantyxAuthError",
     "MantyxError",
     "MantyxNetworkError",
+    "MantyxParseError",
     "MantyxRunError",
     "MantyxToolError",
 ]

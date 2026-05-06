@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from ._schema import ParametersInput
 
@@ -42,6 +43,24 @@ ToolName = str
 #: provider thinking on reasoning models. The MANTYX server maps this onto
 #: each LLM's native dial — see ``docs/agent-runs-protocol.md`` §4.4.
 ReasoningLevel = Literal["off", "low", "medium", "high"] | int
+
+
+class OutputSchema(TypedDict, total=False):
+    """Constrains the model's final assistant text to a JSON document
+    matching a JSON Schema.
+
+    ``name`` is optional; defaults to ``"output"`` server-side. Must match
+    ``/^[a-zA-Z0-9_-]{1,64}$/``. ``schema`` is required and its root must
+    be a JSON object — most providers reject array / scalar roots in
+    structured-output mode. The schema is shipped verbatim; MANTYX does
+    not validate its contents (the provider does).
+
+    See :func:`mantyx.parse_run_output` for the recommended client-side
+    re-validation pattern.
+    """
+
+    name: str
+    schema: Mapping[str, Any]
 
 
 _LOCAL_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
@@ -601,6 +620,54 @@ def normalize_reasoning_level(level: ReasoningLevel | None) -> str | int | None:
     )
 
 
+_OUTPUT_SCHEMA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_OUTPUT_SCHEMA_MAX_BYTES = 32 * 1024
+
+
+def normalize_output_schema(
+    value: OutputSchema | Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate an :class:`OutputSchema` value and return the wire-shaped dict.
+
+    Mirrors the server-side ``400 invalid_request`` checks (name regex,
+    schema shape, ≤ 32 KB serialised) so callers get an early local error
+    instead of a round-trip rejection.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "output_schema must be a mapping of shape {'name'?: str, 'schema': dict}; "
+            f"got {type(value).__name__}"
+        )
+    out: dict[str, Any] = {}
+    if "name" in value and value["name"] is not None:
+        name = value["name"]
+        if not isinstance(name, str) or not _OUTPUT_SCHEMA_NAME_RE.match(name):
+            raise ValueError(
+                f"output_schema.name must match /^[a-zA-Z0-9_-]{{1,64}}$/; got {name!r}"
+            )
+        out["name"] = name
+    if "schema" not in value:
+        raise ValueError("output_schema.schema is required")
+    schema = value["schema"]
+    if not isinstance(schema, Mapping) or isinstance(schema, (list, tuple)):
+        raise ValueError(
+            "output_schema.schema must be a non-null JSON object (the JSON Schema root)"
+        )
+    out["schema"] = dict(schema) if not isinstance(schema, dict) else schema
+    try:
+        serialized = json.dumps(out)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"output_schema is not JSON-serialisable: {exc}") from exc
+    if len(serialized.encode("utf-8")) > _OUTPUT_SCHEMA_MAX_BYTES:
+        raise ValueError(
+            f"output_schema serialised JSON is {len(serialized)} bytes; "
+            "the server enforces a 32 KB limit"
+        )
+    return out
+
+
 __all__ = [
     "LocalA2ATool",
     "LocalMcpHttpTransport",
@@ -611,6 +678,7 @@ __all__ = [
     "MantyxMcpToolRef",
     "MantyxPluginToolRef",
     "MantyxToolRef",
+    "OutputSchema",
     "ReasoningLevel",
     "ToolName",
     "ToolRef",
@@ -627,6 +695,7 @@ __all__ = [
     "mantyx_plugin_tool",
     "mantyx_tool",
     "maybe_await",
+    "normalize_output_schema",
     "normalize_reasoning_level",
     "serialize_tool_refs",
 ]

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from mantyx import (
     MantyxClient,
+    MantyxParseError,
     define_local_a2a,
     define_local_mcp,
     define_local_tool,
@@ -27,8 +28,14 @@ from mantyx import (
     is_local_mcp_server,
     mantyx_a2a,
     mantyx_mcp,
+    parse_run_output,
 )
-from mantyx.tools import LocalMcpServer, _ResolvedMcpServer, normalize_reasoning_level
+from mantyx.tools import (
+    LocalMcpServer,
+    _ResolvedMcpServer,
+    normalize_output_schema,
+    normalize_reasoning_level,
+)
 
 from .conftest import MockServer, RunScript, ScriptEvent
 
@@ -289,6 +296,177 @@ def test_reasoning_level_in_session_message(
     body = mock_server.last_session_message_body
     assert body is not None
     assert body["reasoningLevel"] == "high"
+
+
+# --------------------------------------------------------------- output_schema
+
+
+_WEATHER_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"},
+        "temperature_c": {"type": "number"},
+    },
+    "required": ["city", "temperature_c"],
+    "additionalProperties": False,
+}
+
+
+def test_output_schema_forwarded_on_run(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        output_schema={"name": "weather_report", "schema": _WEATHER_SCHEMA},
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["outputSchema"] == {
+        "name": "weather_report",
+        "schema": _WEATHER_SCHEMA,
+    }
+
+
+def test_output_schema_omitted_when_unset(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(system_prompt="x", prompt="y")
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert "outputSchema" not in body
+
+
+def test_output_schema_validation() -> None:
+    assert normalize_output_schema(None) is None
+    assert normalize_output_schema({"schema": _WEATHER_SCHEMA}) == {"schema": _WEATHER_SCHEMA}
+    assert normalize_output_schema({"name": "ok-name_1", "schema": _WEATHER_SCHEMA}) == {
+        "name": "ok-name_1",
+        "schema": _WEATHER_SCHEMA,
+    }
+    with pytest.raises(ValueError):
+        normalize_output_schema({"name": "bad name!", "schema": _WEATHER_SCHEMA})
+    with pytest.raises(ValueError):
+        normalize_output_schema({"schema": []})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        normalize_output_schema({"schema": None})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        normalize_output_schema({"name": "ok"})  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError):
+        normalize_output_schema("not a mapping")  # type: ignore[arg-type]
+
+
+def test_output_schema_size_limit_is_enforced() -> None:
+    huge: dict[str, object] = {"type": "object", "properties": {}}
+    props: dict[str, object] = {}
+    for i in range(4000):
+        props[f"f_{i}"] = {"type": "string", "description": "x" * 8}
+    huge["properties"] = props
+    with pytest.raises(ValueError, match="32 KB"):
+        normalize_output_schema({"schema": huge})
+
+
+def test_output_schema_in_session_message(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    session = mantyx_client.create_session(
+        system_prompt="x",
+        output_schema={"schema": _WEATHER_SCHEMA},
+    )
+    body = mock_server.last_session_create_body
+    assert body is not None
+    assert body["outputSchema"] == {"schema": _WEATHER_SCHEMA}
+
+    override = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
+    session.send("hi", output_schema={"name": "ack", "schema": override})
+    msg_body = mock_server.last_session_message_body
+    assert msg_body is not None
+    assert msg_body["outputSchema"] == {"name": "ack", "schema": override}
+
+
+# --------------------------------------------------------------- parse_run_output
+
+
+class _Weather(BaseModel):
+    city: str
+    temperature_c: float
+
+
+def test_parse_run_output_returns_dict_when_no_validator(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={
+                    "subtype": "success",
+                    "text": '{"city":"SF","temperature_c":17.0}',
+                },
+            )
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    parsed = parse_run_output(result)
+    assert parsed == {"city": "SF", "temperature_c": 17.0}
+
+
+def test_parse_run_output_runs_pydantic_validator(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={
+                    "subtype": "success",
+                    "text": '{"city":"SF","temperature_c":17.0}',
+                },
+            )
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    report = parse_run_output(result, _Weather.model_validate)
+    assert isinstance(report, _Weather)
+    assert report.city == "SF"
+    assert report.temperature_c == 17.0
+
+
+def test_parse_run_output_raises_on_non_json_text(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={"subtype": "success", "text": "I refuse to answer in JSON."},
+            )
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    with pytest.raises(MantyxParseError) as info:
+        parse_run_output(result)
+    assert info.value.text == "I refuse to answer in JSON."
+
+
+def test_parse_run_output_raises_when_validator_fails(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={"subtype": "success", "text": '{"city": 42}'},
+            )
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    with pytest.raises(MantyxParseError):
+        parse_run_output(result, _Weather.model_validate)
 
 
 # -------------------------------------------------- local_tool_call dispatch

@@ -296,6 +296,51 @@ OpenAI, `thinkingConfig` for Gemini, extended-thinking budget for Anthropic.
 Non-reasoning models silently ignore it. On sessions, `reasoningLevel`
 inherits from the session and can be overridden per `session.send`.
 
+## Structured output (`outputSchema`)
+
+Constrain the assistant's **final reply** to a JSON document matching a
+JSON Schema. The wire still ships the reply as `text: string`, but that
+string is guaranteed-parseable JSON. Pair with `parseRunOutput` for a
+typed value with a clean error path:
+
+```ts
+import { z } from "zod";
+import { MantyxClient, parseRunOutput } from "@mantyx/sdk";
+
+const Weather = z.object({ city: z.string(), temperature_c: z.number() });
+const WeatherJsonSchema = {
+  type: "object",
+  properties: {
+    city: { type: "string" },
+    temperature_c: { type: "number" },
+  },
+  required: ["city", "temperature_c"],
+  additionalProperties: false,
+} as const;
+
+const result = await client.runAgent({
+  systemPrompt: "Return the weather as JSON.",
+  prompt: "What's the weather in San Francisco right now?",
+  outputSchema: { name: "weather_report", schema: WeatherJsonSchema },
+});
+
+const report = parseRunOutput(result, (v) => Weather.parse(v));
+//    ^? { city: string; temperature_c: number }
+```
+
+The SDK validates `name` (regex `/^[a-zA-Z0-9_-]{1,64}$/`), schema shape
+(non-array JSON object), and total size (≤ 32 KB) locally so you get a
+typed `MantyxError` up front instead of a server round-trip rejection.
+On parse failure (rare; bad model output), `parseRunOutput` throws
+`MantyxParseError` with the original `text` preserved.
+
+`outputSchema` is independent of `reasoningLevel` — combine them for
+deep-reasoning JSON outputs. On sessions it inherits from
+`createSession({ outputSchema })` and can be overridden per
+`session.send(prompt, { outputSchema })`. See
+[`docs/wire-protocol.md` §7](./docs/wire-protocol.md) for the full
+per-provider mapping.
+
 ## Picking a model
 
 ```ts

@@ -36,11 +36,13 @@ from .client import (
     RunEvent,
     RunResult,
     SessionInfo,
+    parse_run_output,
 )
 from .errors import (
     MantyxAuthError,
     MantyxError,
     MantyxNetworkError,
+    MantyxParseError,
     MantyxRunError,
     MantyxToolError,
 )
@@ -54,6 +56,7 @@ from .tools import (
     MantyxMcpToolRef,
     MantyxPluginToolRef,
     MantyxToolRef,
+    OutputSchema,
     ReasoningLevel,
     ToolRef,
     define_local_a2a,
@@ -85,12 +88,14 @@ __all__ = [
     "MantyxError",
     "MantyxMcpToolRef",
     "MantyxNetworkError",
+    "MantyxParseError",
     "MantyxPluginToolRef",
     "MantyxRunError",
     "MantyxToolError",
     "MantyxToolRef",
     "ModelCatalog",
     "ModelInfo",
+    "OutputSchema",
     "PricingInfo",
     "ReasoningLevel",
     "RunEvent",
@@ -108,4 +113,5 @@ __all__ = [
     "mantyx_mcp",
     "mantyx_plugin_tool",
     "mantyx_tool",
+    "parse_run_output",
 ]

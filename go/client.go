@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -121,6 +122,11 @@ type RunSpec struct {
 	// the agent's default — off for ephemeral specs, the persisted value for
 	// AgentID-backed specs). See docs/agent-runs-protocol.md §4.4.
 	ReasoningLevel *ReasoningLevel
+	// OutputSchema constrains the model's final assistant text to a JSON
+	// document matching a JSON Schema. Use ParseRunOutput on the returned
+	// RunResult to JSON-decode the reply (and optionally validate against
+	// your own type). See OutputSchema and docs/wire-protocol.md §7.
+	OutputSchema *OutputSchema
 	// Metadata is a flat string→string KV carried alongside the run for
 	// observability. Visible (and filterable) in the MANTYX dashboard. Keys
 	// must match `[A-Za-z0-9._-]{1,64}`, values are strings ≤ 256 chars, and
@@ -144,6 +150,9 @@ type SessionSpec struct {
 	// ReasoningLevel sets the session-wide default applied to every run
 	// created through Session.Send. See RunSpec.ReasoningLevel.
 	ReasoningLevel *ReasoningLevel
+	// OutputSchema sets the session-wide default applied to every run
+	// created through Session.Send. See RunSpec.OutputSchema.
+	OutputSchema *OutputSchema
 	// Metadata is inherited by every run created through `Session.Send`. See
 	// RunSpec.Metadata for the validation rules.
 	Metadata map[string]string
@@ -184,6 +193,66 @@ func (r *ReasoningLevel) MarshalJSON() ([]byte, error) {
 	return json.Marshal(r.raw)
 }
 
+// OutputSchema constrains the model's final assistant text to a JSON
+// document matching a JSON Schema. The terminal `result` event still
+// carries the reply as `Text: string`, but that string is
+// guaranteed-parseable JSON. Use ParseRunOutput to JSON-decode it (and
+// optionally validate against your own type).
+//
+// Name (optional, default "output") is forwarded to the provider as the
+// stable schema identifier (OpenAI `text.format.name`, Anthropic synthetic
+// tool name). Must match `/^[a-zA-Z0-9_-]{1,64}$/` when set.
+//
+// Schema is the JSON Schema describing the assistant text. Its root must
+// be a JSON object — most providers reject array / scalar roots in
+// structured-output mode. The schema is shipped verbatim; MANTYX does not
+// validate its contents (the provider does).
+//
+// See `docs/wire-protocol.md` §7 for the full per-provider mapping.
+type OutputSchema struct {
+	Name   string         `json:"name,omitempty"`
+	Schema map[string]any `json:"schema"`
+}
+
+const outputSchemaMaxBytes = 32 * 1024
+
+var outputSchemaNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// validate mirrors the server-side `400 invalid_request` checks (name regex,
+// schema shape, ≤ 32 KB serialised) so callers see a typed Go error rather
+// than a round-trip rejection.
+func (s *OutputSchema) validate() error {
+	if s == nil {
+		return nil
+	}
+	if s.Name != "" && !outputSchemaNameRE.MatchString(s.Name) {
+		return &Error{
+			Code:    "invalid_request",
+			Message: fmt.Sprintf("OutputSchema.Name must match /^[a-zA-Z0-9_-]{1,64}$/, got %q", s.Name),
+		}
+	}
+	if s.Schema == nil {
+		return &Error{
+			Code:    "invalid_request",
+			Message: "OutputSchema.Schema is required (the JSON Schema root must be a JSON object)",
+		}
+	}
+	enc, err := json.Marshal(s)
+	if err != nil {
+		return &Error{
+			Code:    "invalid_request",
+			Message: fmt.Sprintf("OutputSchema is not JSON-serialisable: %v", err),
+		}
+	}
+	if len(enc) > outputSchemaMaxBytes {
+		return &Error{
+			Code:    "invalid_request",
+			Message: fmt.Sprintf("OutputSchema serialised JSON is %d bytes; the server enforces a 32 KB limit", len(enc)),
+		}
+	}
+	return nil
+}
+
 // RunResult is the outcome of a successful run.
 type RunResult struct {
 	RunID  string
@@ -218,6 +287,9 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 	if spec.AgentID == "" && spec.SystemPrompt == "" {
 		return RunResult{}, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
 	}
+	if err := spec.OutputSchema.validate(); err != nil {
+		return RunResult{}, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return RunResult{}, err
 	}
@@ -236,6 +308,9 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 func (c *Client) StreamAgent(ctx context.Context, spec RunSpec) (<-chan RunEvent, error) {
 	if spec.AgentID == "" && spec.SystemPrompt == "" {
 		return nil, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
+	}
+	if err := spec.OutputSchema.validate(); err != nil {
+		return nil, err
 	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return nil, err
@@ -267,6 +342,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	if spec.AgentID == "" && spec.SystemPrompt == "" {
 		return nil, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
 	}
+	if err := spec.OutputSchema.validate(); err != nil {
+		return nil, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return nil, err
 	}
@@ -287,6 +365,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	}
 	if spec.ReasoningLevel != nil {
 		body["reasoningLevel"] = spec.ReasoningLevel
+	}
+	if spec.OutputSchema != nil {
+		body["outputSchema"] = spec.OutputSchema
 	}
 	if len(spec.Metadata) > 0 {
 		body["metadata"] = spec.Metadata
@@ -695,6 +776,9 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 	if spec.ReasoningLevel != nil {
 		body["reasoningLevel"] = spec.ReasoningLevel
 	}
+	if spec.OutputSchema != nil {
+		body["outputSchema"] = spec.OutputSchema
+	}
 	if spec.Prompt != "" {
 		body["prompt"] = spec.Prompt
 	}
@@ -705,6 +789,31 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 		body["metadata"] = spec.Metadata
 	}
 	return body
+}
+
+// ParseRunOutput JSON-decodes the terminal text of a RunResult into `dest`.
+//
+// When the run was submitted with OutputSchema, MANTYX (via the LLM
+// provider) guarantees the reply parses as JSON in the *vast* majority of
+// cases. Transient model errors (refusal text, truncation under
+// max_tokens pressure, exotic Unicode) can still produce strings that
+// fail to json.Unmarshal in rare edge cases — this helper centralises
+// that brittle step and surfaces a typed *ParseError on failure with the
+// original text preserved on err.Text.
+//
+// `dest` should be a pointer to whatever struct / map you want the JSON
+// reply decoded into:
+//
+//	var report struct {
+//		City         string  `json:"city"`
+//		TemperatureC float64 `json:"temperature_c"`
+//	}
+//	if err := mantyx.ParseRunOutput(result, &report); err != nil { ... }
+func ParseRunOutput(result RunResult, dest any) error {
+	if err := json.Unmarshal([]byte(result.Text), dest); err != nil {
+		return &ParseError{RunID: result.RunID, Text: result.Text, Cause: err}
+	}
+	return nil
 }
 
 func pathEscape(s string) string {

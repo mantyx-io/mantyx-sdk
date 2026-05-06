@@ -45,11 +45,13 @@ from .errors import (
 )
 from .sse import aiter_sse
 from .tools import (
+    OutputSchema,
     ReasoningLevel,
     ToolRef,
     _LocalHandlers,
     collect_local_handlers,
     maybe_await,
+    normalize_output_schema,
     normalize_reasoning_level,
     serialize_tool_refs,
 )
@@ -121,6 +123,7 @@ class AsyncMantyxClient:
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], Any] | None = None,
@@ -136,6 +139,7 @@ class AsyncMantyxClient:
                 name=name,
                 tools=tools_list,
                 reasoning_level=reasoning_level,
+                output_schema=output_schema,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -168,6 +172,7 @@ class AsyncMantyxClient:
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncIterator[RunEvent]:
@@ -185,6 +190,7 @@ class AsyncMantyxClient:
                 name=name,
                 tools=tools_list,
                 reasoning_level=reasoning_level,
+                output_schema=output_schema,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -216,6 +222,7 @@ class AsyncMantyxClient:
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncAgentSession:
@@ -229,6 +236,7 @@ class AsyncMantyxClient:
                 name=name,
                 tools=tools_list,
                 reasoning_level=reasoning_level,
+                output_schema=output_schema,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -527,10 +535,16 @@ class AsyncAgentSession:
         *,
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         on_assistant_delta: Callable[[str], Any] | None = None,
         on_event: Callable[[RunEvent], Any] | None = None,
     ) -> RunResult:
-        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
+        body = self._build_message_body(
+            prompt,
+            metadata=metadata,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+        )
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
             or {}
@@ -551,12 +565,18 @@ class AsyncAgentSession:
         *,
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
     ) -> AsyncIterator[RunEvent]:
         """Stream events from a session turn as they arrive.
 
         Async generator: ``async for event in session.stream("hi"):``.
         """
-        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
+        body = self._build_message_body(
+            prompt,
+            metadata=metadata,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+        )
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
             or {}
@@ -573,6 +593,7 @@ class AsyncAgentSession:
         *,
         metadata: Mapping[str, str] | None,
         reasoning_level: ReasoningLevel | None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"prompt": prompt}
         if self._tools_for_resume:
@@ -582,6 +603,9 @@ class AsyncAgentSession:
         normalized = normalize_reasoning_level(reasoning_level)
         if normalized is not None:
             body["reasoningLevel"] = normalized
+        normalized_schema = normalize_output_schema(output_schema)
+        if normalized_schema is not None:
+            body["outputSchema"] = normalized_schema
         return body
 
     async def history(self) -> list[dict[str, str]]:

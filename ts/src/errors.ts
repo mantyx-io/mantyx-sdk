@@ -59,3 +59,24 @@ export class MantyxRunError extends MantyxError {
     this.subtype = subtype;
   }
 }
+
+/**
+ * Thrown by {@link parseRunOutput} when the run's terminal text was supposed
+ * to be a JSON document (because `outputSchema` was set on the spec) but
+ * either failed to JSON.parse or failed the user-supplied validator.
+ *
+ * The original `text` is preserved on the `text` field so callers can log
+ * the raw model output for debugging.
+ */
+export class MantyxParseError extends MantyxError {
+  readonly text: string;
+
+  constructor(message: string, text: string, opts: { cause?: unknown } = {}) {
+    super(message, { code: "output_parse_failed" });
+    this.name = "MantyxParseError";
+    this.text = text;
+    if (opts.cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = opts.cause;
+    }
+  }
+}

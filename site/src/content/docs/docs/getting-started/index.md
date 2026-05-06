@@ -18,6 +18,7 @@ sidebar:
 - **Stream tokens** — assistant deltas, thinking deltas, server tool results, local tool calls, and the terminal `result` event over SSE.
 - **Pick a model** — choose a workspace BYOK provider, a specific vendor model, or a platform-hosted offering via a unified `modelId` string.
 - **Tune thinking effort** — set [`reasoningLevel`](/docs/reasoning/) per run (`"off" | "low" | "medium" | "high"` or `0–100`) and MANTYX maps it onto each provider's native dial.
+- **Constrain replies to JSON** — pass an [`outputSchema`](/docs/output-schema/) (a JSON Schema) and the model's final message is guaranteed to be parseable JSON; each SDK ships a `parseRunOutput` helper that decodes it into your own typed value.
 - **Tag for observability** — attach a flat `metadata` KV (e.g. `{ customer: "acme", env: "prod" }`) to runs and sessions so your team can filter the dashboard by them.
 
 ## Three first-party SDKs

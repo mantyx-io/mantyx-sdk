@@ -212,7 +212,18 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
     }
   ],
   "budgets": { "maxToolTurns": 32 },    // optional safety cap
-  "metadata": {                         // optional, see §4.5
+  "outputSchema": {                     // optional, see §4.5
+    "name": "weather_report",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "city": { "type": "string" },
+        "temperature_c": { "type": "number" }
+      },
+      "required": ["city", "temperature_c"]
+    }
+  },
+  "metadata": {                         // optional, see §4.6
     "customer": "acme",
     "env": "prod"
   }
@@ -472,7 +483,67 @@ For session-scoped runs the inheritance rules are:
   per-message override; applies to that one run only and does not mutate
   the session's stored value.
 
-### 4.5 `metadata` (developer-supplied KV for filtering)
+### 4.5 `outputSchema` (structured final reply)
+
+`outputSchema` constrains the model's **final assistant text** to a JSON
+document conforming to a JSON Schema. Useful when the SDK needs to feed the
+reply directly into downstream code without LLM-flavoured prose to parse out.
+
+```jsonc
+"outputSchema": {
+  "name":   "weather_report",       // optional; default "output"
+  "schema": {                       // required, root must be a JSON object
+    "type": "object",
+    "properties": {
+      "city":          { "type": "string" },
+      "temperature_c": { "type": "number" }
+    },
+    "required": ["city", "temperature_c"]
+  }
+}
+```
+
+| Field    | Required | Notes |
+| -------- | -------- | ----- |
+| `name`   | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`. Must match `/^[a-zA-Z0-9_-]{1,64}$/`. |
+| `schema` | yes      | JSON Schema describing the final assistant text. Root must be a JSON **object** (most providers reject array / scalar roots in structured-output mode). The schema is passed through verbatim — MANTYX does not validate its contents; the provider does. |
+
+Validation (server-side, `400 invalid_request` on violation):
+
+| Constraint                          | Limit |
+| ----------------------------------- | ----- |
+| Serialized JSON size of `outputSchema` | ≤ 32 KB |
+| `name` regex                        | `/^[a-zA-Z0-9_-]{1,64}$/` |
+| `schema` shape                      | non-`null`, non-array JSON object |
+
+**Per-provider behaviour** (mirrors the SDK's `RunAgentOptions.finalResponseSchema`):
+
+| Provider                       | How the schema is enforced |
+| ------------------------------ | -------------------------- |
+| OpenAI Responses (o-series, GPT-5.x, …) | `text.format = { type: "json_schema", strict: true, name, schema }` on every turn (works alongside tool calls). |
+| Gemini ≥ 2.5                   | `responseMimeType: "application/json"` + `responseJsonSchema` on no-tools turns (Gemini rejects schemas alongside `functionDeclarations`). |
+| Anthropic / Bedrock-Anthropic  | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text. |
+| xAI Grok, others               | Ignored (the model returns plain text). |
+
+The terminal `result` event still carries the reply as
+`data.text: string` — the SDK is expected to `JSON.parse` and validate
+against its own source-of-truth schema (Zod, Pydantic, …) so it keeps
+control of error handling on malformed-but-rare provider outputs.
+
+**Inheritance for sessions:**
+
+- `POST /agent-sessions { outputSchema }` — sets the session-default,
+  applied to every subsequent message run.
+- `POST /agent-sessions/:id/messages { outputSchema }` — optional
+  per-message override; applies to that one run only and does not mutate
+  the session's stored value.
+
+`outputSchema` works for both ephemeral runs (`systemPrompt`-defined) and
+`agentId`-backed runs — the runner applies the schema to whatever
+`AgentSpec` it built for the run. When the field is omitted, runs return
+unconstrained plain text as before.
+
+### 4.6 `metadata` (developer-supplied KV for filtering)
 
 `metadata` is a flat string→string KV that is **persisted alongside the run /
 session** and surfaced in the MANTYX dashboard. Use it to tag runs with your

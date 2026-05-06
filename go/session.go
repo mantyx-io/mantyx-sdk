@@ -23,6 +23,7 @@ type sendOptions struct {
 	OnEvent          func(RunEvent)
 	Metadata         map[string]string
 	ReasoningLevel   *ReasoningLevel
+	OutputSchema     *OutputSchema
 }
 
 // WithAssistantDelta registers a callback that receives streaming assistant text.
@@ -50,11 +51,21 @@ func WithReasoningLevel(level *ReasoningLevel) SendOption {
 	return func(o *sendOptions) { o.ReasoningLevel = level }
 }
 
+// WithOutputSchema overrides the session's stored OutputSchema for this
+// single run. Pass `&mantyx.OutputSchema{Schema: ...}` to attach a JSON
+// Schema to the assistant's reply for this turn only.
+func WithOutputSchema(schema *OutputSchema) SendOption {
+	return func(o *sendOptions) { o.OutputSchema = schema }
+}
+
 // Send sends a user turn and waits for the agent's reply.
 func (s *Session) Send(ctx context.Context, prompt string, opts ...SendOption) (RunResult, error) {
 	o := sendOptions{}
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if err := o.OutputSchema.validate(); err != nil {
+		return RunResult{}, err
 	}
 	body := s.buildMessageBody(prompt, o)
 	created, err := s.client.createRun(ctx, fmt.Sprintf("/agent-sessions/%s/messages", pathEscape(s.ID)), body)
@@ -69,6 +80,9 @@ func (s *Session) Stream(ctx context.Context, prompt string, opts ...SendOption)
 	o := sendOptions{}
 	for _, opt := range opts {
 		opt(&o)
+	}
+	if err := o.OutputSchema.validate(); err != nil {
+		return nil, err
 	}
 	body := s.buildMessageBody(prompt, o)
 	created, err := s.client.createRun(ctx, fmt.Sprintf("/agent-sessions/%s/messages", pathEscape(s.ID)), body)
@@ -98,6 +112,9 @@ func (s *Session) buildMessageBody(prompt string, o sendOptions) map[string]any 
 	}
 	if o.ReasoningLevel != nil {
 		body["reasoningLevel"] = o.ReasoningLevel
+	}
+	if o.OutputSchema != nil {
+		body["outputSchema"] = o.OutputSchema
 	}
 	return body
 }

@@ -31,15 +31,18 @@ from .errors import (
     MantyxAuthError,
     MantyxError,
     MantyxNetworkError,
+    MantyxParseError,
     MantyxRunError,
     MantyxToolError,
 )
 from .sse import SseEvent, iter_sse
 from .tools import (
+    OutputSchema,
     ReasoningLevel,
     ToolRef,
     _LocalHandlers,
     collect_local_handlers,
+    normalize_output_schema,
     normalize_reasoning_level,
     serialize_tool_refs,
 )
@@ -183,6 +186,7 @@ class MantyxClient:
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
@@ -202,6 +206,7 @@ class MantyxClient:
                 name=name,
                 tools=tools_list,
                 reasoning_level=reasoning_level,
+                output_schema=output_schema,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -236,13 +241,12 @@ class MantyxClient:
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Iterator[RunEvent]:
         tools_list: list[ToolRef] | None = list(tools) if tools else None
         sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
-        # We can't `try/finally` cleanup with an iterator return — wrap it
-        # in a generator that closes on exit.
         body = _serialize_agent_spec(
             agent_id=agent_id,
             system_prompt=system_prompt,
@@ -250,6 +254,7 @@ class MantyxClient:
             name=name,
             tools=tools_list,
             reasoning_level=reasoning_level,
+            output_schema=output_schema,
             budgets=budgets,
             metadata=metadata,
         )
@@ -287,6 +292,7 @@ class MantyxClient:
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AgentSession:
@@ -302,6 +308,7 @@ class MantyxClient:
                 name=name,
                 tools=tools_list,
                 reasoning_level=reasoning_level,
+                output_schema=output_schema,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -594,10 +601,16 @@ class AgentSession:
         *,
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
-        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
+        body = self._build_message_body(
+            prompt,
+            metadata=metadata,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+        )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
         )
@@ -617,8 +630,14 @@ class AgentSession:
         *,
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
     ) -> Iterator[RunEvent]:
-        body = self._build_message_body(prompt, metadata=metadata, reasoning_level=reasoning_level)
+        body = self._build_message_body(
+            prompt,
+            metadata=metadata,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+        )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
         )
@@ -633,6 +652,7 @@ class AgentSession:
         *,
         metadata: Mapping[str, str] | None,
         reasoning_level: ReasoningLevel | None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"prompt": prompt}
         if self._tools_for_resume:
@@ -642,6 +662,9 @@ class AgentSession:
         normalized = normalize_reasoning_level(reasoning_level)
         if normalized is not None:
             body["reasoningLevel"] = normalized
+        normalized_schema = normalize_output_schema(output_schema)
+        if normalized_schema is not None:
+            body["outputSchema"] = normalized_schema
         return body
 
     def history(self) -> list[dict[str, str]]:
@@ -689,6 +712,7 @@ def _serialize_agent_spec(
     name: str | None,
     tools: list[ToolRef] | None,
     reasoning_level: ReasoningLevel | None,
+    output_schema: OutputSchema | Mapping[str, Any] | None,
     budgets: Mapping[str, Any] | None,
     metadata: Mapping[str, str] | None,
 ) -> dict[str, Any]:
@@ -706,6 +730,9 @@ def _serialize_agent_spec(
     normalized_level = normalize_reasoning_level(reasoning_level)
     if normalized_level is not None:
         body["reasoningLevel"] = normalized_level
+    normalized_schema = normalize_output_schema(output_schema)
+    if normalized_schema is not None:
+        body["outputSchema"] = normalized_schema
     if budgets:
         body["budgets"] = dict(budgets)
     if metadata:
@@ -804,6 +831,62 @@ def _as_optional_float(v: Any) -> float | None:
     return None
 
 
+def parse_run_output(
+    result: RunResult,
+    validator: Callable[[Any], Any] | None = None,
+) -> Any:
+    """Parse the terminal text of a :class:`RunResult` as JSON.
+
+    When the run was submitted with ``output_schema``, MANTYX (via the LLM
+    provider) guarantees the reply parses as JSON in the *vast* majority
+    of cases. Transient model errors (refusal text, truncation under
+    ``max_tokens`` pressure, exotic Unicode) can still produce strings
+    that fail to ``json.loads`` in rare edge cases — this helper
+    centralises that brittle step and surfaces a typed
+    :class:`MantyxParseError` on failure with the original text preserved
+    on ``err.text``.
+
+    Pass an optional ``validator`` (a Pydantic ``model_validate``, an
+    ``ajv.compile``-style validator, or any callable) to re-validate
+    against your source-of-truth schema. Its return value is forwarded;
+    any exception is wrapped in :class:`MantyxParseError`.
+
+    Example::
+
+        from pydantic import BaseModel
+        from mantyx import parse_run_output
+
+        class WeatherReport(BaseModel):
+            city: str
+            temperature_c: float
+
+        result = client.run_agent(
+            system_prompt="...",
+            prompt="What's the weather in SF?",
+            output_schema={"name": "weather_report", "schema": WEATHER_JSON_SCHEMA},
+        )
+        report = parse_run_output(result, WeatherReport.model_validate)
+    """
+    try:
+        parsed = json.loads(result.text)
+    except json.JSONDecodeError as exc:
+        raise MantyxParseError(
+            f"Run {result.run_id} returned non-JSON text; cannot satisfy output_schema",
+            text=result.text,
+            cause=exc,
+        ) from exc
+    if validator is None:
+        return parsed
+    try:
+        return validator(parsed)
+    except Exception as exc:
+        raise MantyxParseError(
+            f"Run {result.run_id} output failed validation: {exc}",
+            text=result.text,
+            cause=exc,
+        ) from exc
+
+
 __all__ = [
     "DEFAULT_BASE_URL",
     "AgentSession",
@@ -814,4 +897,5 @@ __all__ = [
     "RunEvent",
     "RunResult",
     "SessionInfo",
+    "parse_run_output",
 ]
