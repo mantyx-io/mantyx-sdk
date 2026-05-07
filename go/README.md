@@ -66,11 +66,7 @@ func main() {
                 Name:        "read_file",
                 Description: "Read a UTF-8 file from the local filesystem.",
                 Parameters:  &readFileArgs{},
-                Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
-                    var args readFileArgs
-                    if err := json.Unmarshal(raw, &args); err != nil {
-                        return "", err
-                    }
+                Execute: func(ctx context.Context, args readFileArgs) (string, error) {
                     data, err := os.ReadFile(args.Path)
                     if err != nil {
                         return "", err
@@ -109,9 +105,7 @@ result, err := client.RunAgent(ctx, mantyx.RunSpec{
     Tools: []mantyx.ToolRef{
         mantyx.LocalTool(mantyx.LocalToolSpec{
             Name: "read_local_file",
-            Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
-                var args struct{ Path string `json:"path"` }
-                if err := json.Unmarshal(raw, &args); err != nil { return "", err }
+            Execute: func(ctx context.Context, args struct{ Path string `json:"path"` }) (string, error) {
                 b, err := os.ReadFile(args.Path)
                 if err != nil { return "", err }
                 return string(b), nil
@@ -404,7 +398,7 @@ session, err := client.CreateSession(ctx, mantyx.SessionSpec{
             Name:        "today",
             Description: "Get today's date as ISO 8601.",
             Parameters:  &struct{}{},
-            Execute: func(ctx context.Context, _ json.RawMessage) (string, error) {
+            Execute: func(ctx context.Context, _ struct{}) (string, error) {
                 return time.Now().Format("2006-01-02"), nil
             },
         }),

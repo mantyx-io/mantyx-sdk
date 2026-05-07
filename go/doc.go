@@ -20,11 +20,7 @@
 //	            Name:        "read_file",
 //	            Description: "Read a UTF-8 file from the local filesystem.",
 //	            Parameters:  &readFileArgs{},
-//	            Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
-//	                var args readFileArgs
-//	                if err := json.Unmarshal(raw, &args); err != nil {
-//	                    return "", err
-//	                }
+//	            Execute: func(ctx context.Context, args readFileArgs) (string, error) {
 //	                data, err := os.ReadFile(args.Path)
 //	                if err != nil {
 //	                    return "", err

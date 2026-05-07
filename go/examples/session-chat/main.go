@@ -5,10 +5,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 
 	mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
+
+type numberBetweenArgs struct {
+	Range []int `json:"range" jsonschema:"description=Range of numbers to generate a random number between"`
+}
 
 func main() {
 	apiKey := mustEnv("MANTYX_API_KEY")
@@ -23,6 +28,16 @@ func main() {
 	session, err := client.CreateSession(ctx, mantyx.SessionSpec{
 		Name:         "repl",
 		SystemPrompt: "You are a friendly chat assistant. Keep replies concise.",
+		Tools: []mantyx.ToolRef{
+			mantyx.LocalTool(mantyx.LocalToolSpec{
+				Name:        "number_between",
+				Description: "Generate a random number between two numbers.",
+				Parameters:  &numberBetweenArgs{},
+				Execute: func(ctx context.Context, args numberBetweenArgs) (string, error) {
+					return fmt.Sprintf("%d", rand.Intn(args.Range[1]-args.Range[0]+1)+args.Range[0]), nil
+				},
+			}),
+		},
 		// Tag every run in this session so they can be filtered in the MANTYX
 		// dashboard (Agent runs → Sessions, "metadata" filter).
 		Metadata: map[string]string{

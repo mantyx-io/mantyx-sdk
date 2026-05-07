@@ -1,6 +1,6 @@
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { defineLocalTool, MantyxClient, mantyxPluginTool, mantyxTool } from "@mantyx/sdk";
+import { defineLocalTool, MantyxClient } from "@mantyx/sdk";
 import { z } from "zod";
 
 const apiKey = required("MANTYX_API_KEY");
@@ -9,7 +9,9 @@ const workspaceSlug = required("MANTYX_WORKSPACE_SLUG");
 const client = new MantyxClient({
   apiKey,
   workspaceSlug,
-  ...(process.env.MANTYX_BASE_URL ? { baseUrl: process.env.MANTYX_BASE_URL } : {}),
+  ...(process.env.MANTYX_BASE_URL
+    ? { baseUrl: process.env.MANTYX_BASE_URL }
+    : {}),
 });
 
 const randomOddTool = defineLocalTool({
@@ -21,11 +23,24 @@ const randomOddTool = defineLocalTool({
   },
 });
 
+const numberBetweenTool = defineLocalTool({
+  name: "number_between",
+  description: "Generate a random number between two numbers.",
+  parameters: z.object({
+    range: z.array(z.number()),
+  }),
+  execute: async ({ range }): Promise<string> => {
+    return String(
+      Math.floor(Math.random() * (range[1] - range[0] + 1)) + range[0],
+    );
+  },
+});
+
 async function main(): Promise<void> {
   const session = await client.createSession({
     name: "repl",
     systemPrompt: "You are a friendly chat assistant. Keep replies concise.",
-    tools: [randomOddTool, mantyxPluginTool("@zendesk/list-tickets")],
+    tools: [randomOddTool, numberBetweenTool],
     // Tag every run in this session so they can be filtered in the MANTYX
     // dashboard (Agent runs → Sessions, "metadata" filter).
     metadata: {
@@ -34,7 +49,9 @@ async function main(): Promise<void> {
       env: process.env.NODE_ENV ?? "development",
     },
   });
-  console.log(`Session created (${session.id}). Type messages, Ctrl+D to exit.`);
+  console.log(
+    `Session created (${session.id}). Type messages, Ctrl+D to exit.`,
+  );
 
   const rl = readline.createInterface({ input: stdin, output: stdout });
   try {

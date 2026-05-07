@@ -649,7 +649,7 @@ func (c *Client) dispatchLocalTool(ctx context.Context, runID string, ev RunEven
 			return
 		}
 		rawArgs, _ := json.Marshal(ev.Data["args"])
-		out, err := tool.spec.Execute(ctx, rawArgs)
+		out, err := tool.invoke(ctx, rawArgs)
 		if err != nil {
 			_ = c.PostToolResult(ctx, runID, toolUseID, "", err.Error())
 			return

@@ -1,6 +1,6 @@
 {
   "name": "@mantyx/sdk",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "MANTYX as a hosted agent runtime: define ephemeral agents, mix server-side MANTYX tools with locally-executed tools, run them remotely.",
   "type": "module",
   "main": "./dist/index.cjs",

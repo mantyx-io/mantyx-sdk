@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -24,7 +23,7 @@ func main() {
 		mantyx.LocalTool(mantyx.LocalToolSpec{
 			Name:        "current_time",
 			Description: "Return the current ISO timestamp from the developer's local clock.",
-			Execute: func(ctx context.Context, args json.RawMessage) (string, error) {
+			Execute: func(ctx context.Context, _ struct{}) (string, error) {
 				return time.Now().UTC().Format(time.RFC3339), nil
 			},
 		}),

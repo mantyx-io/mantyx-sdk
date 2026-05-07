@@ -809,6 +809,177 @@ func TestDispatch_UnknownKindFallsBackToLocalRegistry(t *testing.T) {
 	}
 }
 
+func TestDispatch_LocalTool_TypedStructArgs(t *testing.T) {
+	type echoArgs struct {
+		Value string `json:"value"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_typed",
+					"name":      "echo",
+					"args":      map[string]any{"value": "abc"},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:       "echo",
+		Parameters: &echoArgs{},
+		Execute: func(ctx context.Context, args echoArgs) (string, error) {
+			return "result:" + args.Value, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !strings.Contains(string(server.lastToolResultBody), "result:abc") {
+		t.Fatalf("server didn't receive tool result: %s", server.lastToolResultBody)
+	}
+}
+
+func TestDispatch_LocalTool_TypedPointerArgs(t *testing.T) {
+	type echoArgs struct {
+		Value string `json:"value"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_ptr",
+					"name":      "echo",
+					"args":      map[string]any{"value": "ptr"},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:       "echo",
+		Parameters: &echoArgs{},
+		Execute: func(ctx context.Context, args *echoArgs) (string, error) {
+			if args == nil {
+				return "nil", nil
+			}
+			return "result:" + args.Value, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !strings.Contains(string(server.lastToolResultBody), "result:ptr") {
+		t.Fatalf("server didn't receive tool result: %s", server.lastToolResultBody)
+	}
+}
+
+func TestLocalTool_PanicsOnInvalidExecuteSignature(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func()
+	}{
+		{
+			name: "non-function Execute",
+			fn: func() {
+				LocalTool(LocalToolSpec{Name: "x", Execute: "not a function"})
+			},
+		},
+		{
+			name: "wrong arity (1 param)",
+			fn: func() {
+				LocalTool(LocalToolSpec{Name: "x", Execute: func(ctx context.Context) (string, error) { return "", nil }})
+			},
+		},
+		{
+			name: "first param not context",
+			fn: func() {
+				LocalTool(LocalToolSpec{Name: "x", Execute: func(s string, args struct{}) (string, error) { return "", nil }})
+			},
+		},
+		{
+			name: "wrong return types",
+			fn: func() {
+				LocalTool(LocalToolSpec{Name: "x", Execute: func(ctx context.Context, args struct{}) (int, error) { return 0, nil }})
+			},
+		},
+		{
+			name: "nil Execute",
+			fn: func() {
+				LocalTool(LocalToolSpec{Name: "x"})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatalf("expected panic for %s", tc.name)
+				}
+			}()
+			tc.fn()
+		})
+	}
+}
+
+func TestDispatch_LocalTool_BadJSONSurfacesAsToolError(t *testing.T) {
+	type strictArgs struct {
+		N int `json:"n"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_bad",
+					"name":      "strict",
+					"args":      map[string]any{"n": "not-a-number"},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:       "strict",
+		Parameters: &strictArgs{},
+		Execute: func(ctx context.Context, args strictArgs) (string, error) {
+			return fmt.Sprintf("n=%d", args.N), nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !strings.Contains(string(server.lastToolResultBody), "decode args for tool") {
+		t.Fatalf("expected decode error to surface as tool error: %s", server.lastToolResultBody)
+	}
+}
+
 func TestDispatch_MissingHandlerSurfacesError(t *testing.T) {
 	server := newMockServer()
 	defer server.close()

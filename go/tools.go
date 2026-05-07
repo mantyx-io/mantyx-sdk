@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -66,15 +67,26 @@ type LocalToolSpec struct {
 	//   - map[string]any / json.RawMessage     → passed through as-is
 	//   - a Go struct (or pointer-to-struct)   → reflected to JSON Schema
 	Parameters any
-	// Execute is invoked when the LLM calls this tool. The runtime delivers the
-	// tool's arguments as raw JSON; the function returns the tool result as a
-	// string (any non-string can be returned via json.Marshal yourself).
-	Execute func(ctx context.Context, args json.RawMessage) (string, error)
+	// Execute is invoked when the LLM calls this tool. It must be a function
+	// with the signature:
+	//
+	//	func(ctx context.Context, args T) (string, error)
+	//
+	// where T is the same Go type used for Parameters (or its pointer/value
+	// counterpart). The SDK json.Unmarshals the raw tool arguments into a
+	// fresh value of T before calling Execute. The function returns the tool
+	// result as a string (any non-string can be returned via json.Marshal
+	// yourself).
+	//
+	// For backwards compatibility, T may also be json.RawMessage, in which
+	// case the SDK forwards the unparsed JSON bytes verbatim.
+	Execute any
 }
 
 type localTool struct {
 	spec   LocalToolSpec
 	schema map[string]any
+	invoke func(ctx context.Context, raw json.RawMessage) (string, error)
 }
 
 func (t *localTool) toolWire() map[string]any {
@@ -96,7 +108,95 @@ func LocalTool(spec LocalToolSpec) ToolRef {
 	if err != nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
-	return &localTool{spec: spec, schema: schema}
+	invoke, err := buildLocalToolInvoker(spec.Name, spec.Execute)
+	if err != nil {
+		panic(fmt.Sprintf("mantyx.LocalTool %q: %v", spec.Name, err))
+	}
+	return &localTool{spec: spec, schema: schema, invoke: invoke}
+}
+
+var (
+	contextType = reflect.TypeOf((*context.Context)(nil)).Elem()
+	errorType   = reflect.TypeOf((*error)(nil)).Elem()
+	rawMsgType  = reflect.TypeOf(json.RawMessage(nil))
+)
+
+// buildLocalToolInvoker validates spec.Execute's shape and returns a closure
+// that decodes the raw JSON args into Execute's typed parameter, invokes the
+// function, and returns its (string, error) reply.
+//
+// Accepted Execute signatures:
+//
+//	func(ctx context.Context, args T) (string, error)
+//
+// where T is any concrete Go type (struct, *struct, map[string]any,
+// json.RawMessage, primitives, …). For json.RawMessage the SDK forwards the
+// raw bytes verbatim; otherwise it allocates a zero-valued T (or *T's
+// pointee) and json.Unmarshals the raw args into it before the call.
+func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Context, raw json.RawMessage) (string, error), error) {
+	if execute == nil {
+		return nil, fmt.Errorf("Execute is required")
+	}
+	// Fast path: legacy json.RawMessage signature avoids reflection cost on
+	// every dispatch.
+	if fn, ok := execute.(func(context.Context, json.RawMessage) (string, error)); ok {
+		return fn, nil
+	}
+
+	rv := reflect.ValueOf(execute)
+	rt := rv.Type()
+	if rt.Kind() != reflect.Func {
+		return nil, fmt.Errorf("Execute must be a function, got %s", rt.Kind())
+	}
+	if rt.NumIn() != 2 || rt.NumOut() != 2 {
+		return nil, fmt.Errorf("Execute must have signature func(context.Context, T) (string, error)")
+	}
+	if !rt.In(0).Implements(contextType) {
+		return nil, fmt.Errorf("Execute first parameter must be context.Context, got %s", rt.In(0))
+	}
+	if rt.Out(0).Kind() != reflect.String {
+		return nil, fmt.Errorf("Execute first return must be string, got %s", rt.Out(0))
+	}
+	if !rt.Out(1).Implements(errorType) {
+		return nil, fmt.Errorf("Execute second return must be error, got %s", rt.Out(1))
+	}
+
+	argType := rt.In(1)
+	isRawMessage := argType == rawMsgType
+	isPointer := argType.Kind() == reflect.Ptr
+
+	return func(ctx context.Context, raw json.RawMessage) (string, error) {
+		// Allocate a fresh *T (or *Telem when T is a pointer) so we have a
+		// settable target for json.Unmarshal.
+		var holder reflect.Value
+		if isPointer {
+			holder = reflect.New(argType.Elem())
+		} else {
+			holder = reflect.New(argType)
+		}
+		if !isRawMessage && len(raw) > 0 {
+			if err := json.Unmarshal(raw, holder.Interface()); err != nil {
+				return "", fmt.Errorf("decode args for tool %q: %w", toolName, err)
+			}
+		} else if isRawMessage {
+			// Stash raw bytes directly on the json.RawMessage holder.
+			holder.Elem().SetBytes([]byte(raw))
+		}
+
+		var argVal reflect.Value
+		if isPointer {
+			argVal = holder
+		} else {
+			argVal = holder.Elem()
+		}
+		out := rv.Call([]reflect.Value{reflect.ValueOf(ctx), argVal})
+		result, _ := out[0].Interface().(string)
+		var rerr error
+		if v := out[1].Interface(); v != nil {
+			rerr, _ = v.(error)
+		}
+		return result, rerr
+	}, nil
 }
 
 // ----- a2a (server-resolved Agent2Agent) -----------------------------------
