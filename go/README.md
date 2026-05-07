@@ -39,7 +39,6 @@ package main
 
 import (
     "context"
-    "encoding/json"
     "fmt"
     "log"
     "os"
@@ -88,6 +87,40 @@ func main() {
 The SDK opens an SSE stream to MANTYX, listens for `local_tool_call` events,
 calls the matching local handler, and POSTs the result back. The server
 keeps running the agent loop until it produces a final reply.
+
+### Typed returns
+
+`Execute` accepts a typed second return value too — the SDK
+`json.Marshal`s it on your behalf, so the same Go type drives both your
+typed handler return *and* the JSON the model receives:
+
+```go
+type ResolveIDsArgs struct {
+    IDs  []int  `json:"ids"  jsonschema:"Numeric IDs to resolve."`
+    Type string `json:"type" jsonschema:"Entity kind: user|project|plan|..."`
+}
+type ResolveIDsResult struct {
+    Labels map[int]string `json:"labels"`
+}
+
+mantyx.LocalTool(mantyx.LocalToolSpec{
+    Name:        "resolve_ids",
+    Description: "Resolve numeric IDs to human-readable labels.",
+    Parameters:  &ResolveIDsArgs{},
+    Execute: func(ctx context.Context, args *ResolveIDsArgs) (*ResolveIDsResult, error) {
+        out, err := lookup(ctx, args.IDs, args.Type)
+        if err != nil {
+            return nil, err
+        }
+        return &ResolveIDsResult{Labels: out}, nil
+    },
+})
+```
+
+The Parameters / Execute / R triple is type-checked end-to-end by the
+Go compiler. `string` returns are still forwarded verbatim, and
+`json.RawMessage` returns are forwarded as raw JSON bytes for handlers
+that have already produced JSON themselves.
 
 ## Triggering a persisted MANTYX agent
 

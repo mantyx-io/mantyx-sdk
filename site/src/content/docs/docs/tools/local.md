@@ -62,9 +62,7 @@ tool := mantyx.LocalTool(mantyx.LocalToolSpec{
     Name:        "read_file",
     Description: "Read a UTF-8 file from the local filesystem.",
     Parameters:  &readFileArgs{},
-    Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
-        var args readFileArgs
-        if err := json.Unmarshal(raw, &args); err != nil { return "", err }
+    Execute: func(ctx context.Context, args readFileArgs) (string, error) {
         b, err := os.ReadFile(args.Path)
         return string(b), err
     },
@@ -83,11 +81,27 @@ For best results, keep schemas to the JSON-Schema-friendly intersection: `string
 
 ## Returning a result
 
-The handler must return a **string**. For structured outputs, JSON-serialize before returning:
+The handler must return a **string** that the SDK forwards as the wire-level tool result. For structured outputs, JSON-serialize before returning:
 
 ```ts
 execute: async () => JSON.stringify({ ok: true, count: 42 });
 ```
+
+In Go, `Execute` also accepts a typed second return value the SDK serialises for you — the same Go type can drive both your handler's return shape and the JSON the model sees:
+
+```go
+type Result struct {
+    Labels map[int]string `json:"labels"`
+}
+
+Execute: func(ctx context.Context, args ResolveIDsArgs) (*Result, error) {
+    out, err := lookup(ctx, args.IDs)
+    if err != nil { return nil, err }
+    return &Result{Labels: out}, nil
+}
+```
+
+`string` and `json.RawMessage` returns are forwarded verbatim; any other type is `json.Marshal`ed by the SDK before dispatch.
 
 A thrown error (or a non-`nil` `error` in Go) is forwarded to the model as a tool-error response. You typically don't need to catch and re-throw; the SDK wraps the message into the right wire shape automatically.
 

@@ -70,16 +70,24 @@ type LocalToolSpec struct {
 	// Execute is invoked when the LLM calls this tool. It must be a function
 	// with the signature:
 	//
-	//	func(ctx context.Context, args T) (string, error)
+	//	func(ctx context.Context, args T) (R, error)
 	//
 	// where T is the same Go type used for Parameters (or its pointer/value
 	// counterpart). The SDK json.Unmarshals the raw tool arguments into a
-	// fresh value of T before calling Execute. The function returns the tool
-	// result as a string (any non-string can be returned via json.Marshal
-	// yourself).
+	// fresh value of T before calling Execute. T may also be json.RawMessage,
+	// in which case the SDK forwards the unparsed JSON bytes verbatim.
 	//
-	// For backwards compatibility, T may also be json.RawMessage, in which
-	// case the SDK forwards the unparsed JSON bytes verbatim.
+	// R is the result type the SDK serialises to the wire as a string:
+	//
+	//   - string           → forwarded verbatim (legacy contract).
+	//   - json.RawMessage  → forwarded verbatim (raw JSON bytes).
+	//   - any other type   → SDK json.Marshals the value, returning the
+	//     resulting JSON text. This pairs naturally with Parameters: a
+	//     single Go return type drives both the typed handler return and
+	//     the JSON the model receives.
+	//
+	// A non-nil error short-circuits encoding and is forwarded to the model
+	// as a tool-error response.
 	Execute any
 }
 
@@ -123,22 +131,27 @@ var (
 
 // buildLocalToolInvoker validates spec.Execute's shape and returns a closure
 // that decodes the raw JSON args into Execute's typed parameter, invokes the
-// function, and returns its (string, error) reply.
+// function, and returns its result as the wire-level (string, error) reply.
 //
 // Accepted Execute signatures:
 //
-//	func(ctx context.Context, args T) (string, error)
+//	func(ctx context.Context, args T) (R, error)
 //
 // where T is any concrete Go type (struct, *struct, map[string]any,
 // json.RawMessage, primitives, …). For json.RawMessage the SDK forwards the
 // raw bytes verbatim; otherwise it allocates a zero-valued T (or *T's
 // pointee) and json.Unmarshals the raw args into it before the call.
+//
+// R may be string (forwarded as-is), json.RawMessage (forwarded as-is), or
+// any other Go type (json.Marshaled by the SDK before dispatch). Pairing R
+// with Parameters keeps both ends of the contract type-checked by the Go
+// compiler.
 func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Context, raw json.RawMessage) (string, error), error) {
 	if execute == nil {
 		return nil, fmt.Errorf("Execute is required")
 	}
-	// Fast path: legacy json.RawMessage signature avoids reflection cost on
-	// every dispatch.
+	// Fast path: legacy json.RawMessage-in / string-out signature avoids
+	// reflection cost on every dispatch.
 	if fn, ok := execute.(func(context.Context, json.RawMessage) (string, error)); ok {
 		return fn, nil
 	}
@@ -149,17 +162,15 @@ func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Conte
 		return nil, fmt.Errorf("Execute must be a function, got %s", rt.Kind())
 	}
 	if rt.NumIn() != 2 || rt.NumOut() != 2 {
-		return nil, fmt.Errorf("Execute must have signature func(context.Context, T) (string, error)")
+		return nil, fmt.Errorf("Execute must have signature func(context.Context, T) (R, error)")
 	}
 	if !rt.In(0).Implements(contextType) {
 		return nil, fmt.Errorf("Execute first parameter must be context.Context, got %s", rt.In(0))
 	}
-	if rt.Out(0).Kind() != reflect.String {
-		return nil, fmt.Errorf("Execute first return must be string, got %s", rt.Out(0))
-	}
 	if !rt.Out(1).Implements(errorType) {
 		return nil, fmt.Errorf("Execute second return must be error, got %s", rt.Out(1))
 	}
+	encoder := resultEncoderFor(rt.Out(0))
 
 	argType := rt.In(1)
 	isRawMessage := argType == rawMsgType
@@ -190,13 +201,53 @@ func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Conte
 			argVal = holder.Elem()
 		}
 		out := rv.Call([]reflect.Value{reflect.ValueOf(ctx), argVal})
-		result, _ := out[0].Interface().(string)
 		var rerr error
 		if v := out[1].Interface(); v != nil {
 			rerr, _ = v.(error)
 		}
-		return result, rerr
+		if rerr != nil {
+			// Skip result encoding on error — the caller drops the result
+			// payload and forwards err.Error() as the tool-error response.
+			return "", rerr
+		}
+		result, encErr := encoder(out[0])
+		if encErr != nil {
+			return "", fmt.Errorf("encode result for tool %q: %w", toolName, encErr)
+		}
+		return result, nil
 	}, nil
+}
+
+// resultEncoderFor returns a function that converts Execute's first return
+// value into the wire-level string the SDK posts back as a tool result.
+//
+//   - string          → returned verbatim.
+//   - json.RawMessage → returned verbatim (raw JSON bytes).
+//   - everything else → json.Marshaled to JSON text.
+//
+// The tail case allows handlers to declare typed result structs (mirroring
+// how Parameters lets them declare typed argument structs) and have the
+// SDK do the marshaling on their behalf. Marshal failures are surfaced
+// from the call site as `encode result for tool …` errors at dispatch time.
+func resultEncoderFor(rt reflect.Type) func(reflect.Value) (string, error) {
+	switch {
+	case rt.Kind() == reflect.String:
+		return func(v reflect.Value) (string, error) { return v.String(), nil }
+	case rt == rawMsgType:
+		return func(v reflect.Value) (string, error) {
+			// json.RawMessage is []byte under the hood — forward the
+			// raw JSON text without re-marshaling.
+			return string(v.Bytes()), nil
+		}
+	default:
+		return func(v reflect.Value) (string, error) {
+			b, err := json.Marshal(v.Interface())
+			if err != nil {
+				return "", err
+			}
+			return string(b), nil
+		}
+	}
 }
 
 // ----- a2a (server-resolved Agent2Agent) -----------------------------------

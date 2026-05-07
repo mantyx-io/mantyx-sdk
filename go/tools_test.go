@@ -1007,6 +1007,209 @@ func TestDispatch_LocalTool_TypedPointerArgs(t *testing.T) {
 	}
 }
 
+func TestDispatch_LocalTool_TypedStructResult(t *testing.T) {
+	type resolveArgs struct {
+		IDs []int `json:"ids"`
+	}
+	type resolveResult struct {
+		Labels map[int]string `json:"labels"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_typed_result",
+					"name":      "resolve_ids",
+					"args":      map[string]any{"ids": []any{1, 2}},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:       "resolve_ids",
+		Parameters: &resolveArgs{},
+		Execute: func(ctx context.Context, args resolveArgs) (*resolveResult, error) {
+			labels := map[int]string{}
+			for _, id := range args.IDs {
+				labels[id] = fmt.Sprintf("user-%d", id)
+			}
+			return &resolveResult{Labels: labels}, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	// The SDK should have JSON-marshaled the *resolveResult on the
+	// caller's behalf and shipped it inside the tool-result envelope.
+	var posted struct {
+		ToolUseID string `json:"toolUseId"`
+		Result    string `json:"result"`
+	}
+	if err := json.Unmarshal(server.lastToolResultBody, &posted); err != nil {
+		t.Fatalf("parse tool-result body: %v", err)
+	}
+	if posted.ToolUseID != "tu_typed_result" {
+		t.Fatalf("unexpected toolUseId: %q", posted.ToolUseID)
+	}
+	var decoded resolveResult
+	if err := json.Unmarshal([]byte(posted.Result), &decoded); err != nil {
+		t.Fatalf("posted result is not valid JSON: %v (raw=%q)", err, posted.Result)
+	}
+	if got, want := decoded.Labels[1], "user-1"; got != want {
+		t.Fatalf("labels[1] = %q, want %q (raw=%q)", got, want, posted.Result)
+	}
+	if got, want := decoded.Labels[2], "user-2"; got != want {
+		t.Fatalf("labels[2] = %q, want %q (raw=%q)", got, want, posted.Result)
+	}
+}
+
+func TestDispatch_LocalTool_TypedValueStructResult(t *testing.T) {
+	type ack struct {
+		OK    bool `json:"ok"`
+		Count int  `json:"count"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_value_result",
+					"name":      "do_thing",
+					"args":      map[string]any{},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "do_thing",
+		Execute: func(ctx context.Context, _ struct{}) (ack, error) {
+			return ack{OK: true, Count: 7}, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var posted struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(server.lastToolResultBody, &posted); err != nil {
+		t.Fatalf("parse tool-result body: %v", err)
+	}
+	var decoded ack
+	if err := json.Unmarshal([]byte(posted.Result), &decoded); err != nil {
+		t.Fatalf("posted result is not valid JSON: %v (raw=%q)", err, posted.Result)
+	}
+	if !decoded.OK || decoded.Count != 7 {
+		t.Fatalf("decoded result mismatch: %+v (raw=%q)", decoded, posted.Result)
+	}
+}
+
+func TestDispatch_LocalTool_TypedRawMessageResult(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_raw_result",
+					"name":      "raw_passthrough",
+					"args":      map[string]any{},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "raw_passthrough",
+		Execute: func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+			// Pre-encoded JSON should be forwarded verbatim — neither
+			// re-marshaled (which would double-encode it as a string) nor
+			// base64'd (the trap json.Marshal sets for plain []byte).
+			return json.RawMessage(`{"already":"json"}`), nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var posted struct {
+		Result string `json:"result"`
+	}
+	if err := json.Unmarshal(server.lastToolResultBody, &posted); err != nil {
+		t.Fatalf("parse tool-result body: %v", err)
+	}
+	if posted.Result != `{"already":"json"}` {
+		t.Fatalf("RawMessage not forwarded verbatim: %q", posted.Result)
+	}
+}
+
+func TestDispatch_LocalTool_TypedResultErrorSkipsEncoding(t *testing.T) {
+	type result struct {
+		Value string `json:"value"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_typed_err",
+					"name":      "boom",
+					"args":      map[string]any{},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "boom",
+		Execute: func(ctx context.Context, _ struct{}) (*result, error) {
+			return nil, fmt.Errorf("nope")
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !strings.Contains(string(server.lastToolResultBody), `"error":"nope"`) {
+		t.Fatalf("expected error forwarded as tool error, got %s", server.lastToolResultBody)
+	}
+	if strings.Contains(string(server.lastToolResultBody), `"result"`) {
+		t.Fatalf("expected no result field on error path, got %s", server.lastToolResultBody)
+	}
+}
+
 func TestLocalTool_PanicsOnInvalidExecuteSignature(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1031,9 +1234,9 @@ func TestLocalTool_PanicsOnInvalidExecuteSignature(t *testing.T) {
 			},
 		},
 		{
-			name: "wrong return types",
+			name: "second return not error",
 			fn: func() {
-				LocalTool(LocalToolSpec{Name: "x", Execute: func(ctx context.Context, args struct{}) (int, error) { return 0, nil }})
+				LocalTool(LocalToolSpec{Name: "x", Execute: func(ctx context.Context, args struct{}) (int, int) { return 0, 0 }})
 			},
 		},
 		{
