@@ -17,7 +17,7 @@ import (
 )
 
 type readFileArgs struct {
-	Path string `json:"path" jsonschema:"description=Path to the file to read"`
+	Path string `json:"path" jsonschema:"Path to the file to read"`
 }
 
 func main() {

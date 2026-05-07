@@ -19,6 +19,7 @@ To run any example after publishing the SDK as a real Go module, delete the
 | `mixed-tools/`   | Combine `MantyxTool`, `MantyxPluginTool`, and a local tool in one agent.               |
 | `streaming/`     | Use `Client.StreamAgent()` and select on the event channel.                            |
 | `list-models/`   | Call `Client.ListModels()`, pretty-print, then run an agent on the first.              |
+| `output-schema/` | Constrain the final reply to a JSON schema and decode it via `ParseRunOutput`.         |
 | `a2a-tools/`     | Combine remote (`MantyxA2A`) + local (`LocalA2A`) Agent2Agent peers.                   |
 | `mcp-tools/`     | Combine remote (`MantyxMcp`) + local (`LocalMcp`) MCP servers.                         |
 

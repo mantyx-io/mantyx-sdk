@@ -582,6 +582,121 @@ func TestOutputSchema_InSessionCreateAndPerMessageOverride(t *testing.T) {
 	}
 }
 
+func TestOutputSchema_ReflectedFromGoStruct(t *testing.T) {
+	type weatherReport struct {
+		City         string  `json:"city" jsonschema:"City name"`
+		TemperatureC float64 `json:"temperature_c" jsonschema:"Temperature in Celsius"`
+	}
+
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{
+			kind: "result",
+			data: map[string]any{
+				"subtype": "success",
+				"text":    `{"city":"SF","temperature_c":17.5}`,
+			},
+		}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{
+			Name:   "weather_report",
+			Schema: &weatherReport{},
+		},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+
+	var body struct {
+		OutputSchema struct {
+			Name   string         `json:"name"`
+			Schema map[string]any `json:"schema"`
+		} `json:"outputSchema"`
+	}
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	if body.OutputSchema.Name != "weather_report" {
+		t.Fatalf("expected name=weather_report, got %q", body.OutputSchema.Name)
+	}
+	if body.OutputSchema.Schema["type"] != "object" {
+		t.Fatalf("expected schema.type=object, got %#v", body.OutputSchema.Schema["type"])
+	}
+	props, _ := body.OutputSchema.Schema["properties"].(map[string]any)
+	if props == nil {
+		t.Fatalf("missing schema.properties: %#v", body.OutputSchema.Schema)
+	}
+	city, _ := props["city"].(map[string]any)
+	if city == nil || city["type"] != "string" || city["description"] != "City name" {
+		t.Fatalf("unexpected city schema: %#v", props["city"])
+	}
+	temp, _ := props["temperature_c"].(map[string]any)
+	if temp == nil || temp["type"] != "number" || temp["description"] != "Temperature in Celsius" {
+		t.Fatalf("unexpected temperature_c schema: %#v", props["temperature_c"])
+	}
+	required, _ := body.OutputSchema.Schema["required"].([]any)
+	if len(required) != 2 {
+		t.Fatalf("expected 2 required entries, got %#v", required)
+	}
+}
+
+func TestOutputSchema_NameOmittedFromWireWhenEmpty(t *testing.T) {
+	type ack struct {
+		Ok bool `json:"ok"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "{}"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{Schema: &ack{}},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	out, _ := body["outputSchema"].(map[string]any)
+	if out == nil {
+		t.Fatalf("expected outputSchema in body: %s", server.lastRunCreateBody)
+	}
+	if _, has := out["name"]; has {
+		t.Fatalf("expected `name` to be omitted when empty, got %#v", out)
+	}
+	if _, has := out["schema"]; !has {
+		t.Fatalf("expected `schema` in outputSchema: %#v", out)
+	}
+}
+
+func TestOutputSchema_AcceptsRawJSONMessage(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "{}"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+
+	raw := json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}`)
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{Schema: raw},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !strings.Contains(string(server.lastRunCreateBody), `"required":["x"]`) {
+		t.Fatalf("expected raw schema fragments forwarded: %s", server.lastRunCreateBody)
+	}
+}
+
 // ---------- ParseRunOutput ------------------------------------------------
 
 func TestParseRunOutput_DecodesIntoStruct(t *testing.T) {

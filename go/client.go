@@ -203,20 +203,64 @@ func (r *ReasoningLevel) MarshalJSON() ([]byte, error) {
 // stable schema identifier (OpenAI `text.format.name`, Anthropic synthetic
 // tool name). Must match `/^[a-zA-Z0-9_-]{1,64}$/` when set.
 //
-// Schema is the JSON Schema describing the assistant text. Its root must
-// be a JSON object — most providers reject array / scalar roots in
-// structured-output mode. The schema is shipped verbatim; MANTYX does not
-// validate its contents (the provider does).
+// Schema describes the assistant text. Its root must be a JSON object —
+// most providers reject array / scalar roots in structured-output mode.
+// Schema is one of:
+//
+//   - map[string]any / json.RawMessage     → passed through as-is
+//   - a Go struct (or pointer-to-struct)   → reflected to JSON Schema via
+//     google/jsonschema-go (the same path as LocalToolSpec.Parameters; use
+//     the `jsonschema:"..."` struct tag to attach per-field descriptions)
+//
+// The resolved schema is shipped verbatim; MANTYX does not validate its
+// contents (the provider does).
 //
 // See `docs/wire-protocol.md` §7 for the full per-provider mapping.
 type OutputSchema struct {
-	Name   string         `json:"name,omitempty"`
-	Schema map[string]any `json:"schema"`
+	Name   string
+	Schema any
 }
 
 const outputSchemaMaxBytes = 32 * 1024
 
 var outputSchemaNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// resolve returns the JSON-Schema map for s.Schema, reflecting Go
+// structs through jsonSchemaFor when needed. Callers see a typed
+// `invalid_request` Error if Schema is missing or unrepresentable.
+func (s *OutputSchema) resolve() (map[string]any, error) {
+	if s == nil || s.Schema == nil {
+		return nil, &Error{
+			Code:    "invalid_request",
+			Message: "OutputSchema.Schema is required (the JSON Schema root must be a JSON object)",
+		}
+	}
+	schema, err := jsonSchemaFor(s.Schema)
+	if err != nil {
+		return nil, &Error{
+			Code:    "invalid_request",
+			Message: fmt.Sprintf("OutputSchema.Schema cannot be reflected to JSON Schema: %v", err),
+		}
+	}
+	return schema, nil
+}
+
+// MarshalJSON serialises OutputSchema to its wire shape, reflecting any
+// non-map Schema input through jsonSchemaFor first.
+func (s *OutputSchema) MarshalJSON() ([]byte, error) {
+	if s == nil {
+		return []byte("null"), nil
+	}
+	schema, err := s.resolve()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"schema": schema}
+	if s.Name != "" {
+		out["name"] = s.Name
+	}
+	return json.Marshal(out)
+}
 
 // validate mirrors the server-side `400 invalid_request` checks (name regex,
 // schema shape, ≤ 32 KB serialised) so callers see a typed Go error rather
@@ -231,11 +275,8 @@ func (s *OutputSchema) validate() error {
 			Message: fmt.Sprintf("OutputSchema.Name must match /^[a-zA-Z0-9_-]{1,64}$/, got %q", s.Name),
 		}
 	}
-	if s.Schema == nil {
-		return &Error{
-			Code:    "invalid_request",
-			Message: "OutputSchema.Schema is required (the JSON Schema root must be a JSON object)",
-		}
+	if _, err := s.resolve(); err != nil {
+		return err
 	}
 	enc, err := json.Marshal(s)
 	if err != nil {

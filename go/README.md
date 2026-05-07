@@ -25,8 +25,8 @@ go get github.com/mantyx-io/mantyx-sdk/go@latest
 
 Requires Go 1.24+. Third-party runtime dependencies:
 
-- [`github.com/invopop/jsonschema`](https://github.com/invopop/jsonschema)
-  (MIT) — converts Go structs into JSON Schema for local tool parameters.
+- [`github.com/google/jsonschema-go`](https://github.com/google/jsonschema-go)
+  (BSD-3-Clause) — converts Go structs into JSON Schema for local tool parameters.
 - [`github.com/modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk)
   (Apache-2.0) — drives the Streamable HTTP and stdio transports for
   `LocalMcp`. The SDK is the implementation under `mantyx.LocalMcp`; you
@@ -295,30 +295,30 @@ session-wide value for one turn.
 ## Structured output (`OutputSchema`)
 
 Constrain the assistant's **final reply** to a JSON document matching a
-JSON Schema, and decode it into a Go struct with `mantyx.ParseRunOutput`:
+JSON Schema, and decode it into a Go struct with `mantyx.ParseRunOutput`.
+`OutputSchema.Schema` accepts either a hand-rolled `map[string]any` /
+`json.RawMessage` *or* a Go struct (or pointer-to-struct) — the SDK runs
+the same struct-to-JSON-Schema reflection used by `LocalToolSpec.Parameters`
+so you can drive both your typed receive shape and the schema you ship to
+the provider from a single Go type:
 
 ```go
-weatherSchema := map[string]any{
-    "type": "object",
-    "properties": map[string]any{
-        "city":          map[string]any{"type": "string"},
-        "temperature_c": map[string]any{"type": "number"},
-    },
-    "required":             []any{"city", "temperature_c"},
-    "additionalProperties": false,
+type WeatherReport struct {
+    City         string  `json:"city"          jsonschema:"City the report is for"`
+    TemperatureC float64 `json:"temperature_c" jsonschema:"Current temperature in Celsius"`
 }
 
 result, err := client.RunAgent(ctx, mantyx.RunSpec{
     SystemPrompt: "Return the weather as JSON.",
     Prompt:       "What's the weather in San Francisco right now?",
-    OutputSchema: &mantyx.OutputSchema{Name: "weather_report", Schema: weatherSchema},
+    OutputSchema: &mantyx.OutputSchema{
+        Name:   "weather_report",
+        Schema: &WeatherReport{},
+    },
 })
 if err != nil { /* ... */ }
 
-var report struct {
-    City         string  `json:"city"`
-    TemperatureC float64 `json:"temperature_c"`
-}
+var report WeatherReport
 if err := mantyx.ParseRunOutput(result, &report); err != nil {
     var pe *mantyx.ParseError
     if errors.As(err, &pe) {
@@ -327,6 +327,10 @@ if err := mantyx.ParseRunOutput(result, &report); err != nil {
     return err
 }
 ```
+
+If you'd rather keep the schema explicit, `OutputSchema.Schema` still
+accepts a `map[string]any` or `json.RawMessage` containing the full JSON
+Schema — both shapes are passed through verbatim.
 
 The SDK validates `Name` (regex `^[a-zA-Z0-9_-]{1,64}$`), schema shape
 (non-nil JSON object), and total size (≤ 32 KB) locally so you get a
@@ -541,7 +545,7 @@ go build ./...
 ```
 
 The SDK has no MANTYX-internal Go modules in `go.mod`; only the standard
-library, `github.com/invopop/jsonschema` (JSON Schema reflection for local
+library, `github.com/google/jsonschema-go` (JSON Schema reflection for local
 tool parameters), and `github.com/modelcontextprotocol/go-sdk` (drives the
 Streamable HTTP and stdio transports for `LocalMcp`).
 

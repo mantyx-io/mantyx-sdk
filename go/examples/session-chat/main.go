@@ -12,7 +12,7 @@ import (
 )
 
 type numberBetweenArgs struct {
-	Range []int `json:"range" jsonschema:"description=Range of numbers to generate a random number between"`
+	Range []int `json:"range" jsonschema:"Range of numbers to generate a random number between"`
 }
 
 func main() {

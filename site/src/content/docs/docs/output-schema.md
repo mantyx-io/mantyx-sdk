@@ -115,14 +115,52 @@ The `[OutputSchema]` TypedDict from `mantyx.tools` is the type alias for the dic
 
 ### Go
 
+`OutputSchema.Schema` accepts either a `map[string]any` / `json.RawMessage`
+JSON Schema *or* a Go struct (or pointer-to-struct). When given a struct,
+the SDK reflects it via `google/jsonschema-go` — the same path
+`LocalToolSpec.Parameters` uses — so a single Go type can drive both the
+schema you ship to the provider and the typed receive shape you decode
+into:
+
 ```go
 import (
     "context"
+    "errors"
     mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
 
 client := mantyx.NewClient(mantyx.Options{APIKey: "...", WorkspaceSlug: "acme"})
 
+type WeatherReport struct {
+    City         string  `json:"city"          jsonschema:"City the report is for"`
+    TemperatureC float64 `json:"temperature_c" jsonschema:"Current temperature in Celsius"`
+}
+
+result, err := client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt: "Return the weather as JSON.",
+    Prompt:       "What's the weather in San Francisco right now?",
+    OutputSchema: &mantyx.OutputSchema{
+        Name:   "weather_report",
+        Schema: &WeatherReport{},
+    },
+})
+if err != nil { /* ... */ }
+
+var report WeatherReport
+if err := mantyx.ParseRunOutput(result, &report); err != nil {
+    var pe *mantyx.ParseError
+    if errors.As(err, &pe) {
+        log.Printf("model returned non-JSON text: %q", pe.Text)
+    }
+    return err
+}
+```
+
+If you'd rather keep the schema explicit, the same call also accepts a
+hand-rolled `map[string]any` (or `json.RawMessage`) containing the full
+JSON Schema — both shapes are passed through verbatim:
+
+```go
 weatherSchema := map[string]any{
     "type": "object",
     "properties": map[string]any{
@@ -138,19 +176,6 @@ result, err := client.RunAgent(ctx, mantyx.RunSpec{
     Prompt:       "What's the weather in San Francisco right now?",
     OutputSchema: &mantyx.OutputSchema{Name: "weather_report", Schema: weatherSchema},
 })
-if err != nil { /* ... */ }
-
-var report struct {
-    City         string  `json:"city"`
-    TemperatureC float64 `json:"temperature_c"`
-}
-if err := mantyx.ParseRunOutput(result, &report); err != nil {
-    var pe *mantyx.ParseError
-    if errors.As(err, &pe) {
-        log.Printf("model returned non-JSON text: %q", pe.Text)
-    }
-    return err
-}
 ```
 
 ## Defaults and inheritance

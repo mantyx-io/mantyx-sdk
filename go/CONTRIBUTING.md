@@ -11,7 +11,7 @@ the goal is to keep it that way.
    sending HTTP requests against the public protocol documented in
    [`docs/agent-runs-protocol.md`](./docs/agent-runs-protocol.md).
 2. **Tiny dep tree.** `go.mod` should list only the standard library and
-   `github.com/invopop/jsonschema`. Adding a new third-party dependency
+   `github.com/google/jsonschema-go`. Adding a new third-party dependency
    requires a strong justification.
 3. **No CGO.** All builds must succeed with `CGO_ENABLED=0`.
 4. **Standalone tests.** `go test ./...` must pass without any MANTYX server
