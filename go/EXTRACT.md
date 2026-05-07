@@ -1,15 +1,15 @@
-# Extracting `mantyx-go-sdk` into its own repository
+# Extracting the Go module into its own repository
 
-The `mantyx-go-sdk` Go module is intentionally self-contained. Lifting it
-out of the MANTYX monorepo into a public repository is a five-minute job:
+The Go module under this folder (`github.com/mantyx-io/mantyx-sdk/go`) is intentionally self-contained. Lifting it
+out of the MANTYX SDK monorepo into a public repository is a five-minute job:
 
 ## Steps
 
 1. Copy this folder verbatim:
 
    ```bash
-   cp -r packages/mantyx-sdk/go ~/code/mantyx-go-sdk
-   cd ~/code/mantyx-go-sdk
+   cp -r /path/to/mantyx-sdk/go ~/code/mantyx-sdk-go
+   cd ~/code/mantyx-sdk-go
    ```
 
 2. Initialize git:
@@ -17,7 +17,7 @@ out of the MANTYX monorepo into a public repository is a five-minute job:
    ```bash
    git init -b main
    git add .
-   git commit -m "Import mantyx-go-sdk from monorepo"
+   git commit -m "Import Go SDK from mantyx-sdk monorepo"
    ```
 
 3. Run `go mod tidy` to refresh the lockfile:
@@ -32,8 +32,8 @@ out of the MANTYX monorepo into a public repository is a five-minute job:
    ```bash
    for d in examples/*/; do
      pushd "$d" >/dev/null
-     # remove the `replace github.com/mantyx-io/mantyx-go-sdk => ../..` line
-     go mod edit -dropreplace github.com/mantyx-io/mantyx-go-sdk
+     # remove the `replace github.com/mantyx-io/mantyx-sdk/go => ../..` line
+     go mod edit -dropreplace github.com/mantyx-io/mantyx-sdk/go
      go mod tidy
      popd >/dev/null
    done
@@ -49,7 +49,7 @@ out of the MANTYX monorepo into a public repository is a five-minute job:
 
 6. Push to a new GitHub repo. To enable Go module discovery, ensure the new
    repo path matches the module declaration in `go.mod` (default:
-   `github.com/mantyx-io/mantyx-go-sdk`). Update `go.mod` if you publish under
+   `github.com/mantyx-io/mantyx-sdk/go`). Update `go.mod` if you publish under
    a different path.
 
 ## What you can leave behind

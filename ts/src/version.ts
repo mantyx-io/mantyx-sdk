@@ -1,4 +1,4 @@
 /**
  * Release version — synced from repo root VERSION (`npm run sync-version`).
  */
-export const SDK_VERSION = "0.4.0";
+export const SDK_VERSION = "0.4.1";

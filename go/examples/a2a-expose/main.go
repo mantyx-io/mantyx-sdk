@@ -34,8 +34,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	mantyx "github.com/mantyx-io/mantyx-go-sdk"
-	"github.com/mantyx-io/mantyx-go-sdk/a2asrv"
+	mantyx "github.com/mantyx-io/mantyx-sdk/go"
+	"github.com/mantyx-io/mantyx-sdk/go/a2asrv"
 )
 
 func main() {

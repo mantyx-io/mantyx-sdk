@@ -13,7 +13,7 @@ the agent loop.
 packages/mantyx-sdk/
 ├── README.md         ← you are here
 ├── ts/               ← @mantyx/sdk                       (npm, TypeScript / Node.js)
-├── go/               ← github.com/mantyx-io/mantyx-go-sdk   (Go module)
+├── go/               ← github.com/mantyx-io/mantyx-sdk/go   (Go module)
 ├── python/           ← mantyx-sdk                        (PyPI, Python ≥ 3.9)
 └── site/             ← landing page + docs (Astro Starlight, deployed to GitHub Pages)
 ```
@@ -24,9 +24,9 @@ the one that matches your stack.
 | | TypeScript | Go | Python |
 | --- | --- | --- | --- |
 | Source | [`ts/`](./ts) | [`go/`](./go) | [`python/`](./python) |
-| Package | `@mantyx/sdk` | `github.com/mantyx-io/mantyx-go-sdk` | `mantyx-sdk` |
-| Install | `npm install @mantyx/sdk` (bundles `zod` + `@modelcontextprotocol/sdk`) | `go get github.com/mantyx-io/mantyx-go-sdk` | `pip install mantyx-sdk` |
-| Import | `import { MantyxClient } from "@mantyx/sdk"` | `import mantyx "github.com/mantyx-io/mantyx-go-sdk"` | `import mantyx` |
+| Package | `@mantyx/sdk` | `github.com/mantyx-io/mantyx-sdk/go` | `mantyx-sdk` |
+| Install | `npm install @mantyx/sdk` (bundles `zod` + `@modelcontextprotocol/sdk`) | `go get github.com/mantyx-io/mantyx-sdk/go` | `pip install mantyx-sdk` |
+| Import | `import { MantyxClient } from "@mantyx/sdk"` | `import mantyx "github.com/mantyx-io/mantyx-sdk/go"` | `import mantyx` |
 | Min runtime | Node.js 18.17+ | Go 1.24+ | Python 3.10+ |
 | Local tool params | Zod schema | tagged Go struct (via `invopop/jsonschema`) | Pydantic v2 model |
 | Async client | native `Promise` | `context.Context` | `AsyncMantyxClient` (httpx) |
@@ -127,7 +127,7 @@ import (
     "log"
     "os"
 
-    mantyx "github.com/mantyx-io/mantyx-go-sdk"
+    mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
 
 type readFileArgs struct {
@@ -231,7 +231,7 @@ a Go module / uploaded to PyPI:
 - [`ts/`](./ts) — TypeScript SDK (`@mantyx/sdk`) + Vitest tests +
   self-contained example projects under `ts/examples/` (including
   `a2a-tools/` and `mcp-tools/`).
-- [`go/`](./go) — Go SDK (`github.com/mantyx-io/mantyx-go-sdk`) + `httptest`
+- [`go/`](./go) — Go SDK (`github.com/mantyx-io/mantyx-sdk/go`) + `httptest`
   tests + example modules under `go/examples/` (including `a2a-tools/`
   and `mcp-tools/`), each with its own `go.mod` and a `replace` directive
   that points back at this folder for in-tree builds.

@@ -5,7 +5,7 @@ Thanks for your interest in contributing! This monorepo ships three first-party 
 | SDK | Source | Package | Contributing notes |
 | --- | --- | --- | --- |
 | TypeScript | [`ts/`](./ts) | `@mantyx/sdk` (npm) | [`ts/CONTRIBUTING.md`](./ts/CONTRIBUTING.md) |
-| Go | [`go/`](./go) | `github.com/mantyx-io/mantyx-go-sdk` | [`go/CONTRIBUTING.md`](./go/CONTRIBUTING.md) |
+| Go | [`go/`](./go) | `github.com/mantyx-io/mantyx-sdk/go` | [`go/CONTRIBUTING.md`](./go/CONTRIBUTING.md) |
 | Python | [`python/`](./python) | `mantyx-sdk` (PyPI) | [`python/CONTRIBUTING.md`](./python/CONTRIBUTING.md) |
 
 …plus the docs site at [`site/`](./site) (Astro Starlight, deployed to GitHub Pages).

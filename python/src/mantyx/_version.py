@@ -1,5 +1,5 @@
 """Release version — synced from repo root VERSION (`node scripts/sync-version.mjs`)."""
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 SDK_VERSION = __version__

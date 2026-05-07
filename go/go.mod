@@ -1,4 +1,4 @@
-module github.com/mantyx-io/mantyx-go-sdk
+module github.com/mantyx-io/mantyx-sdk/go
 
 go 1.24.4
 

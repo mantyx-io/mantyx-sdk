@@ -1,4 +1,4 @@
-# mantyx-go-sdk
+# MANTYX Go SDK (`github.com/mantyx-io/mantyx-sdk/go`)
 
 The official Go SDK for the [MANTYX](https://mantyx.com) agent runtime.
 Define ephemeral agents that mix server-side MANTYX tools with
@@ -20,7 +20,7 @@ For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md
 ## Install
 
 ```bash
-go get github.com/mantyx-io/mantyx-go-sdk@latest
+go get github.com/mantyx-io/mantyx-sdk/go@latest
 ```
 
 Requires Go 1.24+. Third-party runtime dependencies:
@@ -44,7 +44,7 @@ import (
     "log"
     "os"
 
-    mantyx "github.com/mantyx-io/mantyx-go-sdk"
+    mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
 
 type readFileArgs struct {
@@ -186,8 +186,8 @@ mounted on `net/http`.
 
 ```go
 import (
-    mantyx "github.com/mantyx-io/mantyx-go-sdk"
-    "github.com/mantyx-io/mantyx-go-sdk/a2asrv"
+    mantyx "github.com/mantyx-io/mantyx-sdk/go"
+    "github.com/mantyx-io/mantyx-sdk/go/a2asrv"
 )
 
 client := mantyx.NewClient(mantyx.Options{APIKey: "...", WorkspaceSlug: "acme"})

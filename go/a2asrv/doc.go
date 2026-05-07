@@ -13,8 +13,8 @@
 // Quickstart:
 //
 //	import (
-//	    mantyx "github.com/mantyx-io/mantyx-go-sdk"
-//	    "github.com/mantyx-io/mantyx-go-sdk/a2asrv"
+//	    mantyx "github.com/mantyx-io/mantyx-sdk/go"
+//	    "github.com/mantyx-io/mantyx-sdk/go/a2asrv"
 //	    "github.com/a2aproject/a2a-go/v2/a2a"
 //	)
 //

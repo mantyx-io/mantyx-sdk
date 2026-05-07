@@ -20,7 +20,7 @@ import (
 	"os"
 	"strings"
 
-	mantyx "github.com/mantyx-io/mantyx-go-sdk"
+	mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
 
 func main() {

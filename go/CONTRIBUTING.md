@@ -1,4 +1,4 @@
-# Contributing to `mantyx-go-sdk`
+# Contributing to the MANTYX Go SDK
 
 Thanks for considering a contribution! This SDK is a small, dependency-light
 Go client for the [MANTYX](https://mantyx.com) agent-runs HTTP/SSE protocol;

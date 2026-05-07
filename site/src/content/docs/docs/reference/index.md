@@ -8,7 +8,7 @@ sidebar:
 The reference for each SDK is mirrored from the per-package README at build time:
 
 - [TypeScript (`@mantyx/sdk`)](/docs/reference/typescript/)
-- [Go (`mantyx-go-sdk`)](/docs/reference/go/)
+- [Go (`mantyx-sdk/go`)](/docs/reference/go/)
 - [Python (`mantyx-sdk`)](/docs/reference/python/)
 
 The protocol specs — what every third-party client must implement — live at:

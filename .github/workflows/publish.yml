@@ -205,6 +205,7 @@ jobs:
           BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          git fetch origin --tags --quiet || true
           node scripts/changelog.mjs --write
           if git diff --quiet HEAD -- ts/CHANGELOG.md go/CHANGELOG.md python/CHANGELOG.md; then
             echo "No CHANGELOG edits after tagging — skipping commit."

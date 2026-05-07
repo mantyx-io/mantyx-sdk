@@ -1,15 +1,15 @@
-# `mantyx-go-sdk` examples
+# Go SDK examples
 
 Each subdirectory is its own Go module with a `replace` directive that points
 back at this repo so it builds in-tree:
 
 ```
-require github.com/mantyx-io/mantyx-go-sdk v0.0.0
-replace github.com/mantyx-io/mantyx-go-sdk => ../..
+require github.com/mantyx-io/mantyx-sdk/go v0.0.0
+replace github.com/mantyx-io/mantyx-sdk/go => ../..
 ```
 
 To run any example after publishing the SDK as a real Go module, delete the
-`replace` line in `go.mod` and run `go get github.com/mantyx-io/mantyx-go-sdk@latest`.
+`replace` line in `go.mod` and run `go get github.com/mantyx-io/mantyx-sdk/go@latest`.
 
 | Folder           | What it shows                                                                          |
 | ---------------- | -------------------------------------------------------------------------------------- |

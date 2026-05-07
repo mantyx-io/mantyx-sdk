@@ -12,8 +12,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	a2asrvpkg "github.com/a2aproject/a2a-go/v2/a2asrv"
 
-	mantyx "github.com/mantyx-io/mantyx-go-sdk"
-	srv "github.com/mantyx-io/mantyx-go-sdk/a2asrv"
+	mantyx "github.com/mantyx-io/mantyx-sdk/go"
+	srv "github.com/mantyx-io/mantyx-sdk/go/a2asrv"
 )
 
 // minimal stub that captures the HTTP requests the MANTYX client makes and

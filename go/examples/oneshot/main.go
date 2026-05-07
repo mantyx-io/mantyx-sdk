@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	mantyx "github.com/mantyx-io/mantyx-go-sdk"
+	mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
 
 type readFileArgs struct {

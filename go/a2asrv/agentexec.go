@@ -11,7 +11,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	mantyx "github.com/mantyx-io/mantyx-go-sdk"
+	mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
 
 // Conversation describes how A2A contextIDs map onto MANTYX sessions.

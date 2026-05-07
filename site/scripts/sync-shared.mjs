@@ -106,7 +106,7 @@ function main() {
   syncProtocol();
   syncWireProtocol();
   syncReference("typescript", "ts/README.md", "TypeScript SDK (@mantyx/sdk)");
-  syncReference("go", "go/README.md", "Go SDK (mantyx-go-sdk)");
+  syncReference("go", "go/README.md", "Go SDK (mantyx-sdk/go)");
   syncReference("python", "python/README.md", "Python SDK (mantyx-sdk)");
 }
 

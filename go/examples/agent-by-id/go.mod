@@ -2,7 +2,7 @@ module example.com/agent-by-id
 
 go 1.24.0
 
-require github.com/mantyx-io/mantyx-go-sdk v0.0.0
+require github.com/mantyx-io/mantyx-sdk/go v0.0.0
 
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
@@ -20,4 +20,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/mantyx-io/mantyx-go-sdk => ../..
+replace github.com/mantyx-io/mantyx-sdk/go => ../..

@@ -64,7 +64,7 @@ const PACKAGES = {
     repoLink: "https://github.com/mantyx-io/mantyx-sdk",
   },
   go: {
-    label: "Go SDK (mantyx-go-sdk)",
+    label: "Go SDK (mantyx-sdk/go)",
     changelog: "go/CHANGELOG.md",
     includePaths: ["go/**", "docs/**", "VERSION"],
     tagPattern: "go/v[0-9]*",

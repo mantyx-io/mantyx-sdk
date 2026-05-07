@@ -283,7 +283,7 @@ func resolveMcp(ctx context.Context, s *localMcpServer) error {
 	if err != nil {
 		return err
 	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "mantyx-go-sdk", Version: Version()}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "mantyx-sdk-go", Version: Version()}, nil)
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		if cleanup != nil {

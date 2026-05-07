@@ -2,7 +2,7 @@ module example.com/a2a-expose
 
 go 1.24.4
 
-require github.com/mantyx-io/mantyx-go-sdk v0.0.0
+require github.com/mantyx-io/mantyx-sdk/go v0.0.0
 
 require (
 	github.com/a2aproject/a2a-go/v2 v2.2.0 // indirect
@@ -23,4 +23,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/mantyx-io/mantyx-go-sdk => ../..
+replace github.com/mantyx-io/mantyx-sdk/go => ../..

@@ -158,7 +158,7 @@ Each SDK ships a thin wrapper around the **official** A2A library so you don't r
 | --- | --- | --- |
 | TypeScript | `@mantyx/sdk/a2a-server` | [`@a2a-js/sdk`](https://www.npmjs.com/package/@a2a-js/sdk) + Express |
 | Python | `mantyx.a2a_server` | [`a2a-sdk`](https://pypi.org/project/a2a-sdk/) + Starlette + uvicorn |
-| Go | `github.com/mantyx-io/mantyx-go-sdk/a2asrv` | [`github.com/a2aproject/a2a-go/v2`](https://pkg.go.dev/github.com/a2aproject/a2a-go/v2) + `net/http` |
+| Go | `github.com/mantyx-io/mantyx-sdk/go/a2asrv` | [`github.com/a2aproject/a2a-go/v2`](https://pkg.go.dev/github.com/a2aproject/a2a-go/v2) + `net/http` |
 
 Each one exposes the same two primitives:
 
@@ -238,12 +238,12 @@ asyncio.run(main())
 pip install "mantyx-sdk[a2a-server]"
 ```
 
-### Go — `github.com/mantyx-io/mantyx-go-sdk/a2asrv`
+### Go — `github.com/mantyx-io/mantyx-sdk/go/a2asrv`
 
 ```go
 import (
-    mantyx "github.com/mantyx-io/mantyx-go-sdk"
-    "github.com/mantyx-io/mantyx-go-sdk/a2asrv"
+    mantyx "github.com/mantyx-io/mantyx-sdk/go"
+    "github.com/mantyx-io/mantyx-sdk/go/a2asrv"
 )
 
 client := mantyx.NewClient(mantyx.Options{APIKey: ..., WorkspaceSlug: ...})

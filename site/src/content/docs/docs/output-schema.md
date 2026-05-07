@@ -118,7 +118,7 @@ The `[OutputSchema]` TypedDict from `mantyx.tools` is the type alias for the dic
 ```go
 import (
     "context"
-    mantyx "github.com/mantyx-io/mantyx-go-sdk"
+    mantyx "github.com/mantyx-io/mantyx-sdk/go"
 )
 
 client := mantyx.NewClient(mantyx.Options{APIKey: "...", WorkspaceSlug: "acme"})

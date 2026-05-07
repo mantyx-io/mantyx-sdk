@@ -97,7 +97,7 @@ export default defineConfig({
           label: "Reference",
           items: [
             { label: "TypeScript (@mantyx/sdk)", link: "/docs/reference/typescript/" },
-            { label: "Go (mantyx-go-sdk)", link: "/docs/reference/go/" },
+            { label: "Go (mantyx-sdk/go)", link: "/docs/reference/go/" },
             { label: "Python (mantyx-sdk)", link: "/docs/reference/python/" },
           ],
         },

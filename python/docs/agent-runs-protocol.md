@@ -803,5 +803,5 @@ A reference SDK should:
    terminal `error` event on the stream, not as a 5xx on the initial POST.
 
 The npm package [`@mantyx/sdk`](https://www.npmjs.com/package/@mantyx/sdk) and the Go module
-[`github.com/mantyx/mantyx-go-sdk`](https://github.com/mantyx/mantyx-go-sdk) are reference implementations of this protocol
+[`github.com/mantyx-io/mantyx-sdk/go`](https://github.com/mantyx-io/mantyx-sdk/tree/main/go) are reference implementations of this protocol
 (maintained in the official **mantyx-sdk** repositories).

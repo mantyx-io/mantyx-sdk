@@ -25,8 +25,8 @@ sidebar:
 
 | | TypeScript | Go | Python |
 | --- | --- | --- | --- |
-| Package | `@mantyx/sdk` | `github.com/mantyx-io/mantyx-go-sdk` | `mantyx-sdk` |
-| Install | `npm install @mantyx/sdk` (bundles `zod` + `@modelcontextprotocol/sdk`) | `go get github.com/mantyx-io/mantyx-go-sdk` | `pip install mantyx-sdk` |
+| Package | `@mantyx/sdk` | `github.com/mantyx-io/mantyx-sdk/go` | `mantyx-sdk` |
+| Install | `npm install @mantyx/sdk` (bundles `zod` + `@modelcontextprotocol/sdk`) | `go get github.com/mantyx-io/mantyx-sdk/go` | `pip install mantyx-sdk` |
 | Min runtime | Node.js 18.17+ | Go 1.24+ | Python 3.10+ |
 | Local tool params | [Zod](https://zod.dev) schema | tagged Go struct | [Pydantic v2](https://docs.pydantic.dev) model |
 

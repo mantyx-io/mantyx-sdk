@@ -53,4 +53,4 @@ For multi-turn, reuse the `contextId` returned in the first response.
 
 ## Requires Go 1.24.4+
 
-The official `github.com/a2aproject/a2a-go/v2` SDK requires Go 1.24.4+ (this matches the MANTYX Go SDK's minimum). Importing `github.com/mantyx-io/mantyx-go-sdk/a2asrv` pulls it in transitively.
+The official `github.com/a2aproject/a2a-go/v2` SDK requires Go 1.24.4+ (this matches the MANTYX Go SDK's minimum). Importing `github.com/mantyx-io/mantyx-sdk/go/a2asrv` pulls it in transitively.
