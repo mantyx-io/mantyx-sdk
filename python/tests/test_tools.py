@@ -298,6 +298,81 @@ def test_reasoning_level_in_session_message(
     assert body["reasoningLevel"] == "high"
 
 
+# ---------------------------------- define_local_tool: output_schema + long_running
+
+
+class _SendArgs(BaseModel):
+    to: str
+    body: str
+
+
+class _SendResult(BaseModel):
+    id: str
+
+
+def test_define_local_tool_forwards_output_schema_and_long_running(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    tool = define_local_tool(
+        name="send_email",
+        description="Send an email.",
+        parameters=_SendArgs,
+        output_schema=_SendResult,
+        long_running=True,
+        execute=lambda _args: '{"id":"msg_1"}',
+    )
+    mantyx_client.run_agent(system_prompt="x", prompt="y", tools=[tool])
+    body = mock_server.last_run_create_body
+    assert body is not None
+    tools = body["tools"]
+    assert len(tools) == 1
+    entry = tools[0]
+    assert entry["kind"] == "local"
+    assert entry["name"] == "send_email"
+    # Parameters reflect _SendArgs
+    params = entry["parameters"]
+    assert params["type"] == "object"
+    assert set(params["properties"].keys()) == {"to", "body"}
+    # Output schema reflects _SendResult
+    output_schema = entry["outputSchema"]
+    assert output_schema["type"] == "object"
+    assert "id" in output_schema["properties"]
+    assert entry["longRunning"] is True
+
+
+def test_define_local_tool_accepts_output_schema_dict(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    raw_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+    }
+    tool = define_local_tool(
+        name="lookup",
+        output_schema=raw_schema,
+        execute=lambda _args: '{"id":"abc"}',
+    )
+    mantyx_client.run_agent(system_prompt="x", prompt="y", tools=[tool])
+    body = mock_server.last_run_create_body
+    assert body is not None
+    entry = body["tools"][0]
+    # Dict input is forwarded verbatim — same path as `parameters`.
+    assert entry["outputSchema"] == raw_schema
+
+
+def test_define_local_tool_omits_output_schema_and_long_running_by_default(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    tool = define_local_tool(name="noop", execute=lambda _args: "ok")
+    mantyx_client.run_agent(system_prompt="x", prompt="y", tools=[tool])
+    body = mock_server.last_run_create_body
+    assert body is not None
+    entry = body["tools"][0]
+    assert "outputSchema" not in entry
+    assert "longRunning" not in entry
+
+
 # --------------------------------------------------------------- output_schema
 
 

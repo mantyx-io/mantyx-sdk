@@ -1210,6 +1210,269 @@ func TestDispatch_LocalTool_TypedResultErrorSkipsEncoding(t *testing.T) {
 	}
 }
 
+// ---------- LocalTool output-schema + long-running ------------------------
+
+// extractLocalTool grabs the single `kind: "local"` entry from the run-create
+// body the mock server captured. Used by the OutputSchema/LongRunning tests
+// below to assert wire shape without re-running the same scaffolding.
+func extractLocalTool(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	var parsed struct {
+		Tools []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("parse run body: %v", err)
+	}
+	for _, tool := range parsed.Tools {
+		if tool["kind"] == "local" {
+			return tool
+		}
+	}
+	t.Fatalf("no `kind: \"local\"` tool in body: %s", body)
+	return nil
+}
+
+func TestLocalTool_OutputSchema_InferredFromTypedStructResult(t *testing.T) {
+	type weatherReport struct {
+		City         string  `json:"city" jsonschema:"City the report is for"`
+		TemperatureC float64 `json:"temperature_c" jsonschema:"Current temperature in Celsius"`
+	}
+
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "weather_report",
+		Execute: func(ctx context.Context, _ struct{}) (*weatherReport, error) {
+			return &weatherReport{City: "SF", TemperatureC: 17.5}, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	out, ok := got["outputSchema"].(map[string]any)
+	if !ok {
+		t.Fatalf("outputSchema missing or not an object: %#v", got["outputSchema"])
+	}
+	if out["type"] != "object" {
+		t.Fatalf("outputSchema.type = %#v, want object", out["type"])
+	}
+	props, _ := out["properties"].(map[string]any)
+	if props == nil {
+		t.Fatalf("outputSchema.properties missing: %#v", out)
+	}
+	city, _ := props["city"].(map[string]any)
+	if city == nil || city["type"] != "string" || city["description"] != "City the report is for" {
+		t.Fatalf("unexpected city schema: %#v", props["city"])
+	}
+	temp, _ := props["temperature_c"].(map[string]any)
+	if temp == nil || temp["type"] != "number" {
+		t.Fatalf("unexpected temperature_c schema: %#v", props["temperature_c"])
+	}
+}
+
+func TestLocalTool_OutputSchema_SkippedForOpaqueStringReturn(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "echo",
+		Execute: func(ctx context.Context, _ struct{}) (string, error) {
+			return "ok", nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if _, has := got["outputSchema"]; has {
+		t.Fatalf("expected no outputSchema for string return, got %#v", got["outputSchema"])
+	}
+}
+
+func TestLocalTool_OutputSchema_SkippedForRawMessageReturn(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "passthrough",
+		Execute: func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+			return json.RawMessage(`{}`), nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if _, has := got["outputSchema"]; has {
+		t.Fatalf("expected no outputSchema for json.RawMessage return, got %#v", got["outputSchema"])
+	}
+}
+
+func TestLocalTool_OutputSchema_SkippedForNonObjectRoot(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "list_ids",
+		Execute: func(ctx context.Context, _ struct{}) ([]int, error) {
+			return []int{1, 2, 3}, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if _, has := got["outputSchema"]; has {
+		t.Fatalf("expected no outputSchema for array root, got %#v", got["outputSchema"])
+	}
+}
+
+func TestLocalTool_OutputSchema_ExplicitOverride(t *testing.T) {
+	type ack struct {
+		OK bool `json:"ok"`
+	}
+	customSchema := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"id": map[string]any{"type": "string"}},
+		"required":   []any{"id"},
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:         "send",
+		OutputSchema: customSchema,
+		Execute: func(ctx context.Context, _ struct{}) (*ack, error) {
+			return &ack{OK: true}, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	out, ok := got["outputSchema"].(map[string]any)
+	if !ok {
+		t.Fatalf("outputSchema missing: %#v", got)
+	}
+	props, _ := out["properties"].(map[string]any)
+	if _, has := props["id"]; !has {
+		t.Fatalf("explicit override should win — expected id property, got %#v", props)
+	}
+	if _, has := props["ok"]; has {
+		t.Fatalf("explicit override should win — `ack.ok` should not have been inferred: %#v", props)
+	}
+}
+
+func TestLocalTool_OutputSchema_AcceptsGoStruct(t *testing.T) {
+	type ack struct {
+		OK bool `json:"ok" jsonschema:"Whether the call succeeded"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:         "notify",
+		OutputSchema: &ack{},
+		Execute: func(ctx context.Context, _ struct{}) (string, error) {
+			return "{}", nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	out, ok := got["outputSchema"].(map[string]any)
+	if !ok || out["type"] != "object" {
+		t.Fatalf("expected reflected struct schema, got %#v", got["outputSchema"])
+	}
+	props, _ := out["properties"].(map[string]any)
+	okProp, _ := props["ok"].(map[string]any)
+	if okProp == nil || okProp["type"] != "boolean" || okProp["description"] != "Whether the call succeeded" {
+		t.Fatalf("unexpected reflected ok schema: %#v", props["ok"])
+	}
+}
+
+func TestLocalTool_LongRunning_AddsWireField(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:        "kick_off_job",
+		LongRunning: true,
+		Execute: func(ctx context.Context, _ struct{}) (string, error) {
+			return "queued", nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if got["longRunning"] != true {
+		t.Fatalf("expected longRunning=true on wire, got %#v", got["longRunning"])
+	}
+}
+
+func TestLocalTool_LongRunning_OmittedByDefault(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name: "echo",
+		Execute: func(ctx context.Context, _ struct{}) (string, error) {
+			return "ok", nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if _, has := got["longRunning"]; has {
+		t.Fatalf("expected longRunning omitted by default, got %#v", got["longRunning"])
+	}
+}
+
 func TestLocalTool_PanicsOnInvalidExecuteSignature(t *testing.T) {
 	cases := []struct {
 		name string

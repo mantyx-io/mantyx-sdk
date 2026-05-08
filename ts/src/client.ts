@@ -814,6 +814,10 @@ function serializeToolRefs(tools: ToolRef[]): unknown[] {
           name: t.name,
           description: t.description,
           parameters: toToolParametersWire(t.parameters),
+          ...(t.outputSchema !== undefined
+            ? { outputSchema: toToolParametersWire(t.outputSchema) }
+            : {}),
+          ...(t.longRunning ? { longRunning: true } : {}),
         };
       case "a2a":
         return {

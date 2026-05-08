@@ -341,6 +341,36 @@ deep-reasoning JSON outputs. On sessions it inherits from
 [`docs/wire-protocol.md` §7](./docs/wire-protocol.md) for the full
 per-provider mapping.
 
+### Structured output for local tools
+
+`defineLocalTool` accepts the same per-tool affordances as the wire
+protocol: an `outputSchema` (Zod schema or JSON Schema dict) describing
+the tool's structured return value, and a `longRunning` flag that
+appends a "don't double-call while pending" hint to the model-facing
+description.
+
+```ts
+defineLocalTool({
+  name: "kick_off_export",
+  description: "Start a long-running export job.",
+  parameters: z.object({ dataset: z.string() }),
+  outputSchema: z.object({
+    jobId: z.string(),
+    status: z.enum(["pending", "done"]),
+  }),
+  longRunning: true,
+  execute: async ({ dataset }) =>
+    JSON.stringify(await enqueueExport(dataset)),
+});
+```
+
+`outputSchema` is forwarded to providers with per-tool response schemas
+(Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines
+surface it via the description. `longRunning` is a pure annotation —
+MANTYX appends a stable hint and does *not* alter scheduling or
+timeouts. See [`docs/tools/local`](https://docs.mantyx.com/docs/tools/local/)
+for the full guide.
+
 ## Picking a model
 
 ```ts

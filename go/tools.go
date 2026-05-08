@@ -67,6 +67,37 @@ type LocalToolSpec struct {
 	//   - map[string]any / json.RawMessage     → passed through as-is
 	//   - a Go struct (or pointer-to-struct)   → reflected to JSON Schema
 	Parameters any
+	// OutputSchema optionally declares a JSON Schema for the tool's
+	// structured return value. Forwarded to providers with per-tool
+	// response schemas (Gemini's `responseJsonSchema` on the
+	// FunctionDeclaration); other engines surface it through the tool
+	// description and rely on host-side validation. The model uses it to
+	// plan follow-up calls more reliably. See `docs/wire-protocol.md` §3.1.
+	//
+	// OutputSchema is one of:
+	//   - nil                                  → infer from Execute's
+	//                                            return type R (reflected
+	//                                            via google/jsonschema-go),
+	//                                            mirroring how Parameters
+	//                                            is inferred from T. No
+	//                                            schema is shipped when R
+	//                                            is `string` or
+	//                                            `json.RawMessage` (opaque
+	//                                            text payloads), or when
+	//                                            the inferred root is not
+	//                                            a JSON object — providers
+	//                                            reject non-object roots
+	//                                            in this position.
+	//   - map[string]any / json.RawMessage     → passed through as-is
+	//   - a Go struct (or pointer-to-struct)   → reflected to JSON Schema
+	OutputSchema any
+	// LongRunning, when true, annotates the model-facing description with
+	// a stable hint instructing the model not to re-issue calls while a
+	// previous invocation is still pending. Useful for tools that may
+	// return a `pending` / status response and the SDK polls on its own;
+	// without the hint, models routinely fire repeat calls and waste
+	// turns. Pure declarative — MANTYX does not change scheduling.
+	LongRunning bool
 	// Execute is invoked when the LLM calls this tool. It must be a function
 	// with the signature:
 	//
@@ -84,7 +115,8 @@ type LocalToolSpec struct {
 	//   - any other type   → SDK json.Marshals the value, returning the
 	//     resulting JSON text. This pairs naturally with Parameters: a
 	//     single Go return type drives both the typed handler return and
-	//     the JSON the model receives.
+	//     the JSON the model receives, and — unless OutputSchema is set
+	//     explicitly — drives the JSON Schema MANTYX advertises for R.
 	//
 	// A non-nil error short-circuits encoding and is forwarded to the model
 	// as a tool-error response.
@@ -92,18 +124,26 @@ type LocalToolSpec struct {
 }
 
 type localTool struct {
-	spec   LocalToolSpec
-	schema map[string]any
-	invoke func(ctx context.Context, raw json.RawMessage) (string, error)
+	spec         LocalToolSpec
+	schema       map[string]any
+	outputSchema map[string]any
+	invoke       func(ctx context.Context, raw json.RawMessage) (string, error)
 }
 
 func (t *localTool) toolWire() map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"kind":        "local",
 		"name":        t.spec.Name,
 		"description": t.spec.Description,
 		"parameters":  t.schema,
 	}
+	if t.outputSchema != nil {
+		out["outputSchema"] = t.outputSchema
+	}
+	if t.spec.LongRunning {
+		out["longRunning"] = true
+	}
+	return out
 }
 
 // LocalTool registers a local tool. `Execute` runs in the SDK process whenever
@@ -116,11 +156,49 @@ func LocalTool(spec LocalToolSpec) ToolRef {
 	if err != nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
-	invoke, err := buildLocalToolInvoker(spec.Name, spec.Execute)
+	invoke, returnType, err := buildLocalToolInvoker(spec.Name, spec.Execute)
 	if err != nil {
 		panic(fmt.Sprintf("mantyx.LocalTool %q: %v", spec.Name, err))
 	}
-	return &localTool{spec: spec, schema: schema, invoke: invoke}
+	outSchema := resolveLocalToolOutputSchema(spec.Name, spec.OutputSchema, returnType)
+	return &localTool{spec: spec, schema: schema, outputSchema: outSchema, invoke: invoke}
+}
+
+// resolveLocalToolOutputSchema maps a LocalToolSpec.OutputSchema input (any of
+// nil, map[string]any, json.RawMessage, or a Go struct) onto the JSON Schema
+// blob shipped on the wire. When the user leaves the field unset the SDK
+// falls back to reflecting Execute's first return type — same path as the
+// input-schema inference for Parameters — so a single Go type drives both
+// ends of the contract. Inference is skipped for `string` / `json.RawMessage`
+// (opaque text payloads) and for any reflected schema whose root is not a
+// JSON object (providers reject non-object roots in this position).
+func resolveLocalToolOutputSchema(toolName string, userSupplied any, returnType reflect.Type) map[string]any {
+	if userSupplied != nil {
+		s, err := jsonSchemaFor(userSupplied)
+		if err != nil {
+			panic(fmt.Sprintf("mantyx.LocalTool %q: cannot reflect OutputSchema: %v", toolName, err))
+		}
+		return s
+	}
+	if returnType == nil {
+		return nil
+	}
+	t := returnType
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.String || t == rawMsgType {
+		return nil
+	}
+	probe := reflect.New(returnType).Interface()
+	s, err := jsonSchemaFor(probe)
+	if err != nil {
+		return nil
+	}
+	if s["type"] != "object" {
+		return nil
+	}
+	return s
 }
 
 var (
@@ -132,6 +210,8 @@ var (
 // buildLocalToolInvoker validates spec.Execute's shape and returns a closure
 // that decodes the raw JSON args into Execute's typed parameter, invokes the
 // function, and returns its result as the wire-level (string, error) reply.
+// It also surfaces Execute's first return type so callers can drive the
+// output-schema inference off the same source of truth.
 //
 // Accepted Execute signatures:
 //
@@ -146,37 +226,39 @@ var (
 // any other Go type (json.Marshaled by the SDK before dispatch). Pairing R
 // with Parameters keeps both ends of the contract type-checked by the Go
 // compiler.
-func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Context, raw json.RawMessage) (string, error), error) {
+func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Context, raw json.RawMessage) (string, error), reflect.Type, error) {
 	if execute == nil {
-		return nil, fmt.Errorf("Execute is required")
+		return nil, nil, fmt.Errorf("Execute is required")
 	}
 	// Fast path: legacy json.RawMessage-in / string-out signature avoids
-	// reflection cost on every dispatch.
+	// reflection cost on every dispatch. The return type is `string`, which
+	// the inference pipeline treats as opaque text and skips.
 	if fn, ok := execute.(func(context.Context, json.RawMessage) (string, error)); ok {
-		return fn, nil
+		return fn, reflect.TypeOf(""), nil
 	}
 
 	rv := reflect.ValueOf(execute)
 	rt := rv.Type()
 	if rt.Kind() != reflect.Func {
-		return nil, fmt.Errorf("Execute must be a function, got %s", rt.Kind())
+		return nil, nil, fmt.Errorf("Execute must be a function, got %s", rt.Kind())
 	}
 	if rt.NumIn() != 2 || rt.NumOut() != 2 {
-		return nil, fmt.Errorf("Execute must have signature func(context.Context, T) (R, error)")
+		return nil, nil, fmt.Errorf("Execute must have signature func(context.Context, T) (R, error)")
 	}
 	if !rt.In(0).Implements(contextType) {
-		return nil, fmt.Errorf("Execute first parameter must be context.Context, got %s", rt.In(0))
+		return nil, nil, fmt.Errorf("Execute first parameter must be context.Context, got %s", rt.In(0))
 	}
 	if !rt.Out(1).Implements(errorType) {
-		return nil, fmt.Errorf("Execute second return must be error, got %s", rt.Out(1))
+		return nil, nil, fmt.Errorf("Execute second return must be error, got %s", rt.Out(1))
 	}
-	encoder := resultEncoderFor(rt.Out(0))
+	returnType := rt.Out(0)
+	encoder := resultEncoderFor(returnType)
 
 	argType := rt.In(1)
 	isRawMessage := argType == rawMsgType
 	isPointer := argType.Kind() == reflect.Ptr
 
-	return func(ctx context.Context, raw json.RawMessage) (string, error) {
+	invoke := func(ctx context.Context, raw json.RawMessage) (string, error) {
 		// Allocate a fresh *T (or *Telem when T is a pointer) so we have a
 		// settable target for json.Unmarshal.
 		var holder reflect.Value
@@ -215,7 +297,8 @@ func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Conte
 			return "", fmt.Errorf("encode result for tool %q: %w", toolName, encErr)
 		}
 		return result, nil
-	}, nil
+	}
+	return invoke, returnType, nil
 }
 
 // resultEncoderFor returns a function that converts Execute's first return

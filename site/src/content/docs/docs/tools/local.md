@@ -105,11 +105,103 @@ Execute: func(ctx context.Context, args ResolveIDsArgs) (*Result, error) {
 
 A thrown error (or a non-`nil` `error` in Go) is forwarded to the model as a tool-error response. You typically don't need to catch and re-throw; the SDK wraps the message into the right wire shape automatically.
 
+## Declaring an `outputSchema`
+
+You can attach a JSON Schema for the tool's structured **return value** alongside `parameters`. MANTYX forwards it to providers that support per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. Either way the model uses it to plan follow-up calls more reliably.
+
+The schema must be a JSON object root — non-object roots are dropped server-side because providers reject them in this position.
+
+```ts
+defineLocalTool({
+  name: "send_email",
+  parameters: z.object({
+    to: z.string().email(),
+    subject: z.string(),
+    body: z.string(),
+  }),
+  outputSchema: z.object({ id: z.string() }),     // Zod is auto-converted
+  execute: async (args) => JSON.stringify({ id: await sendEmail(args) }),
+});
+```
+
+```python
+class SendEmailArgs(BaseModel):
+    to: str
+    subject: str
+    body: str
+
+class SendEmailResult(BaseModel):
+    id: str
+
+define_local_tool(
+    name="send_email",
+    parameters=SendEmailArgs,
+    output_schema=SendEmailResult,                # Pydantic model or JSON Schema dict
+    execute=lambda args: json.dumps({"id": send_email(args)}),
+)
+```
+
+In Go the `OutputSchema` is **inferred from `Execute`'s return type** by default — same reflection path `Parameters` already uses for the input. A typed struct return (or pointer-to-struct) yields a JSON Schema you don't have to write twice; `string` and `json.RawMessage` returns skip inference because they're opaque text payloads:
+
+```go
+type SendEmailResult struct {
+    ID string `json:"id" jsonschema:"Provider-side message id"`
+}
+
+mantyx.LocalTool(mantyx.LocalToolSpec{
+    Name:       "send_email",
+    Parameters: &SendEmailArgs{},
+    Execute: func(ctx context.Context, args SendEmailArgs) (*SendEmailResult, error) {
+        // Returned struct's JSON Schema is auto-shipped as `outputSchema`.
+        return &SendEmailResult{ID: "msg_1"}, nil
+    },
+})
+```
+
+To override the inferred schema (or to attach one when `Execute` returns a `string` / `json.RawMessage`), set `OutputSchema` explicitly — it accepts the same shapes as `Parameters` (`map[string]any`, `json.RawMessage`, or a struct / pointer-to-struct).
+
+## Long-running tools
+
+Set `longRunning: true` (TypeScript / Python: `long_running=True`; Go: `LongRunning: true`) when a single call to your tool may return a `pending` / status response and you do the polling yourself. MANTYX appends a stable hint to the model-facing description:
+
+> *NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status.*
+
+…so every provider treats the tool the same way. Without the hint, models routinely fire repeat calls and waste turns. The flag is **purely declarative** — MANTYX does not change scheduling, increase the per-call timeout, or otherwise alter the tool's lifecycle.
+
+```ts
+defineLocalTool({
+  name: "kick_off_export",
+  parameters: z.object({ dataset: z.string() }),
+  outputSchema: z.object({ jobId: z.string(), status: z.enum(["pending", "done"]) }),
+  longRunning: true,
+  execute: async ({ dataset }) => JSON.stringify(await enqueueExport(dataset)),
+});
+```
+
+```python
+define_local_tool(
+    name="kick_off_export",
+    parameters=KickOffExportArgs,
+    output_schema=KickOffExportResult,
+    long_running=True,
+    execute=enqueue_export,
+)
+```
+
+```go
+mantyx.LocalTool(mantyx.LocalToolSpec{
+    Name:        "kick_off_export",
+    Parameters:  &KickOffExportArgs{},
+    LongRunning: true,
+    Execute:     enqueueExport,
+})
+```
+
 ## Timeouts
 
 The server enforces a tool-result timeout (default 60s) for each `local_tool_call`. If the SDK doesn't POST a result in time, the run terminates with `result.subtype = "error_local_tool_timeout"`.
 
-To run long-running work, persist the result somewhere durable and have the tool body return a "queued" message; on a follow-up turn, return the actual result via a different tool that reads from the durable store.
+For longer-running work, persist the result somewhere durable and have the tool body return a "queued" / `pending` message immediately; on a follow-up turn, return the actual result via a different tool that reads from the durable store. Pair the kick-off tool with [`longRunning: true`](#long-running-tools) so the model doesn't double-fire while the job is still in flight.
 
 ## How dispatch works
 

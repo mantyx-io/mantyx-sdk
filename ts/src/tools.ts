@@ -42,11 +42,36 @@ export type ReasoningLevel = "off" | "low" | "medium" | "high" | number;
 
 // ---------------------------------------------------------- Generic local tool
 
+/**
+ * Either a Zod schema (auto-converted to JSON Schema by the SDK) or a
+ * pre-shaped JSON Schema object. Used for both `parameters` and the new
+ * `outputSchema` field — same conversion path either way.
+ */
+export type LocalToolSchemaInput = ZodLikeObject | Record<string, unknown>;
+
 export interface LocalTool<TArgs = Record<string, unknown>> {
   readonly kind: "local";
   readonly name: string;
   readonly description: string;
   readonly parameters: ZodLikeObject | undefined;
+  /**
+   * Optional JSON Schema (or Zod schema, auto-converted) describing the
+   * tool's structured return value. Forwarded to providers with per-tool
+   * response schemas (Gemini's `responseJsonSchema` on the
+   * FunctionDeclaration); other engines surface it through the description
+   * and rely on host-side validation. The model uses it to plan follow-up
+   * arguments more reliably. See `docs/wire-protocol.md` §3.1.
+   */
+  readonly outputSchema: LocalToolSchemaInput | undefined;
+  /**
+   * When `true`, MANTYX appends a stable hint to the model-facing
+   * description telling the model not to re-issue calls while a previous
+   * invocation is still pending. Useful for tools that may yield a
+   * `pending` / status response and the SDK polls on its own; without the
+   * hint, models routinely fire repeat calls and waste turns. Pure
+   * declarative — MANTYX does not change scheduling.
+   */
+  readonly longRunning: boolean;
   readonly execute: (args: TArgs) => Promise<string> | string;
 }
 
@@ -55,6 +80,17 @@ export interface DefineLocalToolOptions<T extends ZodLikeObject | undefined> {
   name: string;
   description?: string;
   parameters?: T;
+  /**
+   * Optional JSON Schema (or Zod schema) describing the tool's return
+   * value. See {@link LocalTool.outputSchema}.
+   */
+  outputSchema?: LocalToolSchemaInput;
+  /**
+   * Annotate the tool as long-running so the model doesn't double-call
+   * while a previous invocation is still pending. See
+   * {@link LocalTool.longRunning}.
+   */
+  longRunning?: boolean;
   execute: (
     args: T extends ZodLikeObject ? z.infer<T> : Record<string, unknown>,
   ) => Promise<string> | string;
@@ -69,6 +105,8 @@ export function defineLocalTool<T extends ZodLikeObject | undefined>(
     name: opts.name,
     description: opts.description ?? "",
     parameters: opts.parameters,
+    outputSchema: opts.outputSchema,
+    longRunning: opts.longRunning ?? false,
     execute: opts.execute as LocalTool["execute"],
   };
 }

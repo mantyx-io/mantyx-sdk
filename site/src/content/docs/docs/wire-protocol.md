@@ -133,17 +133,68 @@ must answer `local_tool_call` events.
 | ---------------- | ---------- | --------------------- |
 | `mantyx`         | server     | `{ id }` reference to a workspace `Tool` row. |
 | `mantyx_plugin`  | server     | `{ name }` reference to a platform plugin tool. |
-| `local`          | client     | `{ name, description?, parameters? }` — JSON Schema. |
+| `local`          | client     | `{ name, description?, parameters?, outputSchema?, longRunning? }` — `parameters` is **JSON Schema** (object schema with `properties`/`required`); forwarded verbatim to the LLM provider and validated against incoming tool-call args before execution. `outputSchema` (optional) is JSON Schema for the tool's structured return value, surfaced to providers that accept per-tool response schemas. `longRunning` (optional, default `false`) annotates the model-facing description with a "don't double-call while pending" hint so every provider treats the tool as long-running. |
 | `a2a`            | server     | `{ name, agentCardUrl, headers?, contextId?, description? }`. |
 | `a2a_local`      | client     | `{ name, agentCard }` — **resolved A2A Agent Card JSON content**. |
 | `mcp`            | server     | `{ name, url, headers?, toolFilter? }`. |
 | `mcp_local`      | client     | `{ name, serverInfo?, tools[] }` — **resolved MCP `Tool[]`**. |
 
-The remainder of this document focuses on `a2a_local` and `mcp_local`,
-because they're the ones that carry SDK-resolved structured content. For
-the wire shapes of the other five kinds, see `agent-runs-protocol.md` §4.
+The remainder of this document focuses on `local`, `a2a_local`, and
+`mcp_local`, because they're the ones that carry SDK-defined structured
+content. For the wire shapes of the four server-resolved kinds, see
+`agent-runs-protocol.md` §4.
 
-### 3.1 `a2a_local` — SDK-resolved Agent Card
+### 3.1 `kind: "local"` — generic local tools
+
+The minimal client-resolved tool: the SDK declares a name + JSON Schema
+and implements the handler in its own process. Useful for any tool MANTYX
+shouldn't (or can't) execute itself — file system access, on-device APIs,
+caller-specific business logic.
+
+**Wire shape:**
+
+```jsonc
+{
+  "kind": "local",
+  "name": "send_email",                 // model-facing; /^[a-zA-Z0-9_]{1,64}$/
+  "description": "Send a transactional email.",
+  "parameters": {                       // OPTIONAL; JSON Schema for args
+    "type": "object",
+    "properties": {
+      "to":      { "type": "string", "format": "email" },
+      "subject": { "type": "string" },
+      "body":    { "type": "string" }
+    },
+    "required": ["to", "subject", "body"],
+    "additionalProperties": false
+  },
+  "outputSchema": {                     // OPTIONAL; JSON Schema for the return value
+    "type": "object",
+    "properties": { "id": { "type": "string" } },
+    "required": ["id"],
+    "additionalProperties": false
+  },
+  "longRunning": false                  // OPTIONAL; default false
+}
+```
+
+**Field reference:**
+
+| Field          | Required | Notes |
+| -------------- | -------- | ----- |
+| `kind`         | yes      | Discriminator literal `"local"`. |
+| `name`         | yes      | Model-facing tool name. Must match `/^[a-zA-Z0-9_]{1,64}$/`. |
+| `description`  | no       | Free-form. When omitted the model sees an empty description (acceptable but reduces tool selection accuracy). |
+| `parameters`   | no       | JSON Schema for the tool's input. Must be an object schema (`type: "object"` with `properties`); other shapes are coerced to an empty object schema server-side. Nested constraints (`array.items`, `enum`, `anyOf`, …) are preserved end-to-end. Args that fail server-side validation produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the call. |
+| `outputSchema` | no       | JSON Schema for the structured value the tool returns. Forwarded to providers with per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. The model uses it to plan follow-up arguments more reliably. Must be an object schema; non-object roots are dropped server-side (engines reject non-object roots in this position). |
+| `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the description:<br>*"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."*<br>Useful for tools where a single call may yield a `pending` / status response and the SDK polls on its own; without the hint, models routinely fire repeat calls and waste turns. Pure declarative — MANTYX does not change scheduling. |
+
+**Tool call dispatch.** When the model calls a `local` tool, the SSE
+stream emits `local_tool_call` with `kind: "local"` (or omitted, for
+backward compatibility). The SDK runs the handler and POSTs back to
+`.../tool-results`. See §4.3.1 for the event shape.
+
+### 3.2 `a2a_local` — SDK-resolved Agent Card
 
 The defining feature of `a2a_local` is that the SDK ships a fully-resolved
 [A2A Agent Card](https://google.github.io/A2A/specification/#agent-card) as
@@ -203,7 +254,7 @@ the `agentCard` field. MANTYX never reaches out to discover it.
 | `skills[]` (first 12)    | Tool description for the model | Bulleted into the description so the model can choose a peer based on capability. |
 | All other fields         | Echo only | Forwarded back to the SDK in every `local_tool_call` event so the SDK can dispatch by `url`, by `provider.organization`, by `protocolVersion`, or whatever it indexed on. |
 
-### 3.2 `mcp_local` — SDK-resolved Tool catalog
+### 3.3 `mcp_local` — SDK-resolved Tool catalog
 
 The defining feature of `mcp_local` is that the SDK ships the **verbatim
 output of MCP `tools/list`** as `tools[]`, with field names matching the
@@ -263,7 +314,7 @@ const ref = {
 | ------------------------ | -------- | ----- |
 | `tools[].name`           | Model-facing tool name | Used as-is. MANTYX does **not** prefix with the ref's `name`. The SDK is responsible for any naming convention (e.g. emit `fs_read_file` instead of `read_file` if you have multiple servers). |
 | `tools[].description`    | Model-facing description | Used as-is. |
-| `tools[].inputSchema`    | LLM tool-call schema | Converted to Zod via `jsonSchemaToZod` to constrain the model's tool call. Empty schema → no-arg tool. |
+| `tools[].inputSchema`    | LLM tool-call schema | Forwarded **verbatim** to the LLM provider as the tool's JSON Schema, then validated against incoming tool-call args (Ajv) before execution. Nested constraints (`array.items`, `enum`, `anyOf`, …) are preserved end-to-end. Empty / missing schema → no-arg tool. Args that violate the schema produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the tool. |
 | `tools[].annotations`    | Echo only | Forwarded to the SDK in `local_tool_call` events (as part of the call envelope) for observability. |
 | `serverInfo`             | Echo only | Forwarded to the SDK in `local_tool_call.mcpServerInfo`. |
 
@@ -557,9 +608,16 @@ Per provider:
 | Provider                       | How the schema is enforced |
 | ------------------------------ | -------------------------- |
 | OpenAI Responses (o-series, GPT-5.x, …) | `text.format = { type: "json_schema", strict: true, name, schema }` on every `completeTurn` (compatible with tool calls). |
-| Gemini ≥ 2.5                   | `responseMimeType: "application/json"` + `responseJsonSchema` on no-tools turns (Gemini rejects schemas alongside `functionDeclarations`). |
+| Gemini 3+ (any turn)           | `responseMimeType: "application/json"` + `responseJsonSchema` on every `completeTurn`. Gemini 3 accepts the schema alongside `functionDeclarations`. |
+| Gemini ≤ 2.5 with no tools     | Same as Gemini 3+: `responseMimeType: "application/json"` + `responseJsonSchema`. |
+| Gemini ≤ 2.5 **with tools**    | Synthetic `set_model_response` function declaration is injected; its `parametersJsonSchema` is the supplied schema. The system instruction is augmented to direct the model to call this tool with the final answer. The engine intercepts the call, hides it from the SDK, and surfaces the call's arguments as the assistant text (JSON-stringified). Sidesteps the API rejection ("Function calling with a response mime type: 'application/json' is unsupported") without round-tripping a 4xx. |
 | Anthropic / Bedrock-Anthropic  | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text. |
 | xAI Grok, others               | Ignored — the model returns plain text. |
+
+The synthetic-tool paths (Gemini 2.5 + tools, Anthropic) are entirely
+internal: the SDK still receives `data.text: string` on the terminal
+`result` event and never sees a `local_tool_call` for `set_model_response`
+or `final_report`. They never appear in the tools array the SDK declared.
 
 Validation (server-side, `400 invalid_request` on violation):
 
@@ -737,6 +795,13 @@ A reference SDK should:
         field — typically `agentCard.url`),
       - local MCP servers (`kind: "mcp_local"`, indexed by the SDK-side
         server label that matches `local_tool_call.mcpServer`).
+- [ ] For `kind: "local"`, accept developer-supplied `parameters` (Zod /
+      JSON Schema) and serialize to JSON Schema before submission. When the
+      caller declares an output schema, forward it as `outputSchema` (same
+      JSON Schema shape) so providers with per-tool response schemas can
+      enforce it. Surface a `longRunning` flag on the tool builder so the
+      caller can opt into the model-side "don't double-call" hint without
+      hand-editing the description.
 - [ ] For `a2a_local`, **resolve the Agent Card locally** and ship it as
       `agentCard`. Don't expect MANTYX to fetch anything.
 - [ ] For `mcp_local`, **speak `Initialize` + `tools/list` locally** and

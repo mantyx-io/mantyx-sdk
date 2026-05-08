@@ -95,6 +95,20 @@ class LocalTool:
     name: ToolName
     description: str = ""
     parameters: ParametersInput = None
+    #: Optional JSON Schema for the structured value the tool returns.
+    #: Forwarded to providers with per-tool response schemas (Gemini's
+    #: ``responseJsonSchema`` on the FunctionDeclaration); other engines
+    #: surface it through the description and rely on host-side
+    #: validation. Same shape as ``parameters`` (Pydantic v2 ``BaseModel``,
+    #: JSON Schema dict, or ``None``). See ``docs/wire-protocol.md`` §3.1.
+    output_schema: ParametersInput = None
+    #: When ``True``, MANTYX appends a stable hint to the model-facing
+    #: description telling the model not to re-issue calls while a previous
+    #: invocation is still pending. Useful for tools that may yield a
+    #: ``pending`` / status response and the SDK polls on its own; without
+    #: the hint, models routinely fire repeat calls and waste turns. Pure
+    #: declarative — MANTYX does not change scheduling.
+    long_running: bool = False
     execute: Callable[..., Any] = field(default=lambda *_: "")
     kind: str = "local"
 
@@ -261,6 +275,8 @@ def define_local_tool(
     execute: Callable[..., Any],
     description: str = "",
     parameters: ParametersInput = None,
+    output_schema: ParametersInput = None,
+    long_running: bool = False,
 ) -> LocalTool:
     """Define a tool whose handler runs in *this* Python process.
 
@@ -273,12 +289,24 @@ def define_local_tool(
         description: Free-form description for the model.
         parameters: A Pydantic v2 ``BaseModel`` subclass, a JSON Schema
             dict, or ``None`` for "any object".
+        output_schema: Optional JSON Schema (or Pydantic model) describing
+            the tool's structured return value. Forwarded to providers
+            with per-tool response schemas; other engines surface it
+            through the description. The model uses it to plan follow-up
+            arguments more reliably. See ``docs/wire-protocol.md`` §3.1.
+        long_running: When ``True``, MANTYX annotates the model-facing
+            description with a hint instructing the model not to re-issue
+            calls while a previous invocation is still pending. Useful
+            for tools that may yield a ``pending`` / status response and
+            the SDK polls on its own.
     """
     _assert_tool_name(name)
     return LocalTool(
         name=name,
         description=description or "",
         parameters=parameters,
+        output_schema=output_schema,
+        long_running=bool(long_running),
         execute=execute,
     )
 
@@ -521,14 +549,17 @@ def serialize_tool_refs(tools: list[ToolRef] | None) -> list[dict[str, Any]]:
         elif isinstance(t, MantyxPluginToolRef):
             out.append({"kind": "mantyx_plugin", "name": t.name})
         elif isinstance(t, LocalTool):
-            out.append(
-                {
-                    "kind": "local",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": to_tool_parameters_wire(t.parameters),
-                }
-            )
+            local_entry: dict[str, Any] = {
+                "kind": "local",
+                "name": t.name,
+                "description": t.description,
+                "parameters": to_tool_parameters_wire(t.parameters),
+            }
+            if t.output_schema is not None:
+                local_entry["outputSchema"] = to_tool_parameters_wire(t.output_schema)
+            if t.long_running:
+                local_entry["longRunning"] = True
+            out.append(local_entry)
         elif isinstance(t, MantyxA2AToolRef):
             entry: dict[str, Any] = {
                 "kind": "a2a",

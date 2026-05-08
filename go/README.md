@@ -377,6 +377,49 @@ deep-reasoning JSON outputs. On sessions it inherits from
 `session.Send(ctx, prompt, mantyx.WithOutputSchema(...))`. See
 `docs/wire-protocol.md` §7 for the full per-provider mapping.
 
+### Structured output for local tools
+
+`LocalToolSpec` accepts the same per-tool affordances as the wire
+protocol: an `OutputSchema` describing the structured return value, and
+a `LongRunning` flag that appends a "don't double-call while pending"
+hint to the model-facing description. By default `OutputSchema` is
+**inferred from `Execute`'s return type** using the same reflection
+path `Parameters` already uses — so a single Go type can drive both
+the schema you ship to the provider and the typed value you return:
+
+```go
+type KickOffArgs struct {
+    Dataset string `json:"dataset"`
+}
+type KickOffResult struct {
+    JobID  string `json:"jobId"  jsonschema:"Provider-side job id"`
+    Status string `json:"status" jsonschema:"enum=pending,enum=done"`
+}
+
+mantyx.LocalTool(mantyx.LocalToolSpec{
+    Name:        "kick_off_export",
+    Description: "Start a long-running export job.",
+    Parameters:  &KickOffArgs{},
+    LongRunning: true,
+    Execute: func(ctx context.Context, args KickOffArgs) (*KickOffResult, error) {
+        return enqueueExport(ctx, args.Dataset)
+    },
+})
+```
+
+Inference is skipped when `Execute` returns `string` or
+`json.RawMessage` (those are opaque text payloads) or when the
+reflected schema's root is not a JSON object (providers reject
+non-object roots in this position). To override the inferred schema —
+or to attach one explicitly when `Execute` returns `string` — set
+`OutputSchema` on the spec; it accepts the same shapes as `Parameters`
+(`map[string]any`, `json.RawMessage`, or a struct / pointer-to-struct).
+
+`LongRunning` is a pure annotation — MANTYX appends a stable hint to
+the description and does *not* alter scheduling, the per-call timeout,
+or the tool's lifecycle. See [`docs/tools/local`](https://docs.mantyx.com/docs/tools/local/)
+for the full guide.
+
 ## Picking a model
 
 ```go

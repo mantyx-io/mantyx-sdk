@@ -468,6 +468,42 @@ Available on both sync and async clients, on `run_agent` /
 `session.send` / `session.stream`. See `docs/wire-protocol.md` §7 for
 the per-provider mapping.
 
+#### Structured output for local tools
+
+`define_local_tool` accepts the same per-tool affordances as the wire
+protocol: an `output_schema` (Pydantic model or JSON Schema dict)
+describing the tool's structured return value, and a `long_running`
+flag that appends a "don't double-call while pending" hint to the
+model-facing description.
+
+```python
+from pydantic import BaseModel
+from mantyx import define_local_tool
+
+class KickOffArgs(BaseModel):
+    dataset: str
+
+class KickOffResult(BaseModel):
+    job_id: str
+    status: str  # "pending" | "done"
+
+define_local_tool(
+    name="kick_off_export",
+    description="Start a long-running export job.",
+    parameters=KickOffArgs,
+    output_schema=KickOffResult,
+    long_running=True,
+    execute=lambda args: enqueue_export(args.dataset),
+)
+```
+
+`output_schema` is forwarded to providers with per-tool response
+schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration);
+other engines surface it via the description. `long_running` is a pure
+annotation — MANTYX appends a stable hint and does *not* alter
+scheduling or timeouts. See [`docs/tools/local`](https://docs.mantyx.com/docs/tools/local/)
+for the full guide.
+
 ### Errors
 
 All raised errors extend `MantyxError`. Common subclasses:

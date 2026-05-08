@@ -28,7 +28,7 @@ array:
 | ---------------- | ----------- | ----- |
 | `mantyx`         | server      | A workspace `Tool` row referenced by id (HTTP / Code / Plugin). |
 | `mantyx_plugin`  | server      | A platform plugin tool referenced by name. |
-| `local`          | client      | A custom tool defined and executed in the SDK's process. |
+| `local`          | client      | A custom tool defined and executed in the SDK's process. Carries `parameters` (input JSON Schema) plus optional `outputSchema` (return-value JSON Schema) and `longRunning` flag — see §4.1.1. |
 | `a2a`            | server      | A *remote* Agent2Agent peer MANTYX can reach; invoked via `message/send` and the reply is surfaced as the tool result. |
 | `a2a_local`      | client      | An A2A peer MANTYX **cannot** reach. SDK resolves the [Agent Card](https://google.github.io/A2A/specification/#agent-card) locally and ships it inline; MANTYX uses it for the model description and routes calls back to the SDK over SSE. |
 | `mcp`            | server      | A *remote* MCP server (Streamable HTTP). At run start MANTYX lists the catalog and exposes every tool as `<server>_<tool>` (subject to `toolFilter`). |
@@ -150,7 +150,15 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
         "properties": { "path": { "type": "string" } },
         "required": ["path"],
         "additionalProperties": false
-      }
+      },
+      "outputSchema": {                 // optional — JSON Schema for the return value
+        "type": "object",
+        "properties": {
+          "bytes": { "type": "string", "description": "UTF-8 file contents" }
+        },
+        "required": ["bytes"]
+      },
+      "longRunning": false              // optional — default false
     },
     {
       "kind": "a2a",
@@ -257,6 +265,28 @@ defining an ephemeral one inline. When `agentId` is set:
 
 Both `agentId` and `systemPrompt` may be supplied. The agent's stored prompt
 wins; the inline `systemPrompt` is ignored.
+
+### 4.1.1 `kind: "local"` — generic local tools
+
+The minimal client-resolved tool: the SDK declares the contract and runs
+the handler in its own process. MANTYX never executes the body — it
+emits a `local_tool_call` event when the model picks the tool and waits
+for the SDK to POST a tool-result.
+
+| Field          | Required | Notes |
+| -------------- | -------- | ----- |
+| `kind`         | yes      | Discriminator literal `"local"`. |
+| `name`         | yes      | Model-facing tool name. Must match `/^[a-zA-Z0-9_]{1,64}$/`. |
+| `description`  | no       | Free-form. Empty when omitted (acceptable, but reduces tool-selection accuracy). |
+| `parameters`   | no       | JSON Schema for the tool's input. Must be a `type: "object"` schema with `properties`; non-object roots are coerced to an empty object schema server-side. Forwarded **verbatim** to the LLM provider so nested constraints (`array.items`, `enum`, `anyOf`, numeric formats, …) survive. Args that fail server-side validation produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the call. |
+| `outputSchema` | no       | JSON Schema for the structured value the tool returns. When present, forwarded to providers that accept per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. Helps the model emit follow-up arguments that round-trip cleanly. Must be an object schema; non-object roots are dropped server-side. |
+| `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the model-facing description so every provider treats the tool as long-running:<br>*"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."*<br>Useful for tools that return `pending` and rely on SDK-side polling — without the hint the model routinely fires repeat calls and burns turns. Pure declarative — MANTYX does not change scheduling. |
+
+The `outputSchema` and `longRunning` fields are **additive** since wire
+protocol v1: SDKs that don't ship them keep working unchanged. Providers
+without per-tool response-schema support (OpenAI, Anthropic, Bedrock,
+Grok) accept the new fields silently — the schema is treated as a
+description hint and host-side validation still runs.
 
 ### 4.2 A2A tool refs
 
@@ -521,9 +551,17 @@ Validation (server-side, `400 invalid_request` on violation):
 | Provider                       | How the schema is enforced |
 | ------------------------------ | -------------------------- |
 | OpenAI Responses (o-series, GPT-5.x, …) | `text.format = { type: "json_schema", strict: true, name, schema }` on every turn (works alongside tool calls). |
-| Gemini ≥ 2.5                   | `responseMimeType: "application/json"` + `responseJsonSchema` on no-tools turns (Gemini rejects schemas alongside `functionDeclarations`). |
+| Gemini 3+ (any turn)           | `responseMimeType: "application/json"` + `responseJsonSchema` on every `completeTurn`. Gemini 3 accepts the schema alongside `functionDeclarations`. |
+| Gemini ≤ 2.5 (no-tools turn)   | `responseMimeType: "application/json"` + `responseJsonSchema`. |
+| Gemini ≤ 2.5 (with tools)      | Synthetic `set_model_response` function declaration is injected; its `parametersJsonSchema` is the supplied schema. The system instruction is augmented to direct the model to call this tool with the final answer. The engine intercepts the call, hides it from the SDK, and surfaces the call's arguments as the assistant text (JSON-stringified). Sidesteps the API rejection ("Function calling with a response mime type: 'application/json' is unsupported") without round-tripping a 4xx. |
 | Anthropic / Bedrock-Anthropic  | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text. |
 | xAI Grok, others               | Ignored (the model returns plain text). |
+
+The synthetic-tool paths (Gemini 2.5 + tools, Anthropic) are entirely
+internal: the SDK never receives a `local_tool_call` for
+`set_model_response` or `final_report`, and these names never appear in
+the tools array the SDK declared. The terminal `result` event still
+carries the reply as `data.text: string`.
 
 The terminal `result` event still carries the reply as
 `data.text: string` — the SDK is expected to `JSON.parse` and validate
@@ -759,7 +797,12 @@ A reference SDK should:
 2. Maintain three local-callback registries (or one tagged-union registry),
    keyed by tool `name`:
    - **Generic local tools** (`kind: "local"`) — caller-supplied handler
-     functions, dispatched by `name`.
+     functions, dispatched by `name`. Accept developer-supplied input and
+     output schemas (Zod, Pydantic, JSON Schema, …) and serialize to JSON
+     Schema before submission as `parameters` / `outputSchema`. Surface a
+     `longRunning` knob on the tool builder so callers can opt into the
+     model-side "don't double-call" hint without hand-editing the
+     description.
    - **Local A2A peers** (`kind: "a2a_local"`) — caller-supplied A2A
      clients. Resolve the peer's Agent Card *first* (e.g. `fetch
      "<peer>/.well-known/agent-card.json"` or read from a local registry),
@@ -803,5 +846,5 @@ A reference SDK should:
    terminal `error` event on the stream, not as a 5xx on the initial POST.
 
 The npm package [`@mantyx/sdk`](https://www.npmjs.com/package/@mantyx/sdk) and the Go module
-[`github.com/mantyx-io/mantyx-sdk/go`](https://github.com/mantyx-io/mantyx-sdk/tree/main/go) are reference implementations of this protocol
+[`github.com/mantyx/mantyx-go-sdk`](https://github.com/mantyx/mantyx-go-sdk) are reference implementations of this protocol
 (maintained in the official **mantyx-sdk** repositories).

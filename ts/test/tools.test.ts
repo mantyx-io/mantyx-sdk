@@ -217,6 +217,81 @@ describe("tool ref serialization", () => {
   });
 });
 
+describe("defineLocalTool outputSchema + longRunning", () => {
+  it("forwards `outputSchema` (JSON Schema dict) and `longRunning` on the wire", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    const tool = defineLocalTool({
+      name: "send_email",
+      description: "Send an email.",
+      parameters: z.object({
+        to: z.string(),
+        body: z.string(),
+      }),
+      outputSchema: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+      },
+      longRunning: true,
+      execute: async () => `{"id":"msg_1"}`,
+    });
+    await client.runAgent({ systemPrompt: "x", prompt: "y", tools: [tool] });
+    const tools = (server.lastRunCreateBody?.tools ?? []) as Array<Record<string, unknown>>;
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toEqual({
+      kind: "local",
+      name: "send_email",
+      description: "Send an email.",
+      parameters: {
+        type: "object",
+        properties: { to: expect.any(Object), body: expect.any(Object) },
+        required: ["to", "body"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+      },
+      longRunning: true,
+    });
+  });
+
+  it("converts a Zod outputSchema to JSON Schema before submission", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    const tool = defineLocalTool({
+      name: "lookup",
+      parameters: z.object({}),
+      outputSchema: z.object({ id: z.string() }),
+      execute: () => `{"id":"abc"}`,
+    });
+    await client.runAgent({ systemPrompt: "x", prompt: "y", tools: [tool] });
+    const tools = (server.lastRunCreateBody?.tools ?? []) as Array<Record<string, unknown>>;
+    const out = tools[0]?.outputSchema as Record<string, unknown> | undefined;
+    expect(out).toBeDefined();
+    expect(out?.type).toBe("object");
+    const props = out?.properties as Record<string, unknown>;
+    expect(props.id).toMatchObject({ type: "string" });
+  });
+
+  it("omits `outputSchema` and `longRunning` by default", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    const tool = defineLocalTool({
+      name: "noop",
+      execute: () => "ok",
+    });
+    await client.runAgent({ systemPrompt: "x", prompt: "y", tools: [tool] });
+    const tools = (server.lastRunCreateBody?.tools ?? []) as Array<Record<string, unknown>>;
+    expect(tools[0]).not.toHaveProperty("outputSchema");
+    expect(tools[0]).not.toHaveProperty("longRunning");
+  });
+});
+
 describe("reasoningLevel forwarding", () => {
   it("forwards string anchors verbatim", async () => {
     server.scriptForNextRun = {
