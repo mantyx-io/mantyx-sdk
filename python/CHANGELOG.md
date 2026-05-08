@@ -3,7 +3,7 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [python/v0.8.0] — 2026-05-08
 
 ### Added
 
@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changelog generation
 
-[unreleased]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.7.0..HEAD
+[python/v0.8.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.7.0..python/v0.8.0
 [python/v0.7.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.6.0..python/v0.7.0
 [python/v0.6.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.5.0..python/v0.6.0
 [python/v0.5.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.4.1..python/v0.5.0
