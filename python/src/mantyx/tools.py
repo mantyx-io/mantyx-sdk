@@ -63,6 +63,49 @@ class OutputSchema(TypedDict, total=False):
     schema: Mapping[str, Any]
 
 
+class LoopDetection(TypedDict, total=False):
+    """Loop-detection thresholds.
+
+    Both fields are optional; omitted ones inherit the MANTYX runtime
+    defaults (``consecutive_threshold=3``, ``hard_cutoff_threshold=6``).
+    Pass ``False`` instead of a mapping to disable the guard for the
+    run / session entirely.
+
+    * ``consecutiveThreshold`` (int ≥ 2, default ``3``) — number of
+      identical consecutive tool-call batches that fires the **soft
+      nudge** (the pipeline injects a steering "either deliver a final
+      answer or change strategy" message before the next turn).
+    * ``hardCutoffThreshold`` (int ≥ 3, default ``6``) — number of
+      identical consecutive batches that forces a tools-disabled
+      finalise turn. Must be **strictly greater** than
+      ``consecutiveThreshold``.
+
+    See ``docs/agent-runs-protocol.md`` §4.6.
+    """
+
+    consecutiveThreshold: int
+    hardCutoffThreshold: int
+
+
+class ToolBudget(TypedDict):
+    """Per-tool call cap.
+
+    ``maxCalls`` is the hard cap on executed calls per run. ``0``
+    disables the tool entirely (every attempt returns the synthetic
+    "budget exceeded — pivot or finalize" body on the first try).
+    Server-side upper bound: ``1000`` (functionally unlimited; the
+    in-runtime ``maxToolTurns: 100`` fires first).
+    """
+
+    maxCalls: int
+
+
+#: Map of model-facing tool name → :class:`ToolBudget`. Pass an empty
+#: dict (``{}``) to start from a clean slate (no runtime defaults applied
+#: on top); omit the field entirely to keep the defaults.
+ToolBudgets = Mapping[str, ToolBudget]
+
+
 _LOCAL_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
 _PLUGIN_TOOL_NAME_RE = re.compile(r"^@[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$")
 
@@ -654,6 +697,135 @@ def normalize_reasoning_level(level: ReasoningLevel | None) -> str | int | None:
 _OUTPUT_SCHEMA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _OUTPUT_SCHEMA_MAX_BYTES = 32 * 1024
 
+_LOOP_DETECTION_THRESHOLD_MAX = 100
+_TOOL_BUDGETS_MAX_ENTRIES = 32
+_TOOL_BUDGET_MAX_NAME_LEN = 120
+_TOOL_BUDGET_MAX_CALLS = 1000
+
+
+def normalize_loop_detection(
+    value: LoopDetection | Mapping[str, Any] | bool | None,
+) -> dict[str, Any] | bool | None:
+    """Validate a :class:`LoopDetection` (or ``False``) value and return
+    the wire-shaped value.
+
+    Mirrors the server-side ``400 invalid_request`` checks (thresholds in
+    range, hard cutoff strictly greater than consecutive) so callers see
+    an early local error.
+
+    * ``None`` → ``None`` (field omitted; runtime defaults apply).
+    * ``False`` → ``False`` (guard explicitly disabled).
+    * mapping → validated, wire-shaped dict.
+
+    A value of ``True`` is rejected — it would otherwise quietly serialize
+    as ``true`` on the wire, which the server rejects.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        if value is False:
+            return False
+        raise ValueError(
+            "loop_detection must be a mapping or the literal False; True is not a valid value"
+        )
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "loop_detection must be a mapping of shape "
+            "{'consecutiveThreshold'?: int, 'hardCutoffThreshold'?: int} "
+            f"or False; got {type(value).__name__}"
+        )
+    out: dict[str, Any] = {}
+    consec_raw = value.get("consecutiveThreshold")
+    if consec_raw is None:
+        consec_raw = value.get("consecutive_threshold")
+    hard_raw = value.get("hardCutoffThreshold")
+    if hard_raw is None:
+        hard_raw = value.get("hard_cutoff_threshold")
+    if consec_raw is not None:
+        out["consecutiveThreshold"] = _assert_threshold(
+            "loop_detection.consecutive_threshold", consec_raw, minimum=2
+        )
+    if hard_raw is not None:
+        out["hardCutoffThreshold"] = _assert_threshold(
+            "loop_detection.hard_cutoff_threshold", hard_raw, minimum=3
+        )
+    consec = out.get("consecutiveThreshold")
+    hard = out.get("hardCutoffThreshold")
+    if isinstance(consec, int) and isinstance(hard, int) and hard <= consec:
+        raise ValueError(
+            f"loop_detection.hard_cutoff_threshold ({hard}) must be strictly "
+            f"greater than loop_detection.consecutive_threshold ({consec})"
+        )
+    return out
+
+
+def _assert_threshold(label: str, value: Any, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer; got {value!r}")
+    if value < minimum:
+        raise ValueError(f"{label} must be >= {minimum}; got {value}")
+    if value > _LOOP_DETECTION_THRESHOLD_MAX:
+        raise ValueError(
+            f"{label} must be <= {_LOOP_DETECTION_THRESHOLD_MAX} (server-enforced); got {value}"
+        )
+    return value
+
+
+def normalize_tool_budgets(
+    value: ToolBudgets | Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, dict[str, int]] | None:
+    """Validate a :class:`ToolBudgets` value and return the wire-shaped dict.
+
+    Mirrors the server-side ``400 invalid_request`` checks (max 32
+    entries; key length 1..120; ``maxCalls`` ≥ 0 and ≤ 1000) so callers
+    see an early local error. An empty mapping (``{}``) is valid and
+    signals "clear the runtime defaults"; pass ``None`` to keep them.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "tool_budgets must be a mapping of shape "
+            "{tool_name: {'maxCalls': int}}; "
+            f"got {type(value).__name__}"
+        )
+    if len(value) > _TOOL_BUDGETS_MAX_ENTRIES:
+        raise ValueError(
+            f"tool_budgets has {len(value)} entries; "
+            f"the server enforces a {_TOOL_BUDGETS_MAX_ENTRIES}-entry limit"
+        )
+    out: dict[str, dict[str, int]] = {}
+    for key, entry in value.items():
+        if not isinstance(key, str) or not (1 <= len(key) <= _TOOL_BUDGET_MAX_NAME_LEN):
+            raise ValueError(
+                f"tool_budgets keys must be 1..{_TOOL_BUDGET_MAX_NAME_LEN}-char "
+                f"strings; got {key!r}"
+            )
+        if not isinstance(entry, Mapping):
+            raise ValueError(
+                f"tool_budgets[{key!r}] must be a mapping {{'maxCalls': int}}; "
+                f"got {type(entry).__name__}"
+            )
+        max_calls_raw = entry.get("maxCalls")
+        if max_calls_raw is None:
+            max_calls_raw = entry.get("max_calls")
+        if max_calls_raw is None:
+            raise ValueError(f"tool_budgets[{key!r}].maxCalls is required")
+        if isinstance(max_calls_raw, bool) or not isinstance(max_calls_raw, int):
+            raise ValueError(
+                f"tool_budgets[{key!r}].maxCalls must be a non-negative integer; "
+                f"got {max_calls_raw!r}"
+            )
+        if max_calls_raw < 0:
+            raise ValueError(f"tool_budgets[{key!r}].maxCalls must be >= 0; got {max_calls_raw}")
+        if max_calls_raw > _TOOL_BUDGET_MAX_CALLS:
+            raise ValueError(
+                f"tool_budgets[{key!r}].maxCalls must be <= {_TOOL_BUDGET_MAX_CALLS} "
+                f"(server-enforced); got {max_calls_raw}"
+            )
+        out[key] = {"maxCalls": int(max_calls_raw)}
+    return out
+
 
 def normalize_output_schema(
     value: OutputSchema | Mapping[str, Any] | None,
@@ -705,12 +877,15 @@ __all__ = [
     "LocalMcpServer",
     "LocalMcpStdioTransport",
     "LocalTool",
+    "LoopDetection",
     "MantyxA2AToolRef",
     "MantyxMcpToolRef",
     "MantyxPluginToolRef",
     "MantyxToolRef",
     "OutputSchema",
     "ReasoningLevel",
+    "ToolBudget",
+    "ToolBudgets",
     "ToolName",
     "ToolRef",
     "call_handler_sync",
@@ -726,7 +901,9 @@ __all__ = [
     "mantyx_plugin_tool",
     "mantyx_tool",
     "maybe_await",
+    "normalize_loop_detection",
     "normalize_output_schema",
     "normalize_reasoning_level",
+    "normalize_tool_budgets",
     "serialize_tool_refs",
 ]

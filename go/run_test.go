@@ -219,6 +219,156 @@ func TestRunAgent_OmitsEmptyMetadata(t *testing.T) {
 	}
 }
 
+func TestRunAgent_LoopDetectionIsForwarded(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt:   "x",
+		Prompt:         "y",
+		LoopDetection:  LoopDetectionThresholds(2, 4),
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	ld, _ := body["loopDetection"].(map[string]any)
+	if ld["consecutiveThreshold"].(float64) != 2 || ld["hardCutoffThreshold"].(float64) != 4 {
+		t.Fatalf("loopDetection not forwarded: %#v", body["loopDetection"])
+	}
+}
+
+func TestRunAgent_LoopDetectionDisabled(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt:  "x",
+		Prompt:        "y",
+		LoopDetection: LoopDetectionDisabled(),
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	v, ok := body["loopDetection"]
+	if !ok {
+		t.Fatalf("loopDetection missing")
+	}
+	if got, isBool := v.(bool); !isBool || got != false {
+		t.Fatalf("expected loopDetection=false sentinel, got %#v", v)
+	}
+}
+
+func TestRunAgent_LoopDetectionRejectsBadThresholds(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic on bad thresholds")
+		}
+	}()
+	_ = LoopDetectionThresholds(5, 5) // hard cutoff must be strictly greater
+}
+
+func TestRunAgent_ToolBudgetsIsForwarded(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		ToolBudgets: ToolBudgets{
+			"recall":      {MaxCalls: 4},
+			"scary_tool":  {MaxCalls: 0},
+		},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	tb, _ := body["toolBudgets"].(map[string]any)
+	recall, _ := tb["recall"].(map[string]any)
+	scary, _ := tb["scary_tool"].(map[string]any)
+	if recall["maxCalls"].(float64) != 4 || scary["maxCalls"].(float64) != 0 {
+		t.Fatalf("toolBudgets not forwarded: %#v", body["toolBudgets"])
+	}
+}
+
+func TestRunAgent_ToolBudgetsEmptyMapClearsDefaults(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		ToolBudgets:  ToolBudgets{},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	tb, ok := body["toolBudgets"].(map[string]any)
+	if !ok {
+		t.Fatalf("toolBudgets missing or wrong type: %#v", body["toolBudgets"])
+	}
+	if len(tb) != 0 {
+		t.Fatalf("expected empty toolBudgets map, got %#v", tb)
+	}
+}
+
+func TestRunAgent_ToolBudgetsRejectsNegativeMaxCalls(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	_, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		ToolBudgets:  ToolBudgets{"recall": {MaxCalls: -1}},
+	})
+	if err == nil {
+		t.Fatalf("expected validation error for negative MaxCalls")
+	}
+}
+
 func TestListModels(t *testing.T) {
 	server := newMockServer()
 	defer server.close()

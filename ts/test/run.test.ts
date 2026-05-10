@@ -138,4 +138,63 @@ describe("MantyxClient.runAgent", () => {
     await client.runAgent({ systemPrompt: "x", prompt: "y", metadata: {} });
     expect(server.lastRunCreateBody?.metadata).toBeUndefined();
   });
+
+  it("forwards loopDetection thresholds and toolBudgets verbatim", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      loopDetection: { consecutiveThreshold: 4, hardCutoffThreshold: 8 },
+      toolBudgets: {
+        recall: { maxCalls: 3 },
+        scary_tool: { maxCalls: 0 },
+      },
+    });
+    expect(server.lastRunCreateBody?.loopDetection).toEqual({
+      consecutiveThreshold: 4,
+      hardCutoffThreshold: 8,
+    });
+    expect(server.lastRunCreateBody?.toolBudgets).toEqual({
+      recall: { maxCalls: 3 },
+      scary_tool: { maxCalls: 0 },
+    });
+  });
+
+  it("forwards `loopDetection: false` to disable the guard", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({ systemPrompt: "x", prompt: "y", loopDetection: false });
+    expect(server.lastRunCreateBody?.loopDetection).toBe(false);
+  });
+
+  it("rejects loopDetection with hardCutoffThreshold <= consecutiveThreshold locally", async () => {
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        loopDetection: { consecutiveThreshold: 5, hardCutoffThreshold: 5 },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+  });
+
+  it("rejects toolBudgets with negative maxCalls locally", async () => {
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        toolBudgets: { recall: { maxCalls: -1 } },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+  });
+
+  it("forwards an empty toolBudgets object so the server clears its defaults", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({ systemPrompt: "x", prompt: "y", toolBudgets: {} });
+    expect(server.lastRunCreateBody?.toolBudgets).toEqual({});
+  });
 });

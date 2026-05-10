@@ -105,6 +105,14 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
     "name": "weather_report",          //   defaults to "output"
     "schema": { /* JSON Schema */ }
   },
+  "loopDetection": {                   // optional; see §8
+    "consecutiveThreshold": 3,
+    "hardCutoffThreshold":  6
+  },
+  "toolBudgets": {                     // optional; see §8
+    "recall":                { "maxCalls": 4 },
+    "hive_consult_ontology": { "maxCalls": 4 }
+  },
   "metadata": { "customer": "acme" }   // optional, free-form k/v
 }
 ```
@@ -112,9 +120,10 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
 ### 2.2 Sessions
 
 Same body shape, posted to `POST /agent-sessions/:id/messages`. The session
-keeps the conversation history; per-message `tools`, `reasoningLevel`, and
-`outputSchema` *replace* the session's defaults for that single run only —
-the next run falls back to whatever the session was created with.
+keeps the conversation history; per-message `tools`, `reasoningLevel`,
+`outputSchema`, `loopDetection`, and `toolBudgets` *replace* the session's
+defaults for that single run only — the next run falls back to whatever
+the session was created with.
 
 ---
 
@@ -344,6 +353,8 @@ The vocabulary (`EphemeralEventType` in `bus.ts`):
 | `tool_result`           | M → SDK   | Per server-resolved tool call | Informational — tells the SDK that MANTYX ran a server-resolved tool (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) and got a result. The SDK does not need to act on it. |
 | `local_tool_call`       | M → SDK   | Per client-resolved tool call | **Action required.** SDK must POST a tool-result. |
 | `local_tool_result_in`  | M → SDK   | Per client-resolved tool call | Informational mirror of the tool-result the SDK just posted, persisted for observability. Re-emitted to late subscribers so they can replay the conversation. |
+| `loop_detected`         | M → SDK   | 0–2× per run (soft nudge + optional hard cutoff) | Observability for the loop-detection guard (see §8). The server already substituted the synthetic skip + steering nudge — SDK clients render a status note (`looping — nudged` / `looping — gave up`) and otherwise leave the run alone. |
+| `tool_budget_exceeded`  | M → SDK   | Per intercepted tool call | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner. |
 | `assistant_message`     | M → SDK   | 1× per turn | Final assistant message for the turn (concatenated, persistence-ready). |
 | `result`                | M → SDK   | 1× terminal | Successful completion. Carries the final assistant text and run summary. |
 | `error`                 | M → SDK   | 1× terminal | Failure. Carries `error` (machine code) + `message`. |
@@ -505,7 +516,54 @@ await fetch(`${baseUrl}/agent-runs/${runId}/tool-results`, {
 Emitted once per assistant turn after deltas finish. Useful when the SDK
 wants the persisted form of the turn rather than a delta concatenation.
 
-### 4.5 Terminal events
+### 4.5 `loop_detected`
+
+```jsonc
+// soft nudge — pipeline injected a "finalize OR change strategy" user message
+{ "seq": 13, "type": "loop_detected",
+  "data": { "consecutiveCount": 3, "hardCutoff": false, "tools": ["recall"] } }
+
+// hard cutoff — pipeline forced a tools-disabled finalise turn
+{ "seq": 27, "type": "loop_detected",
+  "data": { "consecutiveCount": 6, "hardCutoff": true,  "tools": ["recall"] } }
+```
+
+| Field              | Type    | Notes |
+| ------------------ | ------- | ----- |
+| `consecutiveCount` | integer | Length of the identical-batch streak that just tripped the threshold (`>= consecutiveThreshold`). |
+| `hardCutoff`       | boolean | `false` for the soft nudge round; `true` once the pipeline forces finalisation. The SDK may see one of each in a single run. |
+| `tools`            | array   | Names of the tool calls in the looping batch (no args — those are persisted on the matching `tool_result` events). |
+
+Observability only: the synthetic skip + steering nudge are emitted on the
+normal `tool_result` and assistant-message channels by the time this event
+fires. SDK clients should render a status note (`looping — nudged` /
+`looping — gave up`) and otherwise leave the run alone — the run still
+continues to its terminal `result` / `error` / `cancelled`.
+
+See §8 for the wire-spec field that controls thresholds.
+
+### 4.6 `tool_budget_exceeded`
+
+```jsonc
+{ "seq": 14, "type": "tool_budget_exceeded",
+  "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 } }
+```
+
+| Field       | Type    | Notes |
+| ----------- | ------- | ----- |
+| `tool`      | string  | Logical tool name as the model saw it (matches the key in `spec.toolBudgets`). |
+| `maxCalls`  | integer | Configured cap. |
+| `callIndex` | integer | 1-based count of attempts to call this tool over the run lifetime; always strictly greater than `maxCalls`. |
+
+Observability only: the synthetic "budget exceeded — pivot or finalize"
+tool-result lands on the normal `tool_result` channel before this event
+fires, so the model already has the directive to pivot. SDK clients use
+this event to render UI banners (`memory budget exhausted`, etc.) without
+re-parsing tool-result bodies.
+
+See §8 for the wire-spec field that defines budgets.
+
+### 4.7 Terminal events
 
 ```jsonc
 { "seq": 14, "type": "result",    "data": { "ok": true,  "text": "..." } }
@@ -641,7 +699,127 @@ the model can think extensively *and* emit JSON.
 
 ---
 
-## 8. Cancellation
+## 8. Run guards (`loopDetection`, `toolBudgets`)
+
+Two opt-in (default-on) fields on the spec body govern how MANTYX guards
+against tight tool loops and runaway research-tool usage. Both are
+**additive over the wire** — older SDKs that don't ship them keep working,
+and the runtime defaults still apply server-side.
+
+### 8.1 `loopDetection`
+
+The pipeline tracks an order-invariant canonical signature for every
+assistant turn that emits one or more tool calls. When the same signature
+repeats consecutively the guard intervenes:
+
+| Trigger                                            | Server action |
+| -------------------------------------------------- | ------------- |
+| `consecutiveThreshold` identical batches in a row | Skip the duplicate batch with a synthetic "you've made this exact call before" tool result, prepend a user-style **steering nudge** ("either deliver a final answer or change strategy") before the next model turn. |
+| `hardCutoffThreshold` identical batches in a row  | Force a tools-disabled finalise turn (same path as `budgets.maxToolTurnsExceeded: "finalize"`) so the run lands cleanly. |
+
+```jsonc
+"loopDetection": {
+  "consecutiveThreshold": 3,    // optional, default 3 — fires the steering nudge
+  "hardCutoffThreshold":  6     // optional, default 6 — forces finalisation
+}
+
+// or:
+"loopDetection": false          // explicitly disable for this run
+```
+
+| Field                  | Type            | Notes |
+| ---------------------- | --------------- | ----- |
+| `consecutiveThreshold` | integer ≥ 2     | Default `3`. Single batch = single tool call, not a loop, so the floor is `2`. |
+| `hardCutoffThreshold`  | integer ≥ 3     | Default `6`. Must be **strictly greater** than `consecutiveThreshold` (otherwise the soft nudge never gets a chance). |
+| (top-level `false`)    | literal `false` | Disables the guard. `budgets.maxToolTurns` still applies. |
+
+Validation (server-side, `400 invalid_request` on violation): both
+thresholds capped at `100`; `hardCutoffThreshold` must exceed
+`consecutiveThreshold`.
+
+The runtime default — applied when the field is omitted — is
+`{ consecutiveThreshold: 3, hardCutoffThreshold: 6 }`. SDK-driven runs and
+platform-driven runs inherit identical defaults.
+
+### 8.2 `toolBudgets`
+
+Per-tool call caps enforced over the **lifetime of the run** (across every
+LLM turn). Calls under the cap run normally; calls past the cap are
+intercepted **before execution** and the model receives a synthetic
+"budget exceeded — pivot or finalize" tool result. The model stays in the
+loop and either changes strategy or finalises.
+
+```jsonc
+"toolBudgets": {
+  "recall":                { "maxCalls": 4 },
+  "hive_consult_ontology": { "maxCalls": 4 },
+  "traverse":              { "maxCalls": 3 },
+  "scary_tool":            { "maxCalls": 0 }     // disables the tool for this run
+}
+```
+
+| Field      | Type        | Notes |
+| ---------- | ----------- | ----- |
+| `<key>`    | string (1–120 chars) | Logical tool name as the model sees it (`ResolvedTool.name`). The SDK + pipeline handle internal sanitisation. |
+| `maxCalls` | integer ≥ 0 | Hard cap. `0` disables the tool entirely (the first attempt returns the synthetic body). |
+
+Budgets are **per-tool, not pooled** — `hive_search_deals: { maxCalls: 5 }`
+and `hive_search_meetings: { maxCalls: 5 }` give the agent five of each,
+not five between them.
+
+Validation (server-side, `400 invalid_request` on violation):
+
+| Constraint            | Limit |
+| --------------------- | ----- |
+| Max entries           | `32`  |
+| `<key>` length        | `1..120` |
+| `maxCalls` upper bound | `1000` (functionally unlimited; `maxToolTurns: 100` fires first) |
+
+**Default budgets** (applied when the field is omitted; caller-provided
+entries are layered on top so per-run overrides win):
+
+| Tool                                                                                             | Default `maxCalls` |
+| ------------------------------------------------------------------------------------------------ | ------------------ |
+| `recall` (workspace memory hybrid search)                                                        | `4` |
+| `traverse` (memory graph BFS)                                                                    | `3` |
+| `hive_consult_ontology` (per-hive ontology read; same name across all three hives)               | `4` |
+| `hive_search_deals` / `_meetings` / `_companies` / `_people` (Sales Hive general search)         | `5` |
+| `hive_search_tickets` / `_conversations` / `_accounts` (Customer Hive general search)            | `5` |
+| `hive_search_releases` / `_issues` (Product Hive general search)                                 | `5` |
+
+Pass `"toolBudgets": {}` to start from a clean slate (no defaults applied
+on top — useful for runs that intentionally want unbounded research). When
+both the caller and the runtime defaults specify a budget for the same
+tool, **the caller's value wins**.
+
+### 8.3 Observability
+
+Each intervention emits a SSE event so SDK clients can render UI status
+banners without re-parsing tool-result bodies:
+
+- `loop_detected` — fired on the soft nudge and again on the hard cutoff
+  if reached. See §4.5.
+- `tool_budget_exceeded` — fired each time a call is intercepted. See §4.6.
+
+Both events are observability-only: the server has already substituted
+the synthetic tool-result / steering nudge by the time the SDK sees the
+event. The run continues to its terminal `result` / `error` / `cancelled`
+as usual.
+
+### 8.4 Session inheritance
+
+Like `reasoningLevel` and `outputSchema`, both fields support
+session-default + per-message override:
+
+- `POST /agent-sessions { loopDetection, toolBudgets }` — sets the
+  session-default applied to every subsequent message run.
+- `POST /agent-sessions/:id/messages { loopDetection, toolBudgets }` —
+  optional per-message override. Applies to that one run only and does
+  not mutate the session's stored value.
+
+---
+
+## 9. Cancellation
 
 ```http
 POST /api/v1/workspaces/{slug}/agent-runs/{runId}/cancel
@@ -656,7 +834,7 @@ terminal event.
 
 ---
 
-## 9. Reconnects & at-least-once delivery
+## 10. Reconnects & at-least-once delivery
 
 - Every event has a monotonically-increasing `seq` per run, persisted to
   `EphemeralAgentRunEvent`. Reopen with `Last-Event-ID: <seq>` to resume.
@@ -672,7 +850,7 @@ terminal event.
 
 ---
 
-## 10. Full worked example: `a2a_local` round-trip
+## 11. Full worked example: `a2a_local` round-trip
 
 ```ts
 import { fetch } from "undici";
@@ -721,7 +899,7 @@ for await (const ev of parseSSE(stream)) {
 
 ---
 
-## 11. Full worked example: `mcp_local` round-trip
+## 12. Full worked example: `mcp_local` round-trip
 
 ```ts
 // ── 1. Connect + resolve catalog locally ────────────────────────────────
@@ -772,7 +950,7 @@ for await (const ev of parseSSE(streamFromUrl(streamUrl, apiKey))) {
 
 ---
 
-## 12. Compliance checklist for SDK implementers
+## 13. Compliance checklist for SDK implementers
 
 A reference SDK should:
 
@@ -785,6 +963,17 @@ A reference SDK should:
       source-of-truth schema (Zod / Pydantic / etc.) — the server enforces
       JSON shape via the provider, but transient model errors can still
       produce strings that fail to parse in rare cases.
+- [ ] Accept `loopDetection` and `toolBudgets` from the caller and pass
+      them through unchanged (see §8). Both are *additive* — omitting
+      them keeps the runtime defaults; passing `loopDetection: false` opts
+      out; passing `toolBudgets: {}` clears the defaults; passing entries
+      layers caller overrides on top of the defaults. Do **not** translate
+      to vendor-specific knobs.
+- [ ] Treat `loop_detected` and `tool_budget_exceeded` SSE events as
+      observability-only (see §4.5 / §4.6). Surface them as status notes
+      / log lines / telemetry — the server already substituted the
+      synthetic tool-results / steering nudges, so the SDK should keep
+      consuming the stream until the terminal event lands.
 - [ ] Maintain three local-callback registries (or one tagged-union
       registry), keyed by `name`:
       - generic local tools (`kind: "local"`),
@@ -817,7 +1006,7 @@ A reference SDK should:
 
 ---
 
-## 13. See also
+## 14. See also
 
 - [`agent-runs-protocol.md`](./agent-runs-protocol.md) — HTTP routes, auth,
   full body shapes, sessions, error codes.

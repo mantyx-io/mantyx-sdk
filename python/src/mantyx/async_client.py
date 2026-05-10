@@ -23,6 +23,7 @@ from ._local_resolver import (
 from ._schema import parse_args_with_pydantic
 from ._version import SDK_VERSION
 from .client import (
+    _UNSET,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_S,
     ModelCatalog,
@@ -45,14 +46,18 @@ from .errors import (
 )
 from .sse import aiter_sse
 from .tools import (
+    LoopDetection,
     OutputSchema,
     ReasoningLevel,
+    ToolBudgets,
     ToolRef,
     _LocalHandlers,
     collect_local_handlers,
     maybe_await,
+    normalize_loop_detection,
     normalize_output_schema,
     normalize_reasoning_level,
+    normalize_tool_budgets,
     serialize_tool_refs,
 )
 
@@ -124,6 +129,8 @@ class AsyncMantyxClient:
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], Any] | None = None,
@@ -140,6 +147,8 @@ class AsyncMantyxClient:
                 tools=tools_list,
                 reasoning_level=reasoning_level,
                 output_schema=output_schema,
+                loop_detection=loop_detection,
+                tool_budgets=tool_budgets,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -173,6 +182,8 @@ class AsyncMantyxClient:
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncIterator[RunEvent]:
@@ -191,6 +202,8 @@ class AsyncMantyxClient:
                 tools=tools_list,
                 reasoning_level=reasoning_level,
                 output_schema=output_schema,
+                loop_detection=loop_detection,
+                tool_budgets=tool_budgets,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -223,6 +236,8 @@ class AsyncMantyxClient:
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncAgentSession:
@@ -237,6 +252,8 @@ class AsyncMantyxClient:
                 tools=tools_list,
                 reasoning_level=reasoning_level,
                 output_schema=output_schema,
+                loop_detection=loop_detection,
+                tool_budgets=tool_budgets,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -536,6 +553,8 @@ class AsyncAgentSession:
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         on_assistant_delta: Callable[[str], Any] | None = None,
         on_event: Callable[[RunEvent], Any] | None = None,
     ) -> RunResult:
@@ -544,6 +563,8 @@ class AsyncAgentSession:
             metadata=metadata,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
         )
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
@@ -566,6 +587,8 @@ class AsyncAgentSession:
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
     ) -> AsyncIterator[RunEvent]:
         """Stream events from a session turn as they arrive.
 
@@ -576,6 +599,8 @@ class AsyncAgentSession:
             metadata=metadata,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
         )
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
@@ -594,6 +619,8 @@ class AsyncAgentSession:
         metadata: Mapping[str, str] | None,
         reasoning_level: ReasoningLevel | None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"prompt": prompt}
         if self._tools_for_resume:
@@ -606,6 +633,14 @@ class AsyncAgentSession:
         normalized_schema = normalize_output_schema(output_schema)
         if normalized_schema is not None:
             body["outputSchema"] = normalized_schema
+        if loop_detection is not _UNSET:
+            normalized_loop = normalize_loop_detection(loop_detection)
+            if normalized_loop is not None:
+                body["loopDetection"] = normalized_loop
+        if tool_budgets is not _UNSET:
+            normalized_budgets = normalize_tool_budgets(tool_budgets)
+            if normalized_budgets is not None:
+                body["toolBudgets"] = normalized_budgets
         return body
 
     async def history(self) -> list[dict[str, str]]:

@@ -62,6 +62,23 @@ await session.send("trace this turn", {
 });
 ```
 
+## Run guards (loop detection & tool budgets)
+
+[Loop detection](/docs/run-guards/#loop-detection) and [`toolBudgets`](/docs/run-guards/#tool-budgets) follow the same inheritance pattern: pass `loopDetection` / `toolBudgets` at session creation to set the session-default applied to every subsequent `session.send`, and override them per-message when a single turn needs different settings. Per-message overrides apply to that one run only and do not mutate the session's stored value.
+
+```ts
+const session = await client.createSession({
+  systemPrompt: "...",
+  loopDetection: { consecutiveThreshold: 2, hardCutoffThreshold: 4 },
+  toolBudgets:   { recall: { maxCalls: 8 } },
+});
+
+await session.send("deep-dive on this customer", {
+  loopDetection: false,                    // disable loop detection for this turn
+  toolBudgets:   {},                       // clear runtime defaults for this turn
+});
+```
+
 ## Persisted-agent sessions
 
 Pass `agentId` to create a session backed by a persisted MANTYX agent — see [Persisted agents](/docs/agents/persisted/) for the full semantics.

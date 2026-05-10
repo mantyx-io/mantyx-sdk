@@ -24,6 +24,8 @@ type sendOptions struct {
 	Metadata         map[string]string
 	ReasoningLevel   *ReasoningLevel
 	OutputSchema     *OutputSchema
+	LoopDetection    *LoopDetection
+	ToolBudgets      ToolBudgets
 }
 
 // WithAssistantDelta registers a callback that receives streaming assistant text.
@@ -58,6 +60,24 @@ func WithOutputSchema(schema *OutputSchema) SendOption {
 	return func(o *sendOptions) { o.OutputSchema = schema }
 }
 
+// WithLoopDetection overrides the session's stored LoopDetection for this
+// single run. Build the value with LoopDetectionThresholds(...) or pass
+// LoopDetectionDisabled() to opt this turn out of the guard. The override
+// applies to that one run only and does not mutate the session's stored
+// value. See `docs/agent-runs-protocol.md` §4.6.
+func WithLoopDetection(ld *LoopDetection) SendOption {
+	return func(o *sendOptions) { o.LoopDetection = ld }
+}
+
+// WithToolBudgets overrides the session's stored ToolBudgets for this
+// single run. Pass an empty (non-nil) ToolBudgets map (e.g.
+// `mantyx.ToolBudgets{}`) to clear the runtime defaults; the override
+// applies to that one run only and does not mutate the session's stored
+// value. See `docs/agent-runs-protocol.md` §4.7.
+func WithToolBudgets(b ToolBudgets) SendOption {
+	return func(o *sendOptions) { o.ToolBudgets = b }
+}
+
 // Send sends a user turn and waits for the agent's reply.
 func (s *Session) Send(ctx context.Context, prompt string, opts ...SendOption) (RunResult, error) {
 	o := sendOptions{}
@@ -65,6 +85,12 @@ func (s *Session) Send(ctx context.Context, prompt string, opts ...SendOption) (
 		opt(&o)
 	}
 	if err := o.OutputSchema.validate(); err != nil {
+		return RunResult{}, err
+	}
+	if err := o.LoopDetection.validate(); err != nil {
+		return RunResult{}, err
+	}
+	if err := o.ToolBudgets.validate(); err != nil {
 		return RunResult{}, err
 	}
 	body := s.buildMessageBody(prompt, o)
@@ -82,6 +108,12 @@ func (s *Session) Stream(ctx context.Context, prompt string, opts ...SendOption)
 		opt(&o)
 	}
 	if err := o.OutputSchema.validate(); err != nil {
+		return nil, err
+	}
+	if err := o.LoopDetection.validate(); err != nil {
+		return nil, err
+	}
+	if err := o.ToolBudgets.validate(); err != nil {
 		return nil, err
 	}
 	body := s.buildMessageBody(prompt, o)
@@ -115,6 +147,12 @@ func (s *Session) buildMessageBody(prompt string, o sendOptions) map[string]any 
 	}
 	if o.OutputSchema != nil {
 		body["outputSchema"] = o.OutputSchema
+	}
+	if o.LoopDetection != nil {
+		body["loopDetection"] = o.LoopDetection
+	}
+	if o.ToolBudgets != nil {
+		body["toolBudgets"] = serializeToolBudgets(o.ToolBudgets)
 	}
 	return body
 }

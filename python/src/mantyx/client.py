@@ -37,18 +37,27 @@ from .errors import (
 )
 from .sse import SseEvent, iter_sse
 from .tools import (
+    LoopDetection,
     OutputSchema,
     ReasoningLevel,
+    ToolBudgets,
     ToolRef,
     _LocalHandlers,
     collect_local_handlers,
+    normalize_loop_detection,
     normalize_output_schema,
     normalize_reasoning_level,
+    normalize_tool_budgets,
     serialize_tool_refs,
 )
 
 DEFAULT_BASE_URL = "https://app.mantyx.io"
 DEFAULT_TIMEOUT_S = 60.0
+
+# Sentinel value for "argument not provided". Distinct from ``None`` because
+# ``None``/``False`` are valid wire values for ``loop_detection`` (``False``
+# disables the guard) — the helpers need to tell "omit" from "set to that".
+_UNSET: Any = object()
 
 
 # --------------------------------------------------------------------- Data
@@ -187,6 +196,8 @@ class MantyxClient:
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
@@ -207,6 +218,8 @@ class MantyxClient:
                 tools=tools_list,
                 reasoning_level=reasoning_level,
                 output_schema=output_schema,
+                loop_detection=loop_detection,
+                tool_budgets=tool_budgets,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -242,6 +255,8 @@ class MantyxClient:
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Iterator[RunEvent]:
@@ -255,6 +270,8 @@ class MantyxClient:
             tools=tools_list,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
             budgets=budgets,
             metadata=metadata,
         )
@@ -293,6 +310,8 @@ class MantyxClient:
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AgentSession:
@@ -309,6 +328,8 @@ class MantyxClient:
                 tools=tools_list,
                 reasoning_level=reasoning_level,
                 output_schema=output_schema,
+                loop_detection=loop_detection,
+                tool_budgets=tool_budgets,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -602,6 +623,8 @@ class AgentSession:
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
@@ -610,6 +633,8 @@ class AgentSession:
             metadata=metadata,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
         )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
@@ -631,12 +656,16 @@ class AgentSession:
         metadata: Mapping[str, str] | None = None,
         reasoning_level: ReasoningLevel | None = None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
     ) -> Iterator[RunEvent]:
         body = self._build_message_body(
             prompt,
             metadata=metadata,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
         )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
@@ -653,6 +682,8 @@ class AgentSession:
         metadata: Mapping[str, str] | None,
         reasoning_level: ReasoningLevel | None,
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"prompt": prompt}
         if self._tools_for_resume:
@@ -665,6 +696,14 @@ class AgentSession:
         normalized_schema = normalize_output_schema(output_schema)
         if normalized_schema is not None:
             body["outputSchema"] = normalized_schema
+        if loop_detection is not _UNSET:
+            normalized_loop = normalize_loop_detection(loop_detection)
+            if normalized_loop is not None:
+                body["loopDetection"] = normalized_loop
+        if tool_budgets is not _UNSET:
+            normalized_budgets = normalize_tool_budgets(tool_budgets)
+            if normalized_budgets is not None:
+                body["toolBudgets"] = normalized_budgets
         return body
 
     def history(self) -> list[dict[str, str]]:
@@ -713,6 +752,8 @@ def _serialize_agent_spec(
     tools: list[ToolRef] | None,
     reasoning_level: ReasoningLevel | None,
     output_schema: OutputSchema | Mapping[str, Any] | None,
+    loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+    tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
     budgets: Mapping[str, Any] | None,
     metadata: Mapping[str, str] | None,
 ) -> dict[str, Any]:
@@ -733,6 +774,14 @@ def _serialize_agent_spec(
     normalized_schema = normalize_output_schema(output_schema)
     if normalized_schema is not None:
         body["outputSchema"] = normalized_schema
+    if loop_detection is not _UNSET:
+        normalized_loop = normalize_loop_detection(loop_detection)
+        if normalized_loop is not None:
+            body["loopDetection"] = normalized_loop
+    if tool_budgets is not _UNSET:
+        normalized_budgets = normalize_tool_budgets(tool_budgets)
+        if normalized_budgets is not None:
+            body["toolBudgets"] = normalized_budgets
     if budgets:
         body["budgets"] = dict(budgets)
     if metadata:

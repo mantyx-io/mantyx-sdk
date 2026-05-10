@@ -127,6 +127,21 @@ type RunSpec struct {
 	// RunResult to JSON-decode the reply (and optionally validate against
 	// your own type). See OutputSchema and docs/wire-protocol.md §7.
 	OutputSchema *OutputSchema
+	// LoopDetection configures the loop-detection guard: when MANTYX sees
+	// `consecutiveThreshold` identical (toolName, args) batches in a row it
+	// injects a steering nudge ("either deliver a final answer or change
+	// strategy"); after `hardCutoffThreshold` it forces a tools-disabled
+	// finalise turn. Build with LoopDetectionThresholds(...) or pass the
+	// sentinel LoopDetectionDisabled() to opt out for this run. nil leaves
+	// the field unset (the runtime defaults apply: 3 / 6).
+	// See docs/agent-runs-protocol.md §4.6.
+	LoopDetection *LoopDetection
+	// ToolBudgets caps how many times each tool may execute over the
+	// lifetime of the run. Calls past the cap are intercepted before
+	// execution and the model receives a synthetic "budget exceeded —
+	// pivot or finalize" tool result. Pass an empty map to clear the
+	// runtime defaults; omit to keep them. See docs/agent-runs-protocol.md §4.7.
+	ToolBudgets ToolBudgets
 	// Metadata is a flat string→string KV carried alongside the run for
 	// observability. Visible (and filterable) in the MANTYX dashboard. Keys
 	// must match `[A-Za-z0-9._-]{1,64}`, values are strings ≤ 256 chars, and
@@ -153,6 +168,12 @@ type SessionSpec struct {
 	// OutputSchema sets the session-wide default applied to every run
 	// created through Session.Send. See RunSpec.OutputSchema.
 	OutputSchema *OutputSchema
+	// LoopDetection sets the session-wide default applied to every run
+	// created through Session.Send. See RunSpec.LoopDetection.
+	LoopDetection *LoopDetection
+	// ToolBudgets sets the session-wide default applied to every run
+	// created through Session.Send. See RunSpec.ToolBudgets.
+	ToolBudgets ToolBudgets
 	// Metadata is inherited by every run created through `Session.Send`. See
 	// RunSpec.Metadata for the validation rules.
 	Metadata map[string]string
@@ -294,6 +315,147 @@ func (s *OutputSchema) validate() error {
 	return nil
 }
 
+// LoopDetection configures the loop-detection guard. The pipeline tracks
+// an order-invariant `(toolName, args)` signature for every assistant turn
+// that emits one or more tool calls; when the same signature repeats
+// `ConsecutiveThreshold` rounds in a row MANTYX injects a steering nudge
+// ("either deliver a final answer or change strategy"); after
+// `HardCutoffThreshold` rounds it forces a tools-disabled finalise turn.
+//
+// Both fields are optional. Omitted ones inherit the runtime defaults
+// (`ConsecutiveThreshold: 3`, `HardCutoffThreshold: 6`). Build a value
+// through LoopDetectionThresholds(consecutive, hardCutoff) for the typed
+// builder, or LoopDetectionDisabled() to opt the run out of the guard.
+//
+// See `docs/agent-runs-protocol.md` §4.6.
+type LoopDetection struct {
+	// ConsecutiveThreshold is the number of identical consecutive batches
+	// that triggers the **soft nudge**. Default 3. Must be >= 2.
+	// Server-side upper bound: 100. 0 leaves the field unset (the runtime
+	// default applies).
+	ConsecutiveThreshold int
+	// HardCutoffThreshold is the number of identical consecutive batches
+	// that triggers the **hard cutoff** (forced tools-disabled finalise
+	// turn). Default 6. Must be strictly greater than ConsecutiveThreshold.
+	// Server-side upper bound: 100. 0 leaves the field unset.
+	HardCutoffThreshold int
+
+	disabled bool
+}
+
+// LoopDetectionThresholds builds a LoopDetection with the supplied
+// thresholds. Pass 0 for either field to leave it unset (the runtime
+// default is then used by the server). Out-of-range values panic.
+func LoopDetectionThresholds(consecutive, hardCutoff int) *LoopDetection {
+	ld := &LoopDetection{
+		ConsecutiveThreshold: consecutive,
+		HardCutoffThreshold:  hardCutoff,
+	}
+	if err := ld.validate(); err != nil {
+		panic("mantyx.LoopDetectionThresholds: " + err.Error())
+	}
+	return ld
+}
+
+// LoopDetectionDisabled returns a LoopDetection sentinel that disables
+// the guard for the run / session it is attached to.
+func LoopDetectionDisabled() *LoopDetection {
+	return &LoopDetection{disabled: true}
+}
+
+const loopDetectionThresholdMax = 100
+
+// validate mirrors the server-side `400 invalid_request` checks.
+func (l *LoopDetection) validate() error {
+	if l == nil || l.disabled {
+		return nil
+	}
+	if l.ConsecutiveThreshold != 0 {
+		if l.ConsecutiveThreshold < 2 {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("LoopDetection.ConsecutiveThreshold must be >= 2, got %d", l.ConsecutiveThreshold)}
+		}
+		if l.ConsecutiveThreshold > loopDetectionThresholdMax {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("LoopDetection.ConsecutiveThreshold must be <= %d, got %d", loopDetectionThresholdMax, l.ConsecutiveThreshold)}
+		}
+	}
+	if l.HardCutoffThreshold != 0 {
+		if l.HardCutoffThreshold < 3 {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("LoopDetection.HardCutoffThreshold must be >= 3, got %d", l.HardCutoffThreshold)}
+		}
+		if l.HardCutoffThreshold > loopDetectionThresholdMax {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("LoopDetection.HardCutoffThreshold must be <= %d, got %d", loopDetectionThresholdMax, l.HardCutoffThreshold)}
+		}
+	}
+	if l.ConsecutiveThreshold != 0 && l.HardCutoffThreshold != 0 &&
+		l.HardCutoffThreshold <= l.ConsecutiveThreshold {
+		return &Error{Code: "invalid_request", Message: fmt.Sprintf("LoopDetection.HardCutoffThreshold (%d) must be strictly greater than LoopDetection.ConsecutiveThreshold (%d)", l.HardCutoffThreshold, l.ConsecutiveThreshold)}
+	}
+	return nil
+}
+
+// MarshalJSON serialises LoopDetection to its wire shape: either the
+// literal `false` (when built via LoopDetectionDisabled), or an object
+// carrying any explicitly-set thresholds.
+func (l *LoopDetection) MarshalJSON() ([]byte, error) {
+	if l == nil {
+		return []byte("null"), nil
+	}
+	if l.disabled {
+		return []byte("false"), nil
+	}
+	out := map[string]any{}
+	if l.ConsecutiveThreshold != 0 {
+		out["consecutiveThreshold"] = l.ConsecutiveThreshold
+	}
+	if l.HardCutoffThreshold != 0 {
+		out["hardCutoffThreshold"] = l.HardCutoffThreshold
+	}
+	return json.Marshal(out)
+}
+
+// ToolBudget caps how many times one tool may execute over the run.
+type ToolBudget struct {
+	// MaxCalls is the hard cap on executed calls per run. 0 disables the
+	// tool entirely (every attempt returns the synthetic "budget exceeded"
+	// body on the first try). Server-side upper bound: 1000.
+	MaxCalls int `json:"maxCalls"`
+}
+
+// ToolBudgets is the per-tool call-cap map. Keys are model-facing tool
+// names (the same string the model sees on a tool call); values are
+// ToolBudget structs. Pass an empty (non-nil) map to start from a clean
+// slate (no runtime defaults applied on top); leave the field nil to
+// keep the runtime defaults. See `docs/agent-runs-protocol.md` §4.7.
+type ToolBudgets map[string]ToolBudget
+
+const (
+	toolBudgetsMaxEntries = 32
+	toolBudgetMaxNameLen  = 120
+	toolBudgetMaxCalls    = 1000
+)
+
+// validate mirrors the server-side `400 invalid_request` checks.
+func (b ToolBudgets) validate() error {
+	if b == nil {
+		return nil
+	}
+	if len(b) > toolBudgetsMaxEntries {
+		return &Error{Code: "invalid_request", Message: fmt.Sprintf("ToolBudgets has %d entries; the server enforces a %d-entry limit", len(b), toolBudgetsMaxEntries)}
+	}
+	for name, entry := range b {
+		if len(name) < 1 || len(name) > toolBudgetMaxNameLen {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("ToolBudgets keys must be 1..%d-char strings, got %q", toolBudgetMaxNameLen, name)}
+		}
+		if entry.MaxCalls < 0 {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("ToolBudgets[%q].MaxCalls must be a non-negative integer, got %d", name, entry.MaxCalls)}
+		}
+		if entry.MaxCalls > toolBudgetMaxCalls {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("ToolBudgets[%q].MaxCalls must be <= %d (server-enforced), got %d", name, toolBudgetMaxCalls, entry.MaxCalls)}
+		}
+	}
+	return nil
+}
+
 // RunResult is the outcome of a successful run.
 type RunResult struct {
 	RunID  string
@@ -331,6 +493,12 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 	if err := spec.OutputSchema.validate(); err != nil {
 		return RunResult{}, err
 	}
+	if err := spec.LoopDetection.validate(); err != nil {
+		return RunResult{}, err
+	}
+	if err := spec.ToolBudgets.validate(); err != nil {
+		return RunResult{}, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return RunResult{}, err
 	}
@@ -351,6 +519,12 @@ func (c *Client) StreamAgent(ctx context.Context, spec RunSpec) (<-chan RunEvent
 		return nil, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
 	}
 	if err := spec.OutputSchema.validate(); err != nil {
+		return nil, err
+	}
+	if err := spec.LoopDetection.validate(); err != nil {
+		return nil, err
+	}
+	if err := spec.ToolBudgets.validate(); err != nil {
 		return nil, err
 	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
@@ -386,6 +560,12 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	if err := spec.OutputSchema.validate(); err != nil {
 		return nil, err
 	}
+	if err := spec.LoopDetection.validate(); err != nil {
+		return nil, err
+	}
+	if err := spec.ToolBudgets.validate(); err != nil {
+		return nil, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return nil, err
 	}
@@ -409,6 +589,12 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	}
 	if spec.OutputSchema != nil {
 		body["outputSchema"] = spec.OutputSchema
+	}
+	if spec.LoopDetection != nil {
+		body["loopDetection"] = spec.LoopDetection
+	}
+	if spec.ToolBudgets != nil {
+		body["toolBudgets"] = serializeToolBudgets(spec.ToolBudgets)
 	}
 	if len(spec.Metadata) > 0 {
 		body["metadata"] = spec.Metadata
@@ -820,6 +1006,12 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 	if spec.OutputSchema != nil {
 		body["outputSchema"] = spec.OutputSchema
 	}
+	if spec.LoopDetection != nil {
+		body["loopDetection"] = spec.LoopDetection
+	}
+	if spec.ToolBudgets != nil {
+		body["toolBudgets"] = serializeToolBudgets(spec.ToolBudgets)
+	}
 	if spec.Prompt != "" {
 		body["prompt"] = spec.Prompt
 	}
@@ -830,6 +1022,20 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 		body["metadata"] = spec.Metadata
 	}
 	return body
+}
+
+// serializeToolBudgets returns a wire-shaped representation of a
+// ToolBudgets map. nil → nil; an empty map is preserved as `{}` (the
+// "clear runtime defaults" sentinel).
+func serializeToolBudgets(b ToolBudgets) map[string]any {
+	if b == nil {
+		return nil
+	}
+	out := make(map[string]any, len(b))
+	for name, entry := range b {
+		out[name] = map[string]any{"maxCalls": entry.MaxCalls}
+	}
+	return out
 }
 
 // ParseRunOutput JSON-decodes the terminal text of a RunResult into `dest`.

@@ -86,3 +86,18 @@ await client.runAgent({
 ```
 
 If the model wants to call tools more than `maxToolTurns` times, the run terminates with `result.subtype = "error_max_tool_turns"`.
+
+## Run guards (loop detection & tool budgets)
+
+Every run has two opt-in guards that intervene when the agent loop misbehaves: **loop detection** soft-nudges the model when it keeps repeating the same `(toolName, args)` batch and forces a clean finalise turn if it keeps looping, and **tool budgets** cap how many times each tool may execute over the lifetime of the run. Both come with sensible defaults; tune them per-call (or disable them) when you need to.
+
+```ts
+await client.runAgent({
+  systemPrompt: "...",
+  prompt: "Iterate freely until you converge.",
+  loopDetection: { consecutiveThreshold: 2, hardCutoffThreshold: 4 }, // tighter
+  toolBudgets:   { recall: { maxCalls: 8 } },                         // raise default
+});
+```
+
+See [Run guards](/docs/run-guards/) for the full inventory, defaults, and per-SDK syntax.

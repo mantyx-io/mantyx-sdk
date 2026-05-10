@@ -100,6 +100,44 @@ export interface AgentSpecBase {
    */
   outputSchema?: OutputSchema;
   /**
+   * Loop-detection guard. Tracks an order-invariant `(toolName, args)`
+   * signature for every assistant turn that emits one or more tool calls;
+   * when the same signature repeats consecutively the pipeline first injects
+   * a steering nudge ("either deliver a final answer or change strategy")
+   * and eventually forces a tools-disabled finalise turn.
+   *
+   * Pass an object to override the default thresholds, or `false` to
+   * explicitly disable the guard for this run / session. When omitted, the
+   * MANTYX runtime defaults apply (`{ consecutiveThreshold: 3,
+   * hardCutoffThreshold: 6 }`). See `docs/agent-runs-protocol.md` §4.6.
+   *
+   * Each intervention emits an observability-only `loop_detected` SSE event
+   * the SDK surfaces on the run-event stream (`tools` lists the looping
+   * batch; `hardCutoff: false` is the soft nudge round, `true` is the
+   * forced finalise). The synthetic skip + nudge are emitted on the normal
+   * `tool_result` / `assistant_delta` channels — the SDK does not need to
+   * act on the event itself.
+   */
+  loopDetection?: LoopDetection | false;
+  /**
+   * Per-tool call caps enforced over the **lifetime of the run** (across
+   * every LLM turn). Calls under the cap run normally; calls past the cap
+   * are intercepted before execution and returned to the model as a
+   * synthetic "budget exceeded — pivot or finalize" tool result.
+   *
+   * Keys are the model-facing tool names (the same string on
+   * `local_tool_call.name`); values are `{ maxCalls: number }`. `maxCalls:
+   * 0` disables the tool entirely (the first attempt returns the synthetic
+   * body). Budgets are **per-tool, not pooled**.
+   *
+   * Pass `{}` to start from a clean slate (no defaults applied on top —
+   * useful for runs that intentionally want unbounded research). Omit
+   * entirely to keep the runtime defaults. Each interception emits an
+   * observability-only `tool_budget_exceeded` SSE event. See
+   * `docs/agent-runs-protocol.md` §4.7.
+   */
+  toolBudgets?: ToolBudgets;
+  /**
    * Flat string→string KV carried alongside the run / session for
    * observability. Use it to tag runs with your own application identifiers
    * (customer id, environment, workflow name, …) — the values are visible in
@@ -137,6 +175,53 @@ export interface OutputSchema {
   /** Required. JSON Schema describing the final assistant text. Root must be a JSON object. */
   schema: Record<string, unknown>;
 }
+
+/**
+ * Loop-detection thresholds. See {@link AgentSpecBase.loopDetection} for the
+ * full semantics. Pass `false` (instead of an object) to disable the guard.
+ *
+ * Both fields are optional; omitted ones inherit the MANTYX runtime
+ * defaults (`consecutiveThreshold: 3`, `hardCutoffThreshold: 6`).
+ */
+export interface LoopDetection {
+  /**
+   * Number of identical consecutive tool-call batches that triggers the
+   * **soft nudge** — the pipeline injects a steering message ("either
+   * deliver a final answer or change strategy"). Default `3`. Must be
+   * `>= 2` (one identical batch is just a single tool call, not a loop).
+   * Server-side upper bound: `100`.
+   */
+  consecutiveThreshold?: number;
+  /**
+   * Number of identical consecutive tool-call batches that triggers the
+   * **hard cutoff** — the pipeline forces a tools-disabled finalise turn.
+   * Default `6`. Must be strictly greater than `consecutiveThreshold` (so
+   * the soft nudge has a chance to land). Server-side upper bound: `100`.
+   */
+  hardCutoffThreshold?: number;
+}
+
+/**
+ * Per-tool call cap. See {@link AgentSpecBase.toolBudgets} for the full
+ * semantics.
+ */
+export interface ToolBudget {
+  /**
+   * Hard cap on executed calls per run. `0` disables the tool entirely
+   * (every attempt returns the synthetic "budget exceeded" body on the
+   * first try). Server-side upper bound: `1000` (functionally unlimited;
+   * the in-runtime `maxToolTurns: 100` fires first).
+   */
+  maxCalls: number;
+}
+
+/**
+ * Map of model-facing tool name → cap. See
+ * {@link AgentSpecBase.toolBudgets}. Pass an empty object (`{}`) to start
+ * from a clean slate (no runtime defaults applied on top); omit the field
+ * entirely to keep the defaults.
+ */
+export type ToolBudgets = Record<string, ToolBudget>;
 
 export interface RunResult {
   runId: string;
@@ -221,6 +306,45 @@ export interface LocalToolResultInEvent extends RunEventBase {
   error?: string;
 }
 
+/**
+ * Observability event fired when the loop-detection guard intervenes.
+ * The synthetic skip + steering nudge are emitted on the normal
+ * `tool_result` / `assistant_delta` channels; this event lets the SDK
+ * render a status note (`looping — nudged` / `looping — gave up`).
+ *
+ * `hardCutoff: false` is the soft nudge round; `true` is the forced
+ * finalise. The same run may emit one of each.
+ */
+export interface LoopDetectedEvent extends RunEventBase {
+  type: "loop_detected";
+  /** Length of the identical-batch streak that just tripped the threshold. */
+  consecutiveCount: number;
+  /** `false` for the soft nudge round; `true` once the pipeline forces finalisation. */
+  hardCutoff: boolean;
+  /** Names of the tool calls in the looping batch (no args). */
+  tools: string[];
+}
+
+/**
+ * Observability event fired when a tool-budget interception happens. The
+ * synthetic "budget exceeded — pivot or finalize" tool result lands on the
+ * normal `tool_result` channel before this event fires; the SDK uses this
+ * event to render UI banners (`memory budget exhausted` etc.) without
+ * re-parsing tool-result bodies.
+ */
+export interface ToolBudgetExceededEvent extends RunEventBase {
+  type: "tool_budget_exceeded";
+  /** Logical tool name (matches the key in `spec.toolBudgets`). */
+  tool: string;
+  /** Configured cap. */
+  maxCalls: number;
+  /**
+   * 1-based count of attempts to call this tool over the run lifetime.
+   * Always strictly greater than `maxCalls`.
+   */
+  callIndex: number;
+}
+
 export interface ResultEvent extends RunEventBase {
   type: "result";
   subtype: string;
@@ -246,6 +370,8 @@ export type RunEvent =
   | ServerToolResultEvent
   | LocalToolCallEvent
   | LocalToolResultInEvent
+  | LoopDetectedEvent
+  | ToolBudgetExceededEvent
   | ResultEvent
   | ErrorEvent
   | CancelledEvent
@@ -703,6 +829,17 @@ export class AgentSession {
        * and does not mutate the session's stored value.
        */
       outputSchema?: OutputSchema;
+      /**
+       * Per-message override for `loopDetection`. Applies only to this run
+       * and does not mutate the session's stored value. Pass `false` to
+       * disable the guard for this single turn.
+       */
+      loopDetection?: LoopDetection | false;
+      /**
+       * Per-message override for `toolBudgets`. Applies only to this run
+       * and does not mutate the session's stored value.
+       */
+      toolBudgets?: ToolBudgets;
     } = {},
   ): Promise<RunResult> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -723,6 +860,8 @@ export class AgentSession {
       metadata?: Record<string, string>;
       reasoningLevel?: ReasoningLevel;
       outputSchema?: OutputSchema;
+      loopDetection?: LoopDetection | false;
+      toolBudgets?: ToolBudgets;
     } = {},
   ): AsyncGenerator<RunEvent, void, void> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -739,6 +878,8 @@ export class AgentSession {
       metadata?: Record<string, string>;
       reasoningLevel?: ReasoningLevel;
       outputSchema?: OutputSchema;
+      loopDetection?: LoopDetection | false;
+      toolBudgets?: ToolBudgets;
     },
   ): Record<string, unknown> {
     const body: Record<string, unknown> = { prompt };
@@ -749,6 +890,12 @@ export class AgentSession {
     }
     if (opts.outputSchema !== undefined) {
       body.outputSchema = normalizeOutputSchema(opts.outputSchema);
+    }
+    if (opts.loopDetection !== undefined) {
+      body.loopDetection = normalizeLoopDetection(opts.loopDetection);
+    }
+    if (opts.toolBudgets !== undefined) {
+      body.toolBudgets = normalizeToolBudgets(opts.toolBudgets);
     }
     return body;
   }
@@ -793,6 +940,12 @@ function serializeAgentSpec(
   }
   if (spec.outputSchema !== undefined) {
     body.outputSchema = normalizeOutputSchema(spec.outputSchema);
+  }
+  if (spec.loopDetection !== undefined) {
+    body.loopDetection = normalizeLoopDetection(spec.loopDetection);
+  }
+  if (spec.toolBudgets !== undefined) {
+    body.toolBudgets = normalizeToolBudgets(spec.toolBudgets);
   }
   if (spec.budgets) body.budgets = spec.budgets;
   if (spec.metadata && Object.keys(spec.metadata).length > 0) body.metadata = spec.metadata;
@@ -977,6 +1130,122 @@ function normalizeOutputSchema(value: OutputSchema): Record<string, unknown> {
     throw new MantyxError(
       `outputSchema serialised JSON is ${serialized.length} bytes; the server enforces a 32 KB limit`,
     );
+  }
+  return out;
+}
+
+const LOOP_DETECTION_THRESHOLD_MAX = 100;
+
+/**
+ * Validate a {@link LoopDetection} (or `false`) value and return the
+ * wire-shaped value. Mirrors the server-side `400 invalid_request` checks
+ * (thresholds in range, hard cutoff strictly greater than consecutive) so
+ * callers see an early local error.
+ */
+function normalizeLoopDetection(
+  value: LoopDetection | false,
+): false | Record<string, unknown> {
+  if (value === false) return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MantyxError(
+      `loopDetection must be an object or the literal \`false\`, got ${JSON.stringify(value)}`,
+    );
+  }
+  const out: Record<string, unknown> = {};
+  if (value.consecutiveThreshold !== undefined) {
+    out.consecutiveThreshold = assertThreshold(
+      "loopDetection.consecutiveThreshold",
+      value.consecutiveThreshold,
+      2,
+    );
+  }
+  if (value.hardCutoffThreshold !== undefined) {
+    out.hardCutoffThreshold = assertThreshold(
+      "loopDetection.hardCutoffThreshold",
+      value.hardCutoffThreshold,
+      3,
+    );
+  }
+  if (
+    typeof out.consecutiveThreshold === "number" &&
+    typeof out.hardCutoffThreshold === "number" &&
+    out.hardCutoffThreshold <= out.consecutiveThreshold
+  ) {
+    throw new MantyxError(
+      `loopDetection.hardCutoffThreshold (${out.hardCutoffThreshold}) must be strictly greater than loopDetection.consecutiveThreshold (${out.consecutiveThreshold})`,
+    );
+  }
+  return out;
+}
+
+function assertThreshold(label: string, value: number, min: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+    throw new MantyxError(`${label} must be an integer, got ${JSON.stringify(value)}`);
+  }
+  if (value < min) {
+    throw new MantyxError(`${label} must be >= ${min}, got ${value}`);
+  }
+  if (value > LOOP_DETECTION_THRESHOLD_MAX) {
+    throw new MantyxError(
+      `${label} must be <= ${LOOP_DETECTION_THRESHOLD_MAX} (server-enforced), got ${value}`,
+    );
+  }
+  return value;
+}
+
+const TOOL_BUDGETS_MAX_ENTRIES = 32;
+const TOOL_BUDGET_MAX_NAME_LEN = 120;
+const TOOL_BUDGET_MAX_CALLS = 1000;
+
+/**
+ * Validate a {@link ToolBudgets} value and return the wire-shaped object.
+ * Mirrors the server-side `400 invalid_request` checks (max 32 entries,
+ * key length 1..120, `maxCalls` ≥ 0 and ≤ 1000) so callers see an early
+ * local error. An empty object is valid and signals "clear the runtime
+ * defaults"; pass `undefined` to keep them.
+ */
+function normalizeToolBudgets(value: ToolBudgets): Record<string, { maxCalls: number }> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MantyxError(
+      `toolBudgets must be an object of shape { [name]: { maxCalls } }, got ${JSON.stringify(value)}`,
+    );
+  }
+  const keys = Object.keys(value);
+  if (keys.length > TOOL_BUDGETS_MAX_ENTRIES) {
+    throw new MantyxError(
+      `toolBudgets has ${keys.length} entries; the server enforces a ${TOOL_BUDGETS_MAX_ENTRIES}-entry limit`,
+    );
+  }
+  const out: Record<string, { maxCalls: number }> = {};
+  for (const key of keys) {
+    if (typeof key !== "string" || key.length < 1 || key.length > TOOL_BUDGET_MAX_NAME_LEN) {
+      throw new MantyxError(
+        `toolBudgets keys must be 1..${TOOL_BUDGET_MAX_NAME_LEN}-char strings, got ${JSON.stringify(key)}`,
+      );
+    }
+    const entry = value[key];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new MantyxError(
+        `toolBudgets[${JSON.stringify(key)}] must be an object { maxCalls }, got ${JSON.stringify(entry)}`,
+      );
+    }
+    const maxCalls = entry.maxCalls;
+    if (
+      typeof maxCalls !== "number" ||
+      !Number.isFinite(maxCalls) ||
+      !Number.isInteger(maxCalls) ||
+      maxCalls < 0
+    ) {
+      throw new MantyxError(
+        `toolBudgets[${JSON.stringify(key)}].maxCalls must be a non-negative integer, got ${JSON.stringify(maxCalls)}`,
+      );
+    }
+    if (maxCalls > TOOL_BUDGET_MAX_CALLS) {
+      throw new MantyxError(
+        `toolBudgets[${JSON.stringify(key)}].maxCalls must be <= ${TOOL_BUDGET_MAX_CALLS} (server-enforced), got ${maxCalls}`,
+      );
+    }
+    out[key] = { maxCalls };
   }
   return out;
 }

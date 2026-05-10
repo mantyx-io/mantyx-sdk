@@ -130,6 +130,70 @@ def test_run_agent_requires_agent_id_or_system_prompt(mantyx_client: MantyxClien
         mantyx_client.run_agent(prompt="hi")
 
 
+def test_run_agent_loop_detection_and_tool_budgets(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        loop_detection={"consecutiveThreshold": 4, "hardCutoffThreshold": 8},
+        tool_budgets={
+            "recall": {"maxCalls": 3},
+            "scary_tool": {"maxCalls": 0},
+        },
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["loopDetection"] == {
+        "consecutiveThreshold": 4,
+        "hardCutoffThreshold": 8,
+    }
+    assert body["toolBudgets"] == {
+        "recall": {"maxCalls": 3},
+        "scary_tool": {"maxCalls": 0},
+    }
+
+
+def test_run_agent_loop_detection_disabled(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(system_prompt="x", prompt="y", loop_detection=False)
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["loopDetection"] is False
+
+
+def test_run_agent_tool_budgets_empty_clears_defaults(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(system_prompt="x", prompt="y", tool_budgets={})
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["toolBudgets"] == {}
+
+
+def test_run_agent_loop_detection_invalid_thresholds(
+    mantyx_client: MantyxClient,
+) -> None:
+    with pytest.raises(ValueError):
+        mantyx_client.run_agent(
+            system_prompt="x",
+            prompt="y",
+            loop_detection={"consecutiveThreshold": 5, "hardCutoffThreshold": 5},
+        )
+
+
+def test_run_agent_tool_budgets_negative_max_calls(
+    mantyx_client: MantyxClient,
+) -> None:
+    with pytest.raises(ValueError):
+        mantyx_client.run_agent(
+            system_prompt="x",
+            prompt="y",
+            tool_budgets={"recall": {"maxCalls": -1}},
+        )
+
+
 def test_stream_agent_yields_events(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
     mock_server.script_for_next_run = RunScript(
         events=[

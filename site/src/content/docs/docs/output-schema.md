@@ -227,6 +227,7 @@ try {
 ## See also
 
 - [`reasoningLevel`](/docs/reasoning/) — independent dial for thinking effort; combine the two to get deep-reasoning JSON outputs.
+- [Run guards](/docs/run-guards/) — loop detection and per-tool budgets that protect long agent loops, including the JSON-finalising turn that backs `outputSchema` under the hood.
 - [Local tools — structured output](/docs/tools/local/#declaring-an-outputschema) — the same JSON Schema affordance applied to a single local tool's return value (forwarded as `outputSchema` on the wire). Pair with [`longRunning`](/docs/tools/local/#long-running-tools) when a tool may return a `pending` status and you do the polling yourself.
 - [Wire protocol §7](/docs/wire-protocol/#7-outputschema-structured-final-reply) — the canonical spec for the run-level `outputSchema` wire shape, per-provider mapping, and SDK guidance.
 - [Agent-runs protocol §4.5](/docs/protocol/#45-outputschema-structured-final-reply) — server-side validation contract and inheritance rules for sessions.

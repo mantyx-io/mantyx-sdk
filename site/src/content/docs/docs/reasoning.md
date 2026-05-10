@@ -105,3 +105,4 @@ Non-reasoning models (most fast-tier offerings, xAI Grok) silently ignore the va
 ## See also
 
 - [`outputSchema`](/docs/output-schema/) — independent dial that constrains the model's final reply to a JSON document. Combine the two for deep-reasoning JSON outputs (`reasoningLevel: "high"` + `outputSchema: { schema }`).
+- [Run guards](/docs/run-guards/) — loop detection and per-tool budgets that keep autonomous reasoning loops bounded. Especially useful at higher `reasoningLevel`s where a model can otherwise burn through dozens of tool calls before converging.

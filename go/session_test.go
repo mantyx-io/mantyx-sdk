@@ -82,3 +82,53 @@ func TestSession_MetadataForwarded(t *testing.T) {
 		t.Fatalf("send metadata not forwarded: %#v", msgBody["metadata"])
 	}
 }
+
+func TestSession_RunGuardsOnCreateAndPerMessage(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+
+	session, err := client.CreateSession(context.Background(), SessionSpec{
+		SystemPrompt:  "be helpful",
+		LoopDetection: LoopDetectionThresholds(2, 4),
+		ToolBudgets:   ToolBudgets{"recall": {MaxCalls: 4}},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	var createBody map[string]any
+	if err := json.Unmarshal(server.lastSessionCreateBody, &createBody); err != nil {
+		t.Fatalf("parse create body: %v", err)
+	}
+	ld, _ := createBody["loopDetection"].(map[string]any)
+	if ld["consecutiveThreshold"].(float64) != 2 || ld["hardCutoffThreshold"].(float64) != 4 {
+		t.Fatalf("session loopDetection not forwarded: %#v", createBody["loopDetection"])
+	}
+	tb, _ := createBody["toolBudgets"].(map[string]any)
+	recall, _ := tb["recall"].(map[string]any)
+	if recall["maxCalls"].(float64) != 4 {
+		t.Fatalf("session toolBudgets not forwarded: %#v", createBody["toolBudgets"])
+	}
+
+	if _, err := session.Send(context.Background(), "hi",
+		WithLoopDetection(LoopDetectionDisabled()),
+		WithToolBudgets(ToolBudgets{}),
+	); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	var msgBody map[string]any
+	if err := json.Unmarshal(server.lastSessionMessageBody, &msgBody); err != nil {
+		t.Fatalf("parse message body: %v", err)
+	}
+	if got, ok := msgBody["loopDetection"].(bool); !ok || got != false {
+		t.Fatalf("expected loopDetection=false override, got %#v", msgBody["loopDetection"])
+	}
+	mtb, ok := msgBody["toolBudgets"].(map[string]any)
+	if !ok || len(mtb) != 0 {
+		t.Fatalf("expected empty toolBudgets override, got %#v", msgBody["toolBudgets"])
+	}
+}

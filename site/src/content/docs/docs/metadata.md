@@ -74,4 +74,8 @@ Server-side, enforced as `400 invalid_request`:
 - `POST /agent-sessions { metadata }` — sets the session's metadata; this is inherited by every run created through `POST /agent-sessions/:id/messages`.
 - `POST /agent-sessions/:id/messages { metadata }` — optional per-message override. The server snapshots `session.metadata ⊕ override` (run-level keys win) onto the run row at creation time. Later edits to the session metadata do **not** retroactively rewrite past runs.
 
-Metadata is returned on every read endpoint and surfaced in the dashboard filters. See [Wire protocol](/docs/protocol/) §4.2 for the canonical spec.
+Metadata is returned on every read endpoint and surfaced in the dashboard filters. See [Agent-runs protocol §4.8](/docs/protocol/#48-metadata-developer-supplied-kv-for-filtering) for the canonical spec.
+
+## See also
+
+- [Run guards](/docs/run-guards/) — loop detection and per-tool budgets follow the same session-default + per-message override pattern as metadata.

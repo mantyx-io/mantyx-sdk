@@ -231,7 +231,16 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
       "required": ["city", "temperature_c"]
     }
   },
-  "metadata": {                         // optional, see §4.6
+  "loopDetection": {                    // optional, see §4.6
+    "consecutiveThreshold": 3,
+    "hardCutoffThreshold": 6
+  },
+  "toolBudgets": {                      // optional, see §4.7
+    "recall":                { "maxCalls": 4 },
+    "hive_consult_ontology": { "maxCalls": 4 },
+    "scary_tool":            { "maxCalls": 0 }
+  },
+  "metadata": {                         // optional, see §4.8
     "customer": "acme",
     "env": "prod"
   }
@@ -581,7 +590,138 @@ control of error handling on malformed-but-rare provider outputs.
 `AgentSpec` it built for the run. When the field is omitted, runs return
 unconstrained plain text as before.
 
-### 4.6 `metadata` (developer-supplied KV for filtering)
+### 4.6 `loopDetection` (steering nudge + hard cutoff)
+
+`loopDetection` is the wire-protocol projection of the SDK's
+`RunAgentOptions.loopDetection`. The pipeline tracks a canonical
+order-invariant `(toolName, args)` signature for every assistant turn that
+makes one or more tool calls; when the same signature repeats consecutively,
+the guard fires.
+
+- **`consecutiveThreshold` rounds in a row** (default `3`) — the pipeline
+  skips the duplicate batch with a synthetic "you've made this exact call
+  before" tool result and prepends a user-style **steering nudge**
+  ("either deliver a final answer or change strategy"). The model gets the
+  nudge before its next turn and either finalises or pivots.
+- **`hardCutoffThreshold` rounds in a row** (default `6`) — the pipeline
+  forces a tools-disabled finalise turn (`maxToolTurnsExceeded: "finalize"`
+  semantics) so the run lands cleanly instead of churning forever.
+
+```jsonc
+"loopDetection": {
+  "consecutiveThreshold": 3,        // optional, default 3 — fires the steering nudge
+  "hardCutoffThreshold":  6         // optional, default 6 — forces finalisation
+}
+```
+
+The wire shape also accepts the literal `false`:
+
+```jsonc
+"loopDetection": false              // explicitly disable the guard for this run
+```
+
+| Field                  | Type            | Required | Notes |
+| ---------------------- | --------------- | -------- | ----- |
+| `consecutiveThreshold` | integer ≥ 2     | no       | Defaults to **3** when the field is omitted. Must be `>= 2` (one identical batch is just a single tool call, not a loop). |
+| `hardCutoffThreshold`  | integer ≥ 3     | no       | Defaults to **6** when the field is omitted. Must be `> consecutiveThreshold`; otherwise the soft nudge would never get a chance to land. |
+| (top-level `false`)    | literal `false` | no       | Disables the guard entirely for this run. The pipeline still enforces `budgets.maxToolTurns`. |
+
+Validation (server-side, `400 invalid_request` on violation):
+
+| Constraint                                         | Limit |
+| -------------------------------------------------- | ----- |
+| `consecutiveThreshold` / `hardCutoffThreshold` upper bound | `100` |
+| `hardCutoffThreshold` strictly greater than `consecutiveThreshold` | enforced |
+
+**Defaults.** When `loopDetection` is omitted entirely, MANTYX applies the
+runtime defaults from `runtime/default-run-guards.ts`:
+`{ consecutiveThreshold: 3, hardCutoffThreshold: 6 }`. This is the same
+configuration used by every in-process runner (chat, schedule, inbound) so
+SDK-driven runs and platform-driven runs behave identically.
+
+**Inheritance for sessions.**
+
+- `POST /agent-sessions { loopDetection }` — sets the session-default,
+  applied to every subsequent message run.
+- `POST /agent-sessions/:id/messages { loopDetection }` — optional
+  per-message override; applies to that one run only and does not mutate
+  the session's stored value.
+
+**Observability.** Each intervention emits a SSE `loop_detected` event
+(see §7) so SDK clients can render `looping — nudged` / `looping — gave up`
+status notes. The actual mechanism (skip + nudge or forced finalise) is
+fully handled server-side; the SDK only needs to surface the event.
+
+### 4.7 `toolBudgets` (per-tool call caps)
+
+`toolBudgets` caps how many times a specific tool may execute over the
+**lifetime of the run** (across every LLM turn). Calls under the cap run
+normally; calls past the cap are **intercepted before execution** and
+returned to the model as a synthetic "budget exceeded — pivot or finalize"
+tool result.
+
+```jsonc
+"toolBudgets": {
+  "recall":                { "maxCalls": 4 },
+  "hive_consult_ontology": { "maxCalls": 4 },
+  "traverse":              { "maxCalls": 3 },
+  "scary_tool":            { "maxCalls": 0 }   // disables the tool for this run
+}
+```
+
+| Field      | Type        | Required | Notes |
+| ---------- | ----------- | -------- | ----- |
+| `<key>`    | string      | yes      | Logical tool name as the model sees it (the same name on `ResolvedTool.name`; the SDK + pipeline handle sanitisation). 1–120 characters. |
+| `maxCalls` | integer ≥ 0 | yes      | Hard cap on executed calls per run. `0` disables the tool entirely (every attempt returns the synthetic body on the first try). Budgets are **per-tool, not pooled**: `hive_search_deals: { maxCalls: 5 }` and `hive_search_meetings: { maxCalls: 5 }` give the agent five of each, not five between them. |
+
+Validation (server-side, `400 invalid_request` on violation):
+
+| Constraint            | Limit |
+| --------------------- | ----- |
+| Max entries           | `32` |
+| `<key>` length        | `1..120` chars |
+| `maxCalls` upper bound | `1000` (functionally unlimited; the SDK's `maxToolTurns: 100` fires first) |
+
+**Defaults.** When `toolBudgets` is omitted, MANTYX layers the runtime
+defaults from `runtime/default-run-guards.ts` on top of the spec. The
+default research-tool surface is:
+
+| Tool                                                                                             | Default `maxCalls` |
+| ------------------------------------------------------------------------------------------------ | ------------------ |
+| `recall` (workspace memory hybrid search)                                                        | `4` |
+| `traverse` (memory graph BFS)                                                                    | `3` |
+| `hive_consult_ontology` (per-hive ontology read; same name across all three hives)               | `4` |
+| `hive_search_deals` / `_meetings` / `_companies` / `_people` (Sales Hive general search)         | `5` |
+| `hive_search_tickets` / `_conversations` / `_accounts` (Customer Hive general search)            | `5` |
+| `hive_search_releases` / `_issues` (Product Hive general search)                                 | `5` |
+
+Pass `"toolBudgets": {}` to start from a clean slate (no defaults applied
+on top — useful for runs that intentionally want unbounded research). When
+both the caller and the runtime defaults specify a budget for the same
+tool, **the caller's value wins**.
+
+**Inheritance for sessions.**
+
+- `POST /agent-sessions { toolBudgets }` — sets the session-default,
+  applied to every subsequent message run.
+- `POST /agent-sessions/:id/messages { toolBudgets }` — optional
+  per-message override; applies to that one run only and does not mutate
+  the session's stored value.
+
+**Observability.** Each interception emits a SSE `tool_budget_exceeded`
+event (see §7) so SDK clients can render `memory budget exhausted` /
+`research cap reached` status notes. The synthetic tool-result is emitted
+on the normal `tool_result` channel just like any other server-resolved
+result, so the run timeline stays linear.
+
+**Tools NOT capped by default.** `hive_list_*` and `hive_get_*` are
+intentionally not in the default budget map — agents legitimately call
+them once per entity-of-interest, which can easily exceed any small cap
+during normal multi-entity reads. The loop-detection guard catches the
+pathological "same `(name, args)` batch over and over" case for that
+family without needing per-tool caps.
+
+### 4.8 `metadata` (developer-supplied KV for filtering)
 
 `metadata` is a flat string→string KV that is **persisted alongside the run /
 session** and surfaced in the MANTYX dashboard. Use it to tag runs with your
@@ -721,6 +861,16 @@ data: <utf-8 JSON>
 // echo of the SDK's POSTed tool-result, persisted for replay
 { "seq": 7, "type": "local_tool_result_in", "data": { "toolUseId": "tu_x", "output": "127.0.0.1 ..." } }
 
+// loop-detection guard fired (see §4.6). Soft nudge: hardCutoff=false. Hard cutoff: hardCutoff=true.
+// `tools` is the (toolName, …) batch the model just repeated; the synthetic skip + nudge are
+// emitted on the normal tool_result + assistant_delta channels — this event is observability only.
+{ "seq": 7, "type": "loop_detected", "data": { "consecutiveCount": 3, "hardCutoff": false, "tools": ["recall"] } }
+
+// per-tool budget exceeded (see §4.7). The pipeline already surfaced the synthetic
+// "budget exceeded — pivot or finalize" body on the normal tool_result channel; this event
+// is observability so SDK clients can render "memory budget exhausted" status notes.
+{ "seq": 7, "type": "tool_budget_exceeded", "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 } }
+
 // terminal event
 { "seq": 8, "type": "result",    "data": { "subtype": "success", "text": "Final reply" } }
 { "seq": 8, "type": "result",    "data": { "subtype": "error_local_tool_timeout", "error": "..." } }
@@ -831,6 +981,18 @@ A reference SDK should:
    - Treat `thinking_delta` events as opt-in callback fodder; many UIs hide
      them by default. Their presence depends on `reasoningLevel > 0` and
      on the active model exposing thought parts.
+   - Accept `loopDetection` and `toolBudgets` from the caller and pass
+     them through unchanged (see §4.6 / §4.7). Both fields are *additive*:
+     omitting them keeps MANTYX's runtime defaults; passing
+     `loopDetection: false` opts out; passing `toolBudgets: {}` clears the
+     defaults; passing entries layers caller overrides on top of the
+     defaults.
+   - Treat `loop_detected` and `tool_budget_exceeded` SSE events as
+     observability-only — the server already substituted the synthetic
+     tool-results / steering nudges, so the SDK's job is just to surface
+     the event to the caller (status banner, log line, telemetry). Do
+     **not** abort the run on these events; the run continues through
+     `result` / `error` / `cancelled` as usual.
    - On terminal `result`, resolve the call. On `error` subtype, throw.
 4. Re-emit assistant deltas/events as a stream/iterator for callers who care
    about live output.
