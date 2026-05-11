@@ -8,6 +8,7 @@ from mantyx import (
     MantyxAuthError,
     MantyxClient,
     MantyxError,
+    MantyxRunError,
     define_local_tool,
 )
 
@@ -46,3 +47,30 @@ def test_plugin_tool_name_validation() -> None:
         mantyx_plugin_tool("@web")
     ref = mantyx_plugin_tool("@web/search")
     assert ref.name == "@web/search"
+
+
+def test_run_error_carries_optional_triage_attributes() -> None:
+    err = MantyxRunError(
+        "run_1",
+        "truncation",
+        "Model output was truncated.",
+        error_class="truncation",
+        finish_reason="max_tokens",
+        partial_text='{"answer":"hi',
+        retryable=False,
+    )
+    assert err.run_id == "run_1"
+    assert err.subtype == "truncation"
+    assert err.code == "truncation"
+    assert err.error_class == "truncation"
+    assert err.finish_reason == "max_tokens"
+    assert err.partial_text == '{"answer":"hi'
+    assert err.retryable is False
+
+
+def test_run_error_defaults_triage_attributes_to_none() -> None:
+    err = MantyxRunError("run_2", "error", "boom")
+    assert err.error_class is None
+    assert err.finish_reason is None
+    assert err.partial_text is None
+    assert err.retryable is None

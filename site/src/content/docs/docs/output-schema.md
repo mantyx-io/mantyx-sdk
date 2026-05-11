@@ -224,6 +224,43 @@ try {
 }
 ```
 
+### Truncation salvage (`errorClass: "truncation"`)
+
+When the model hits the provider's output-token budget mid-JSON, MANTYX
+**does not discard** the bytes that already streamed. Instead the run
+terminates with a `MantyxRunError` (`*RunError` in Go) whose
+`errorClass === "truncation"` carries the partial output on
+`partialText` (`partial_text` / `PartialText`). Catch this case before
+`parseRunOutput` so callers see a clear "truncated reply — JSON likely
+incomplete" surface instead of a bare JSON parse failure:
+
+```ts
+import { MantyxRunError } from "@mantyx/sdk";
+
+try {
+  const result = await client.runAgent({ /* … outputSchema */ });
+  return parseRunOutput(result, Weather.parse.bind(Weather));
+} catch (err) {
+  if (err instanceof MantyxRunError && err.errorClass === "truncation") {
+    // `err.partialText` carries the raw bytes; do NOT auto-fallback to it
+    // as the final answer, since the JSON object is almost certainly
+    // unclosed. Surface a "truncated — please rephrase or raise the budget"
+    // banner instead.
+    console.warn("output truncated:", err.partialText);
+    throw err;
+  }
+  throw err;
+}
+```
+
+The same salvage is also persisted on the run row — `GET /agent-runs/{id}`
+returns `{ status: "failed", finalText: "<partial JSON>", error: "Model
+output was truncated …", failureReason: { errorClass: "truncation",
+finishReason: "max_tokens" } }` — so SDKs that re-fetch the row after a
+reconnect see both pieces consistently. See
+[Wire protocol §4.7](/docs/wire-protocol/#47-terminal-events) for the
+full truncation contract.
+
 ## See also
 
 - [`reasoningLevel`](/docs/reasoning/) — independent dial for thinking effort; combine the two to get deep-reasoning JSON outputs.

@@ -101,6 +101,7 @@ export {
   MantyxToolError,
   MantyxRunError,
 } from "./errors.js";
+export type { MantyxRunErrorInit } from "./errors.js";
 
 export { zodToJsonSchema, toToolParametersWire } from "./zod-to-json-schema.js";
 

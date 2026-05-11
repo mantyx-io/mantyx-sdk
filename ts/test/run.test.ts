@@ -79,6 +79,93 @@ describe("MantyxClient.runAgent", () => {
     ).rejects.toBeInstanceOf(MantyxRunError);
   });
 
+  it("surfaces terminal `error` triage attributes on MantyxRunError (truncation salvage)", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "assistant_message",
+          text: '{"answer":"hello',
+          turn: 0,
+          finishReason: "max_tokens",
+        },
+        {
+          type: "error",
+          error: "Model output was truncated (stop_reason=max_tokens).",
+          code: "truncation",
+          errorClass: "truncation",
+          finishReason: "max_tokens",
+          partialText: '{"answer":"hello',
+          retryable: false,
+        },
+      ],
+    };
+    const err = await client
+      .runAgent({ systemPrompt: "x", prompt: "y" })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MantyxRunError);
+    const e = err as MantyxRunError;
+    expect(e.subtype).toBe("truncation");
+    expect(e.code).toBe("truncation");
+    expect(e.errorClass).toBe("truncation");
+    expect(e.finishReason).toBe("max_tokens");
+    expect(e.partialText).toBe('{"answer":"hello');
+    expect(e.retryable).toBe(false);
+    expect(e.message).toContain("truncated");
+  });
+
+  it("falls back to `code` when errorClass is absent (legacy server)", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "error",
+          error: "boom",
+          code: "worker_error",
+        },
+      ],
+    };
+    const err = await client
+      .runAgent({ systemPrompt: "x", prompt: "y" })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MantyxRunError);
+    const e = err as MantyxRunError;
+    expect(e.subtype).toBe("worker_error");
+    expect(e.errorClass).toBeUndefined();
+    expect(e.finishReason).toBeUndefined();
+    expect(e.partialText).toBeUndefined();
+    expect(e.retryable).toBeUndefined();
+  });
+
+  it("surfaces enriched assistant_message fields (turn, finishReason, toolCalls) on the event stream", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "assistant_message",
+          text: "calling search",
+          turn: 0,
+          finishReason: "tool_use",
+          toolCalls: [{ id: "call_a", name: "search", input: { q: "hi" } }],
+        },
+        { type: "result", subtype: "success", text: "done" },
+      ],
+    };
+    const collected: Array<Record<string, unknown>> = [];
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      onEvent: (ev) => collected.push(ev as unknown as Record<string, unknown>),
+    });
+    const msg = collected.find((ev) => ev.type === "assistant_message");
+    expect(msg).toMatchObject({
+      type: "assistant_message",
+      text: "calling search",
+      turn: 0,
+      finishReason: "tool_use",
+      toolCalls: [{ id: "call_a", name: "search", input: { q: "hi" } }],
+    });
+  });
+
   it("rejects when the server returns 401", async () => {
     server.failAuth = true;
     await expect(

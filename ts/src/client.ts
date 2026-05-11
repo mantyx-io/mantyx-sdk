@@ -246,7 +246,34 @@ export interface ThinkingDeltaEvent extends RunEventBase {
 
 export interface AssistantMessageEvent extends RunEventBase {
   type: "assistant_message";
+  /**
+   * Full assistant text for this turn (concatenation of every preceding
+   * `assistant_delta` for the turn, plus any non-streaming snapshot the
+   * engine appended at close). May be empty when the turn was tool-only.
+   */
   text: string;
+  /**
+   * 0-based tool-turn index this assistant message closes. Useful for
+   * SDK clients pairing the message with the subsequent `tool_result`
+   * rows.
+   */
+  turn?: number;
+  /**
+   * Canonical lowercase stop reason normalized across providers
+   * (`"end_turn"`, `"tool_use"`, `"max_tokens"`, `"refusal"`,
+   * `"malformed_function_call"`, …). `null` / omitted when the provider
+   * did not report one.
+   */
+  finishReason?: string | null;
+  /**
+   * Tool calls the model emitted on this turn. Omitted when the model
+   * did not call any tools.
+   */
+  toolCalls?: Array<{
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+  }>;
 }
 
 export interface ServerToolResultEvent extends RunEventBase {
@@ -354,8 +381,41 @@ export interface ResultEvent extends RunEventBase {
 
 export interface ErrorEvent extends RunEventBase {
   type: "error";
+  /** Human-readable failure message. */
   error: string;
+  /**
+   * Legacy alias for {@link errorClass}. Equals `errorClass` when present;
+   * otherwise a small lowercase token (`"error"`, `"invalid_spec"`,
+   * `"worker_error"`, …).
+   */
   code?: string;
+  /**
+   * Canonical failure category. One of `"rate_limit"`, `"overloaded"`,
+   * `"server"`, `"context_window"`, `"truncation"`, `"invalid_request"`,
+   * `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`,
+   * `"unknown"`. New categories may land additively. See
+   * `docs/agent-runs-protocol.md` §7 for the full list.
+   */
+  errorClass?: string;
+  /**
+   * Canonical lowercase stop reason normalized across providers
+   * (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When
+   * present, mirrors the value on the last `assistant_message` event.
+   */
+  finishReason?: string | null;
+  /**
+   * **Best-effort raw bytes** the model emitted before the failure. For
+   * `outputSchema` runs this is likely **incomplete JSON** that will
+   * fail `JSON.parse` — see the wire-protocol truncation contract. Also
+   * persisted on `EphemeralAgentRun.finalText` so SDKs can recover it
+   * via `GET /agent-runs/:runId` after the SSE stream closes.
+   */
+  partialText?: string;
+  /**
+   * Coarse retry hint inherited from the pipeline's error classifier.
+   * Informational; the SDK still owns the actual retry decision.
+   */
+  retryable?: boolean;
 }
 
 export interface CancelledEvent extends RunEventBase {
@@ -569,7 +629,17 @@ export class MantyxClient {
         }
       } else if (ev.type === "error") {
         const e = ev as ErrorEvent;
-        throw new MantyxRunError(runId, e.code ?? "error", e.error);
+        // The wire reports both a coarse `code` (legacy alias) and a
+        // canonical `errorClass` triage category; prefer `errorClass`
+        // when present so the SDK exposes a stable taxonomy. See
+        // `docs/agent-runs-protocol.md` §7.
+        const subtype = e.errorClass ?? e.code ?? "error";
+        throw new MantyxRunError(runId, subtype, e.error, {
+          ...(e.errorClass !== undefined ? { errorClass: e.errorClass } : {}),
+          ...(e.finishReason !== undefined ? { finishReason: e.finishReason } : {}),
+          ...(typeof e.partialText === "string" ? { partialText: e.partialText } : {}),
+          ...(typeof e.retryable === "boolean" ? { retryable: e.retryable } : {}),
+        });
       } else if (ev.type === "cancelled") {
         throw new MantyxRunError(runId, "cancelled", "Run was cancelled");
       }

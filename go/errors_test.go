@@ -59,3 +59,32 @@ func TestRunError_Error(t *testing.T) {
 		t.Fatalf("got %q", e2.Error())
 	}
 }
+
+func TestRunError_CarriesOptionalTriageAttributes(t *testing.T) {
+	retry := false
+	e := &RunError{
+		RunID:        "run_1",
+		Code:         "truncation",
+		Message:      "Model output was truncated.",
+		ErrorClass:   "truncation",
+		FinishReason: "max_tokens",
+		PartialText:  `{"answer":"hi`,
+		Retryable:    &retry,
+	}
+	if e.ErrorClass != "truncation" || e.FinishReason != "max_tokens" {
+		t.Fatalf("expected triage attrs set: %+v", e)
+	}
+	if e.PartialText != `{"answer":"hi` {
+		t.Fatalf("expected partial text: %q", e.PartialText)
+	}
+	if e.Retryable == nil || *e.Retryable != false {
+		t.Fatalf("expected Retryable=&false, got %v", e.Retryable)
+	}
+}
+
+func TestRunError_DefaultsTriageAttributesEmpty(t *testing.T) {
+	e := &RunError{RunID: "run_2", Code: "error", Message: "boom"}
+	if e.ErrorClass != "" || e.FinishReason != "" || e.PartialText != "" || e.Retryable != nil {
+		t.Fatalf("expected triage attrs to default to zero values: %+v", e)
+	}
+}

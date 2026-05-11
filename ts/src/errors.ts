@@ -48,15 +48,70 @@ export class MantyxToolError extends MantyxError {
   }
 }
 
+/**
+ * Optional triage attributes the runner attaches to terminal `error`
+ * events. Mirrors the wire fields described in
+ * `docs/agent-runs-protocol.md` §7 ("error event payload fields") so SDK
+ * callers can render structured UI status notes ("model truncated — JSON
+ * likely incomplete") and drive retry policy without re-parsing the
+ * human-readable `message`.
+ */
+export interface MantyxRunErrorInit {
+  /**
+   * Canonical category of failure. One of `"rate_limit"`, `"overloaded"`,
+   * `"server"`, `"context_window"`, `"truncation"`, `"invalid_request"`,
+   * `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`,
+   * `"unknown"`. New categories may land additively — callers should
+   * default-branch to `"unknown"` for unrecognized values.
+   */
+  errorClass?: string;
+  /**
+   * Canonical lowercase stop reason normalized across providers
+   * (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When
+   * present, mirrors the value carried on the last `assistant_message`
+   * event preceding the failure.
+   */
+  finishReason?: string | null;
+  /**
+   * **Best-effort raw bytes** the model emitted before the failure. For
+   * `outputSchema` runs this is likely **incomplete JSON** that will
+   * fail `JSON.parse` — treat it as diagnostic data, never as a
+   * schema-conformant reply.
+   */
+  partialText?: string;
+  /**
+   * Coarse retry hint inherited from the pipeline's error classifier.
+   * Informational; the SDK still owns the actual retry decision.
+   */
+  retryable?: boolean;
+}
+
 export class MantyxRunError extends MantyxError {
   readonly runId: string;
   readonly subtype: string;
+  /** See {@link MantyxRunErrorInit.errorClass}. */
+  readonly errorClass: string | undefined;
+  /** See {@link MantyxRunErrorInit.finishReason}. */
+  readonly finishReason: string | null | undefined;
+  /** See {@link MantyxRunErrorInit.partialText}. */
+  readonly partialText: string | undefined;
+  /** See {@link MantyxRunErrorInit.retryable}. */
+  readonly retryable: boolean | undefined;
 
-  constructor(runId: string, subtype: string, message: string) {
+  constructor(
+    runId: string,
+    subtype: string,
+    message: string,
+    init: MantyxRunErrorInit = {},
+  ) {
     super(message, { code: subtype });
     this.name = "MantyxRunError";
     this.runId = runId;
     this.subtype = subtype;
+    this.errorClass = init.errorClass;
+    this.finishReason = init.finishReason;
+    this.partialText = init.partialText;
+    this.retryable = init.retryable;
   }
 }
 

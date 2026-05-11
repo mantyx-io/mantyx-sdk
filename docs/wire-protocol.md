@@ -357,7 +357,7 @@ The vocabulary (`EphemeralEventType` in `bus.ts`):
 | `tool_budget_exceeded`  | M → SDK   | Per intercepted tool call | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner. |
 | `assistant_message`     | M → SDK   | 1× per turn | Final assistant message for the turn (concatenated, persistence-ready). |
 | `result`                | M → SDK   | 1× terminal | Successful completion. Carries the final assistant text and run summary. |
-| `error`                 | M → SDK   | 1× terminal | Failure. Carries `error` (machine code) + `message`. |
+| `error`                 | M → SDK   | 1× terminal | Failure. Carries `error` (message), `code` / `errorClass` (category), `finishReason`, and an optional `partialText` salvage payload. See §4.7. |
 | `cancelled`             | M → SDK   | 1× terminal | Cancellation. Run was aborted via `POST /cancel`. |
 
 `result`, `error`, and `cancelled` are the **terminal** events — the SDK
@@ -509,12 +509,36 @@ await fetch(`${baseUrl}/agent-runs/${runId}/tool-results`, {
 {
   "seq": 12,
   "type": "assistant_message",
-  "data": { "text": "Here's what I found...", "toolCalls": [/* … */] }
+  "data": {
+    "text": "Here's what I found...",
+    "turn": 0,
+    "finishReason": "tool_use",       // optional; canonical lowercase token
+    "toolCalls": [                    // optional; absent when the turn was text-only
+      { "id": "call_abc", "name": "search", "input": { /* JSON Schema-matching args */ } }
+    ]
+  }
 }
 ```
 
-Emitted once per assistant turn after deltas finish. Useful when the SDK
-wants the persisted form of the turn rather than a delta concatenation.
+| Field            | Type     | Required | Notes |
+| ---------------- | -------- | -------- | ----- |
+| `text`           | string   | yes      | Full assistant text for this turn (concatenation of every preceding `assistant_delta` for this turn, plus any non-streaming snapshot the engine appended at close). May be empty when the turn was tool-only. |
+| `turn`           | integer  | yes      | 0-based tool-turn index this assistant message closes. Useful for SDK clients pairing the message with the subsequent `tool_result` rows. |
+| `finishReason`   | string\|null | no   | Canonical lowercase stop reason normalized across providers (`"end_turn"`, `"tool_use"`, `"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). Pulled from the engine's per-turn `stopReason` after normalization — Gemini's `MAX_TOKENS` lands as `"max_tokens"`, OpenAI's `length` lands as `"max_tokens"`, etc. `null` / omitted when the provider did not report one. |
+| `toolCalls`      | array    | no       | Tool calls the model emitted on this turn (id, sanitized pipeline-side name, JSON-matching `input`). Omitted when the model did not call any tools. |
+
+**Emission frequency.** Exactly **one** `assistant_message` per completed
+assistant turn — including the last turn before a terminal `error`. SDK
+clients should treat this as the canonical "the model said something" anchor
+and avoid stitching a turn out of `assistant_delta` chunks themselves
+(deltas may be split arbitrarily for transport).
+
+**Truncation behaviour.** When the run terminates with `error` (e.g.
+Gemini `MAX_TOKENS` while emitting `outputSchema` JSON), the last
+`assistant_message` preceding the `error` carries the partial text plus
+`finishReason: "max_tokens"`. The terminal `error` event then carries the
+*same* text on `data.partialText` so reconnect / replay sees both pieces
+without depending on event ordering.
 
 ### 4.5 `loop_detected`
 
@@ -567,12 +591,42 @@ See §8 for the wire-spec field that defines budgets.
 
 ```jsonc
 { "seq": 14, "type": "result",    "data": { "ok": true,  "text": "..." } }
-{ "seq": 14, "type": "error",     "data": { "error": "model_failure", "message": "..." } }
+{ "seq": 14, "type": "error",     "data": {
+    "error": "Model output was truncated (stop_reason=max_tokens). …",
+    "code":         "truncation",     // mirrors `errorClass`; legacy alias
+    "errorClass":   "truncation",     // canonical category (see below)
+    "finishReason": "max_tokens",     // canonical lowercase stop reason
+    "partialText":  "{\n  \"answer\":… (truncated JSON) …",
+    "retryable":    false              // optional; per-class retry hint
+} }
 { "seq": 14, "type": "cancelled", "data": { "reason": "user" } }
 ```
 
 After one of these arrives, no further events will be emitted; close the
 SSE stream.
+
+**`error` event payload fields.** The runner enriches the `error` event
+with structured triage attributes when the failure carried a salvage path
+(typically truncation, upstream deadline, or max-budget-with-text):
+
+| Field          | Type     | Required | Notes |
+| -------------- | -------- | -------- | ----- |
+| `error`        | string   | yes      | Human-readable message (also persisted on `EphemeralAgentRun.error`). |
+| `code`         | string   | yes      | Legacy alias for `errorClass`. Equals `errorClass` when present; otherwise a small lowercase token (`"error"`, `"invalid_spec"`, `"worker_error"`, …) the SDK can switch on. |
+| `errorClass`   | string   | no       | Canonical category. One of `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"` (input too big), `"truncation"` (output budget exhausted), `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, `"unknown"`. New categories may land additively. |
+| `finishReason` | string\|null | no   | Canonical lowercase stop reason normalized across providers (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When present, mirrors the value on the last `assistant_message`. |
+| `partialText`  | string   | no       | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is likely **incomplete JSON** that will fail `JSON.parse` — see §7 below. Also persisted on `EphemeralAgentRun.finalText` so the Calls UI can render it alongside a truncation banner. |
+| `retryable`    | boolean  | no       | Coarse retry hint inherited from the pipeline's error classifier. Informational; the SDK still owns the actual retry decision. |
+
+When `errorClass` is `"truncation"`, the `EphemeralAgentRun` row that the
+SDK can re-fetch via `GET /agent-runs/:runId` will have:
+
+| Field           | Value |
+| --------------- | ----- |
+| `status`        | `"failed"` |
+| `finalText`     | Same string as `data.partialText` (so SDKs can ignore the SSE stream and still recover the salvage). |
+| `error`         | Same string as `data.error`. |
+| `failureReason` | `{ "errorClass": "truncation", "finishReason": "max_tokens" }` (JSON object, future-proof for additional triage fields). |
 
 ---
 
@@ -691,6 +745,27 @@ a string that fails to `JSON.parse` in rare cases. Reference SDKs should:
 2. `JSON.parse` the terminal `result.data.text`.
 3. Re-validate against their source-of-truth Zod / Pydantic / JSON Schema
    validator and surface a typed parse error instead of crashing.
+
+**Truncation contract.** When the model is mid-JSON and Gemini /
+Anthropic / OpenAI hit the output budget, MANTYX does **not** discard the
+bytes that already streamed. Instead:
+
+1. The last `assistant_message` for the turn (§4.4) carries the partial
+   text plus `finishReason: "max_tokens"`.
+2. The terminal SSE event is an `error` (not `result`) with
+   `errorClass: "truncation"` and `data.partialText` set to the same
+   bytes (§4.7).
+3. The run row exposes the salvage on
+   `GET /agent-runs/:runId` as `{ status: "failed", finalText: "<partial JSON>",
+   error: "Model output was truncated …", failureReason: { errorClass:
+   "truncation", finishReason: "max_tokens" } }`.
+
+`partialText` is a **best-effort raw byte sequence** — for `outputSchema`
+runs it will almost always fail `JSON.parse` because the JSON object was
+not closed. SDKs should treat it as diagnostic data, never as a
+schema-conformant reply. Surfacing it (as a "truncated reply — JSON
+likely incomplete" status note) is the recommended pattern; silently
+falling back to it as the answer is not.
 
 `outputSchema` works for both ephemeral runs (`systemPrompt`-defined) and
 `agentId`-backed runs — the runner applies the schema to whichever

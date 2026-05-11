@@ -86,6 +86,98 @@ def test_run_agent_error_terminates(mantyx_client: MantyxClient, mock_server: Mo
     assert exc.value.subtype == "error_max_tool_turns"
 
 
+def test_run_agent_error_event_carries_triage_attributes(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    # Mirrors the "truncation salvage" path from docs/agent-runs-protocol.md
+    # §7: the engine emits an `assistant_message` with the partial text and
+    # a `finishReason`, then a terminal `error` event with `errorClass:
+    # "truncation"` and the same bytes on `partialText`.
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="assistant_message",
+                data={
+                    "text": '{"answer":"hello',
+                    "turn": 0,
+                    "finishReason": "max_tokens",
+                },
+            ),
+            ScriptEvent(
+                kind="error",
+                data={
+                    "error": "Model output was truncated (stop_reason=max_tokens).",
+                    "code": "truncation",
+                    "errorClass": "truncation",
+                    "finishReason": "max_tokens",
+                    "partialText": '{"answer":"hello',
+                    "retryable": False,
+                },
+            ),
+        ]
+    )
+    with pytest.raises(MantyxRunError) as exc:
+        mantyx_client.run_agent(system_prompt="...", prompt="...")
+    err = exc.value
+    assert err.subtype == "truncation"
+    assert err.code == "truncation"
+    assert err.error_class == "truncation"
+    assert err.finish_reason == "max_tokens"
+    assert err.partial_text == '{"answer":"hello'
+    assert err.retryable is False
+    assert "truncated" in err.message
+
+
+def test_run_agent_error_event_falls_back_to_code(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    # Older runners may not yet emit `errorClass`; the SDK should still
+    # surface the legacy `code` value on `MantyxRunError.subtype`.
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="error",
+                data={"error": "boom", "code": "worker_error"},
+            )
+        ]
+    )
+    with pytest.raises(MantyxRunError) as exc:
+        mantyx_client.run_agent(system_prompt="...", prompt="...")
+    err = exc.value
+    assert err.subtype == "worker_error"
+    assert err.error_class is None
+    assert err.finish_reason is None
+    assert err.partial_text is None
+    assert err.retryable is None
+
+
+def test_run_agent_assistant_message_surfaces_triage_fields(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="assistant_message",
+                data={
+                    "text": "calling search",
+                    "turn": 0,
+                    "finishReason": "tool_use",
+                    "toolCalls": [{"id": "call_a", "name": "search", "input": {"q": "hi"}}],
+                },
+            ),
+            ScriptEvent(kind="result", data={"subtype": "success", "text": "done"}),
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="...", prompt="...")
+    msg_events = [ev for ev in result.events if ev.type == "assistant_message"]
+    assert len(msg_events) == 1
+    msg = msg_events[0]
+    assert msg.data["text"] == "calling search"
+    assert msg.data["turn"] == 0
+    assert msg.data["finishReason"] == "tool_use"
+    assert msg.data["toolCalls"] == [{"id": "call_a", "name": "search", "input": {"q": "hi"}}]
+
+
 def test_run_agent_serialises_tool_refs(
     mantyx_client: MantyxClient, mock_server: MockServer
 ) -> None:

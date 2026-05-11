@@ -25,7 +25,13 @@ export interface MockRunScript {
 
 export type MockEvent =
   | { type: "assistant_delta"; text: string }
-  | { type: "assistant_message"; text: string }
+  | {
+      type: "assistant_message";
+      text: string;
+      turn?: number;
+      finishReason?: string | null;
+      toolCalls?: Array<{ id: string; name: string; input: Record<string, unknown> }>;
+    }
   | { type: "tool_result"; name: string; ok?: boolean; summary?: string }
   | {
       type: "local_tool_call";
@@ -43,7 +49,17 @@ export type MockEvent =
       /** When set, hold the SSE stream until the SDK posts a tool result. */
       awaitToolResult?: boolean;
     }
-  | { type: "result"; subtype?: string; text?: string };
+  | { type: "result"; subtype?: string; text?: string }
+  | {
+      type: "error";
+      error: string;
+      code?: string;
+      errorClass?: string;
+      finishReason?: string | null;
+      partialText?: string;
+      retryable?: boolean;
+    }
+  | { type: "cancelled"; reason?: string };
 
 interface RunState {
   id: string;
@@ -369,7 +385,7 @@ export class MockServer {
         const { type, ...payload } = ev as { type: string } & Record<string, unknown>;
         this.appendEvent(run, type, payload);
       }
-      if (ev.type === "result") {
+      if (ev.type === "result" || ev.type === "error" || ev.type === "cancelled") {
         run.done = true;
       }
     }

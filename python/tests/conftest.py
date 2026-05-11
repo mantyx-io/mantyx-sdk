@@ -341,7 +341,7 @@ class _RunState:
             data = {"seq": seq, **ev.data}
             evt_type = _event_type(ev.kind)
             yield (f"id: {seq}\nevent: {evt_type}\ndata: {json.dumps(data)}\n\n".encode())
-            if ev.kind == "result":
+            if ev.kind in ("result", "error", "cancelled"):
                 return
 
 

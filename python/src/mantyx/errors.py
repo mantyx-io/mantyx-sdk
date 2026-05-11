@@ -55,12 +55,50 @@ class MantyxToolError(MantyxError):
 
 
 class MantyxRunError(MantyxError):
-    """The agent loop terminated with a non-success ``result`` event."""
+    """The agent loop terminated with a non-success ``result`` event,
+    a terminal ``error`` event, or was cancelled by the caller / server.
 
-    def __init__(self, run_id: str, subtype: str, message: str) -> None:
+    When the run ended via a terminal ``error`` event (e.g. the model
+    truncated mid-reply), the optional triage attributes carry the
+    structured fields documented in
+    `docs/agent-runs-protocol.md` §7 so callers can render UI banners
+    ("truncated reply — JSON likely incomplete") and drive retry policy
+    without re-parsing the human-readable ``message``:
+
+    - ``error_class`` — canonical category (``"rate_limit"``,
+      ``"overloaded"``, ``"server"``, ``"context_window"``,
+      ``"truncation"``, ``"invalid_request"``, ``"auth"``, ``"timeout"``,
+      ``"local_timeout"``, ``"upstream_deadline"``, ``"unknown"``). New
+      categories may land additively.
+    - ``finish_reason`` — canonical lowercase provider stop reason
+      (``"max_tokens"``, ``"refusal"``, ``"malformed_function_call"``,
+      …). Mirrors the last ``assistant_message`` event's
+      ``finishReason``.
+    - ``partial_text`` — **best-effort raw bytes** the model emitted
+      before the failure. For ``output_schema`` runs this is likely
+      **incomplete JSON** that will fail ``json.loads`` — treat it as
+      diagnostic data, never as a schema-conformant reply.
+    - ``retryable`` — coarse retry hint from the pipeline's classifier.
+    """
+
+    def __init__(
+        self,
+        run_id: str,
+        subtype: str,
+        message: str,
+        *,
+        error_class: str | None = None,
+        finish_reason: str | None = None,
+        partial_text: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
         super().__init__(message, code=subtype)
         self.run_id = run_id
         self.subtype = subtype
+        self.error_class = error_class
+        self.finish_reason = finish_reason
+        self.partial_text = partial_text
+        self.retryable = retryable
 
 
 class MantyxParseError(MantyxError):

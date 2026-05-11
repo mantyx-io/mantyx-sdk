@@ -53,5 +53,22 @@ describe("MantyxRunError", () => {
     expect(e.runId).toBe("r1");
     expect(e.subtype).toBe("limit");
     expect(e.message).toBe("too long");
+    expect(e.errorClass).toBeUndefined();
+    expect(e.finishReason).toBeUndefined();
+    expect(e.partialText).toBeUndefined();
+    expect(e.retryable).toBeUndefined();
+  });
+
+  it("carries optional triage attributes (errorClass, finishReason, partialText, retryable)", () => {
+    const e = new MantyxRunError("r1", "truncation", "truncated", {
+      errorClass: "truncation",
+      finishReason: "max_tokens",
+      partialText: '{"answer":"hello',
+      retryable: false,
+    });
+    expect(e.errorClass).toBe("truncation");
+    expect(e.finishReason).toBe("max_tokens");
+    expect(e.partialText).toBe('{"answer":"hello');
+    expect(e.retryable).toBe(false);
   });
 });

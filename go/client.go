@@ -783,7 +783,30 @@ func (c *Client) consumeStream(
 				sawTerminal = true
 				msg, _ := data["error"].(string)
 				code, _ := data["code"].(string)
-				terminalErr = &RunError{RunID: runID, Code: code, Message: msg}
+				// The wire reports both a coarse `code` (legacy alias)
+				// and a canonical `errorClass` triage category; prefer
+				// `errorClass` for the run-error Code when present so
+				// callers see a stable taxonomy. See
+				// `docs/agent-runs-protocol.md` §7.
+				errorClass, _ := data["errorClass"].(string)
+				finishReason, _ := data["finishReason"].(string)
+				partialText, _ := data["partialText"].(string)
+				resolvedCode := errorClass
+				if resolvedCode == "" {
+					resolvedCode = code
+				}
+				rerr := &RunError{
+					RunID:        runID,
+					Code:         resolvedCode,
+					Message:      msg,
+					ErrorClass:   errorClass,
+					FinishReason: finishReason,
+					PartialText:  partialText,
+				}
+				if retryable, ok := data["retryable"].(bool); ok {
+					rerr.Retryable = &retryable
+				}
+				terminalErr = rerr
 				return false
 			case "cancelled":
 				sawTerminal = true

@@ -331,7 +331,7 @@ func (m *mockServer) startRun(id string, script *runScript) {
 			}
 			_ = waitCh
 
-			if ev.kind == "result" {
+			if ev.kind == "result" || ev.kind == "error" || ev.kind == "cancelled" {
 				state.mu.Lock()
 				state.done = true
 				state.mu.Unlock()

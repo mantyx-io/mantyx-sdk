@@ -369,6 +369,169 @@ func TestRunAgent_ToolBudgetsRejectsNegativeMaxCalls(t *testing.T) {
 	}
 }
 
+// TestRunAgent_ErrorEventCarriesTriageAttributes covers the truncation
+// salvage path from docs/agent-runs-protocol.md §7: the engine emits an
+// `assistant_message` with the partial text and a `finishReason`, then a
+// terminal `error` event with `errorClass: "truncation"` and the same
+// bytes on `partialText`. The SDK should surface those on `*RunError`.
+func TestRunAgent_ErrorEventCarriesTriageAttributes(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "assistant_message",
+				data: map[string]any{
+					"text":         `{"answer":"hello`,
+					"turn":         0,
+					"finishReason": "max_tokens",
+				},
+			},
+			{
+				kind: "error",
+				data: map[string]any{
+					"error":        "Model output was truncated (stop_reason=max_tokens).",
+					"code":         "truncation",
+					"errorClass":   "truncation",
+					"finishReason": "max_tokens",
+					"partialText":  `{"answer":"hello`,
+					"retryable":    false,
+				},
+			},
+		},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	_, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var runErr *RunError
+	if !errors.As(err, &runErr) {
+		t.Fatalf("expected *RunError, got %T: %v", err, err)
+	}
+	if runErr.Code != "truncation" {
+		t.Fatalf("expected Code=truncation, got %q", runErr.Code)
+	}
+	if runErr.ErrorClass != "truncation" {
+		t.Fatalf("expected ErrorClass=truncation, got %q", runErr.ErrorClass)
+	}
+	if runErr.FinishReason != "max_tokens" {
+		t.Fatalf("expected FinishReason=max_tokens, got %q", runErr.FinishReason)
+	}
+	if runErr.PartialText != `{"answer":"hello` {
+		t.Fatalf("expected PartialText to carry the salvage bytes, got %q", runErr.PartialText)
+	}
+	if runErr.Retryable == nil || *runErr.Retryable != false {
+		t.Fatalf("expected Retryable=&false, got %v", runErr.Retryable)
+	}
+	if !strings.Contains(runErr.Message, "truncated") {
+		t.Fatalf("expected message to contain 'truncated', got %q", runErr.Message)
+	}
+}
+
+// TestRunAgent_ErrorEventFallsBackToCode covers older runners that don't
+// yet emit `errorClass`; the SDK should still populate `Code` from the
+// legacy alias and leave the optional triage fields empty / nil.
+func TestRunAgent_ErrorEventFallsBackToCode(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "error",
+				data: map[string]any{
+					"error": "boom",
+					"code":  "worker_error",
+				},
+			},
+		},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	_, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var runErr *RunError
+	if !errors.As(err, &runErr) {
+		t.Fatalf("expected *RunError, got %T: %v", err, err)
+	}
+	if runErr.Code != "worker_error" {
+		t.Fatalf("expected Code=worker_error, got %q", runErr.Code)
+	}
+	if runErr.ErrorClass != "" {
+		t.Fatalf("expected empty ErrorClass, got %q", runErr.ErrorClass)
+	}
+	if runErr.FinishReason != "" || runErr.PartialText != "" || runErr.Retryable != nil {
+		t.Fatalf("expected unset triage attrs, got %+v", runErr)
+	}
+}
+
+// TestRunAgent_AssistantMessageSurfacesTriageFields verifies that the
+// enriched `assistant_message` payload (turn / finishReason / toolCalls)
+// is round-tripped through the event stream unchanged.
+func TestRunAgent_AssistantMessageSurfacesTriageFields(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "assistant_message",
+				data: map[string]any{
+					"text":         "calling search",
+					"turn":         0,
+					"finishReason": "tool_use",
+					"toolCalls": []any{
+						map[string]any{"id": "call_a", "name": "search", "input": map[string]any{"q": "hi"}},
+					},
+				},
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	var msg map[string]any
+	_, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		OnEvent: func(ev RunEvent) {
+			if ev.Type == "assistant_message" {
+				msg = ev.Data
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if msg == nil {
+		t.Fatalf("expected an assistant_message event")
+	}
+	if msg["text"] != "calling search" {
+		t.Fatalf("text not forwarded: %#v", msg["text"])
+	}
+	if msg["finishReason"] != "tool_use" {
+		t.Fatalf("finishReason not forwarded: %#v", msg["finishReason"])
+	}
+	if turn, ok := msg["turn"].(float64); !ok || turn != 0 {
+		t.Fatalf("turn not forwarded: %#v", msg["turn"])
+	}
+	calls, _ := msg["toolCalls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("toolCalls not forwarded: %#v", msg["toolCalls"])
+	}
+}
+
 func TestListModels(t *testing.T) {
 	server := newMockServer()
 	defer server.close()

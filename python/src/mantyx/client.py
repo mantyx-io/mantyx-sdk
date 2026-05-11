@@ -394,8 +394,29 @@ class MantyxClient:
                     msg = ev.data.get("error") or subtype or "run failed"
                     raise MantyxRunError(run_id, subtype or "error", str(msg))
             elif ev.type == "error":
-                code = str(ev.data.get("code") or "error")
-                raise MantyxRunError(run_id, code, str(ev.data.get("error") or "error"))
+                # The wire reports both a coarse `code` (legacy alias)
+                # and a canonical `errorClass` triage category; prefer
+                # `errorClass` for the run-error subtype when present so
+                # callers see a stable taxonomy. See
+                # `docs/agent-runs-protocol.md` §7.
+                error_class_raw = ev.data.get("errorClass")
+                error_class = str(error_class_raw) if isinstance(error_class_raw, str) else None
+                subtype = error_class or str(ev.data.get("code") or "error")
+                finish_raw = ev.data.get("finishReason")
+                finish_reason = str(finish_raw) if isinstance(finish_raw, str) else None
+                partial_raw = ev.data.get("partialText")
+                partial_text = str(partial_raw) if isinstance(partial_raw, str) else None
+                retryable_raw = ev.data.get("retryable")
+                retryable = retryable_raw if isinstance(retryable_raw, bool) else None
+                raise MantyxRunError(
+                    run_id,
+                    subtype,
+                    str(ev.data.get("error") or "error"),
+                    error_class=error_class,
+                    finish_reason=finish_reason,
+                    partial_text=partial_text,
+                    retryable=retryable,
+                )
             elif ev.type == "cancelled":
                 raise MantyxRunError(run_id, "cancelled", "Run was cancelled")
         return RunResult(run_id=run_id, text=final_text, events=collected)

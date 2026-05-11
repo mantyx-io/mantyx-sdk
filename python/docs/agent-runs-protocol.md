@@ -843,8 +843,21 @@ data: <utf-8 JSON>
 // Gemini `includeThoughts`, OpenAI `reasoning_content` on reasoning models).
 { "seq": 2, "type": "thinking_delta", "data": { "text": "First, I should…" } }
 
-// completed assistant message (text + any tool calls about to execute)
-{ "seq": 3, "type": "assistant_message", "data": { "text": "...", "toolCalls": [...] } }
+// completed assistant message (text + optional tool calls about to execute).
+// `turn` is the 0-based tool-turn index this message closes.
+// `finishReason` is the canonical lowercase stop reason normalized across
+// providers (`"end_turn"`, `"tool_use"`, `"max_tokens"`, `"refusal"`,
+// `"malformed_function_call"`, …); `null` / omitted when the provider did
+// not report one. `toolCalls` is omitted when the model called no tools.
+{ "seq": 3, "type": "assistant_message",
+  "data": {
+    "text": "...",
+    "turn": 0,
+    "finishReason": "tool_use",
+    "toolCalls": [
+      { "id": "call_abc", "name": "search", "input": { /* JSON-Schema-matching args */ } }
+    ]
+  } }
 
 // server-side tool call/result (informational; SDK does not act on these)
 { "seq": 4, "type": "tool_call",   "data": { "toolUseId": "...", "name": "...", "input": {...} } }
@@ -871,18 +884,70 @@ data: <utf-8 JSON>
 // is observability so SDK clients can render "memory budget exhausted" status notes.
 { "seq": 7, "type": "tool_budget_exceeded", "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 } }
 
-// terminal event
+// terminal event — exactly one of `result`, `error`, or `cancelled` lands per run.
 { "seq": 8, "type": "result",    "data": { "subtype": "success", "text": "Final reply" } }
 { "seq": 8, "type": "result",    "data": { "subtype": "error_local_tool_timeout", "error": "..." } }
+{ "seq": 8, "type": "error",     "data": {
+    "error":        "Model output was truncated (stop_reason=max_tokens). …",
+    "code":         "truncation",
+    "errorClass":   "truncation",
+    "finishReason": "max_tokens",
+    "partialText":  "{\n  \"answer\":… (truncated JSON) …",
+    "retryable":    false
+} }
 { "seq": 8, "type": "cancelled", "data": {} }
 ```
 
-A run terminates with exactly one of `result` or `cancelled`. The connection
-is closed by the server immediately after sending the terminal event. Clients
-should not assume any particular ordering between the human-readable `event:`
-field and the parsed `type` inside `data` — they are always equal, but
-implementations should rely on `data.type` because some HTTP middleware
-strips the `event:` line.
+A run terminates with exactly one of `result`, `error`, or `cancelled`. The
+connection is closed by the server immediately after sending the terminal
+event. Clients should not assume any particular ordering between the
+human-readable `event:` field and the parsed `type` inside `data` — they
+are always equal, but implementations should rely on `data.type` because
+some HTTP middleware strips the `event:` line.
+
+**`error` event payload fields.** The runner enriches the `error` event
+with structured triage attributes when the failure carried a salvage
+path (typically truncation, upstream deadline, or max-budget-with-text):
+
+| Field          | Type     | Required | Notes |
+| -------------- | -------- | -------- | ----- |
+| `error`        | string   | yes      | Human-readable message (also persisted on the run row's `error` column). |
+| `code`         | string   | yes      | Legacy alias for `errorClass`. Equals `errorClass` when present; otherwise a small lowercase token (`"error"`, `"invalid_spec"`, `"worker_error"`, …) the SDK can switch on. |
+| `errorClass`   | string   | no       | Canonical category. One of `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"` (input too big), `"truncation"` (output budget exhausted), `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, `"unknown"`. New categories may land additively. |
+| `finishReason` | string \| null | no | Canonical lowercase stop reason normalized across providers (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When present, mirrors the value on the last `assistant_message`. |
+| `partialText`  | string   | no       | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is likely **incomplete JSON** that will fail `JSON.parse` — see §4.5 / `docs/wire-protocol.md` §7. Also persisted on the run row's `finalText` column so the Calls UI can render it alongside a truncation banner. |
+| `retryable`    | boolean  | no       | Coarse retry hint inherited from the pipeline's error classifier. Informational; the SDK still owns the actual retry decision. |
+
+**Truncation contract.** When the model is mid-output and Gemini /
+Anthropic / OpenAI hit the output budget, MANTYX does **not** discard
+the bytes that already streamed. Instead:
+
+1. The last `assistant_message` for the turn carries the partial text
+   plus `finishReason: "max_tokens"`.
+2. The terminal SSE event is an `error` (not `result`) with
+   `errorClass: "truncation"` and `data.partialText` set to the same
+   bytes.
+3. The run row exposed by `GET /agent-runs/:runId` has
+   `{ status: "failed", finalText: "<partial text>",
+   error: "Model output was truncated …", failureReason: { errorClass:
+   "truncation", finishReason: "max_tokens" } }`.
+
+`partialText` is a **best-effort raw byte sequence** — for `outputSchema`
+runs it will almost always fail `JSON.parse` because the JSON object was
+not closed. SDKs should treat it as diagnostic data, never as a
+schema-conformant reply. Surfacing it (as a "truncated reply — JSON
+likely incomplete" status note) is the recommended pattern; silently
+falling back to it as the answer is not.
+
+**Run snapshot fields.** `GET /agent-runs/:runId` returns the run row
+with these triage-relevant columns:
+
+| Field           | Notes |
+| --------------- | ----- |
+| `status`        | `"queued" \| "running" \| "succeeded" \| "failed" \| "cancelled"`. |
+| `finalText`     | Final assistant text on success; same string as terminal `data.partialText` when `failureReason.errorClass === "truncation"`. Otherwise `null`. |
+| `error`         | Human-readable error message (matches terminal `error.data.error`). `null` on success / cancellation. |
+| `failureReason` | JSON object `{ errorClass, finishReason }` on `status === "failed"` runs that carried a salvage payload. Future-proof for additional triage fields. `null` otherwise. |
 
 ## 8. Local tool result
 
@@ -937,6 +1002,32 @@ Common codes:
 | `unknown_tool_use`     | 404  | Tool-result for an unknown `toolUseId` |
 | `run_terminal`         | 409  | Tool-result after run finished |
 | `rate_limited`         | 429  | Per-API-key sliding window |
+
+**Run-level error categories.** When a run terminates via the SSE `error`
+event (§7), the payload carries an `errorClass` triage category in
+addition to the human-readable `error` message. SDKs typically expose
+this as a typed field on their run-error type (TS `MantyxRunError.errorClass`,
+Python `MantyxRunError.error_class`, Go `RunError.ErrorClass`). The
+canonical set:
+
+| `errorClass`        | Typical cause | Has `partialText`? |
+| ------------------- | ------------- | ------------------ |
+| `rate_limit`        | Provider rate-limited the request (HTTP 429-equivalent). | No |
+| `overloaded`        | Provider returned a transient "overloaded" / 5xx. | No |
+| `server`            | Generic upstream provider error. | No |
+| `context_window`    | Input exceeded the model's context window. | No |
+| `truncation`        | Output budget exhausted mid-reply (`finishReason: "max_tokens"`). | **Yes** |
+| `invalid_request`   | Provider rejected the spec / params. | No |
+| `auth`              | BYOK credentials invalid for this run. | No |
+| `timeout`           | Generic upstream timeout (provider-side). | No |
+| `local_timeout`     | SDK didn't POST a `tool-result` within `localToolTimeoutMs`. | No |
+| `upstream_deadline` | MANTYX worker deadline exceeded waiting on the provider. | Sometimes |
+| `unknown`           | Anything else — fallback so SDKs always have a category. | No |
+
+The category set is **additive over the wire**: new categories may
+appear without bumping the protocol version, so SDKs should default to
+`unknown` (or simply pass the raw string through to callers) for
+unrecognized values rather than crashing.
 
 ## 11. Suggested client architecture
 
@@ -993,7 +1084,13 @@ A reference SDK should:
      the event to the caller (status banner, log line, telemetry). Do
      **not** abort the run on these events; the run continues through
      `result` / `error` / `cancelled` as usual.
-   - On terminal `result`, resolve the call. On `error` subtype, throw.
+   - On terminal `result` with `subtype === "success"`, resolve the call
+     with the final `text`. On a terminal `error` event, raise a typed
+     run-error that carries the new triage attributes (`errorClass`,
+     `finishReason`, `partialText`, `retryable`) so callers can render
+     "truncated reply — JSON likely incomplete" banners and short-circuit
+     retry policies. Treat `partialText` as **diagnostic** data — never
+     auto-fall-back to it as the final answer.
 4. Re-emit assistant deltas/events as a stream/iterator for callers who care
    about live output.
 5. Treat the protocol as the contract. Implementation details such as Valkey
