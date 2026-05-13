@@ -73,9 +73,44 @@ at <https://mantyx-io.github.io/mantyx-sdk/>.
 
 ## Authentication
 
-Every call requires a workspace API key with usage `developer_api`. Generate
-one in **Settings → API keys** in the MANTYX dashboard. The key is scoped to
-a workspace slug; the SDKs send it as `Authorization: Bearer <key>`.
+Every call needs a single bearer credential — either a **workspace API
+key** (token prefix `mantyx_`) or a **MANTYX OAuth 2.0 access token**
+(`mantyx_at_`). Both flow through `Authorization: Bearer <token>` and
+are resolved by the server purely from their token prefix, so the SDKs
+expose them as alternatives on the same constructor (`apiKey` vs
+`accessToken` in TS, `api_key` vs `access_token` in Python, `APIKey`
+vs `AccessToken` in Go — exactly one must be set).
+
+- **API keys** are static, workspace-scoped credentials with usage
+  `developer_api`; generate one in **Settings → API keys** in the
+  MANTYX dashboard. They authorise every endpoint by default and never
+  expire automatically.
+- **OAuth access tokens** are user- and workspace-scoped, short-lived,
+  and enforce per-route OAuth **scopes** (e.g. `runs:read`,
+  `sessions:write`, `models:read`). Calls that don't carry the required
+  scope return `403 insufficient_scope` with a `WWW-Authenticate`
+  challenge — surfaced by every SDK as a typed scope error
+  (`MantyxScopeError` in TS / Python, `*mantyx.ScopeError` in Go) whose
+  `requiredScopes` / `required_scopes` / `RequiredScopes` field lists
+  the scopes you must request on the next consent.
+
+See [`docs/agent-runs-protocol.md`](./docs/agent-runs-protocol.md) §2
+"Authentication" for the full token formats, identity model, and
+per-route scope matrix.
+
+For long-running OAuth-authenticated services, every SDK ships a
+built-in `MantyxOAuthClient` plus a `TokenSource` abstraction that
+plugs into the main client and refreshes access tokens proactively
+(and on `401`) so HTTP requests transparently survive token expiry.
+Refresh tokens are persistent and non-rotating — store them once at
+first sign-in. The full grant matrix, error semantics, and
+revocation flow live in [`docs/oauth.md`](./docs/oauth.md); each SDK
+README has a short "OAuth 2.0 refresh" section with the three
+call-site shapes:
+
+- TypeScript: [`ts/README.md`](./ts/README.md#oauth-20-refresh)
+- Python: [`python/README.md`](./python/README.md#oauth-20-refresh)
+- Go: [`go/README.md`](./go/README.md#oauth-20-refresh)
 
 ## Wire protocol
 

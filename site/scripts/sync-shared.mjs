@@ -84,6 +84,24 @@ function syncWireProtocol() {
   );
 }
 
+function syncOAuth() {
+  const src = path.join(repoRoot, "docs", "oauth.md");
+  if (!fs.existsSync(src)) {
+    console.warn(`[sync-shared] source missing: docs/oauth.md (skipped)`);
+    return;
+  }
+  const md = stripFirstH1(rewriteLinks(fs.readFileSync(src, "utf8")));
+  writeWithFrontmatter(
+    "oauth.md",
+    {
+      title: "OAuth 2.0",
+      description:
+        "Authorization-code (PKCE) and client-credentials grants, refresh-token lifecycle, scope catalog, and revocation for the MANTYX OAuth server.",
+    },
+    md,
+  );
+}
+
 function syncReference(slug, srcRel, title) {
   const src = path.join(repoRoot, srcRel);
   if (!fs.existsSync(src)) {
@@ -105,6 +123,7 @@ function main() {
   fs.mkdirSync(path.join(docsRoot, "reference"), { recursive: true });
   syncProtocol();
   syncWireProtocol();
+  syncOAuth();
   syncReference("typescript", "ts/README.md", "TypeScript SDK (@mantyx/sdk)");
   syncReference("go", "go/README.md", "Go SDK (mantyx-sdk/go)");
   syncReference("python", "python/README.md", "Python SDK (mantyx-sdk)");

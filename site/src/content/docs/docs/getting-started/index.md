@@ -34,6 +34,7 @@ All three speak the same wire protocol (see [Wire protocol](/docs/protocol/)) an
 
 ## Next steps
 
-- [Authentication](/docs/getting-started/authentication/) — how to generate an API key.
+- [Authentication](/docs/getting-started/authentication/) — generate a workspace API key or wire up an OAuth `tokenSource`.
 - [Quickstart](/docs/quickstart/) — your first run, in any of the three SDKs.
 - [Wire protocol](/docs/protocol/) — the HTTP + SSE spec, the source of truth for third-party clients.
+- [OAuth 2.0](/docs/oauth/) — grant matrix, scope catalog, and refresh-token lifecycle for multi-tenant apps.

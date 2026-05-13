@@ -33,8 +33,10 @@ from .errors import (
     MantyxNetworkError,
     MantyxParseError,
     MantyxRunError,
+    MantyxScopeError,
     MantyxToolError,
 )
+from .oauth import TokenSource
 from .sse import SseEvent, iter_sse
 from .tools import (
     LoopDetection,
@@ -140,17 +142,52 @@ class MantyxClient:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | None = None,
+        access_token: str | None = None,
+        token_source: TokenSource | None = None,
         workspace_slug: str,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT_S,
         http_client: httpx.Client | None = None,
     ) -> None:
-        if not api_key or not isinstance(api_key, str):
-            raise MantyxError("api_key is required")
+        """Construct the client.
+
+        Pass exactly one of:
+
+        - ``api_key`` — workspace API key (token prefix ``mantyx_``).
+        - ``access_token`` — MANTYX OAuth 2.0 access token (token prefix
+          ``mantyx_at_``). 1-hour-lived per ``docs/oauth.md`` — for
+          long-running processes prefer ``token_source``.
+        - ``token_source`` — dynamic credential provider that the SDK
+          calls before every request, and again with
+          ``reason="unauthorized"`` after a 401 (refresh + retry once).
+          Build one with
+          :meth:`MantyxOAuthClient.refresh_token_source` or
+          :meth:`MantyxOAuthClient.client_credentials_token_source`,
+          or supply any callable matching the :class:`TokenSource`
+          protocol for full custom control (e.g. tokens minted by an
+          upstream auth proxy).
+
+        The server resolves either static credential by token-prefix
+        sniffing, so the SDK only ships one
+        ``Authorization: Bearer <credential>`` header. Exposing
+        ``api_key`` / ``access_token`` separately just makes the call
+        site self-documenting.
+
+        See ``docs/agent-runs-protocol.md`` §2 for the credential table,
+        scope semantics, and the ``insufficient_scope`` 403 surfaced as
+        :class:`MantyxScopeError`.
+        """
+        credential, source = _resolve_credential(
+            api_key=api_key, access_token=access_token, token_source=token_source
+        )
         if not workspace_slug or not isinstance(workspace_slug, str):
             raise MantyxError("workspace_slug is required")
-        self.api_key = api_key
+        # Kept as ``api_key`` for backwards compatibility — older
+        # releases exposed it under this name on the client instance.
+        # Empty when a ``token_source`` is configured.
+        self.api_key = credential
+        self.token_source: TokenSource | None = source
         self.workspace_slug = workspace_slug
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -427,7 +464,12 @@ class MantyxClient:
         handlers: _LocalHandlers,
     ) -> Iterator[RunEvent]:
         """Open the SSE stream and yield typed events. Reconnects on
-        non-terminal disconnects via ``Last-Event-ID`` + ``?lastSeq=``."""
+        non-terminal disconnects via ``Last-Event-ID`` + ``?lastSeq=``.
+
+        At-most-one refresh + retry on 401 for the initial open when a
+        ``token_source`` is configured. Mid-stream 401s drop into the
+        ``except`` reconnect path as normal network blips.
+        """
         last_seq = 0
         # Tool dispatch happens off-thread so the stream consumer keeps reading.
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="mantyx-tool") as pool:
@@ -437,26 +479,35 @@ class MantyxClient:
                 params: dict[str, Any] = {}
                 if last_seq > 0:
                     params["lastSeq"] = last_seq
-                headers = self._auth_headers()
-                headers["Accept"] = "text/event-stream"
-                if last_seq > 0:
-                    headers["Last-Event-ID"] = str(last_seq)
                 try:
-                    with self._http.stream(
-                        "GET", url, params=params, headers=headers, timeout=None
-                    ) as resp:
-                        if resp.status_code != 200:
-                            self._raise_for_status(resp)
-                        for sse_ev in iter_sse(resp.iter_bytes()):
-                            ev = _to_run_event(sse_ev, last_seq)
-                            if ev.seq > last_seq:
-                                last_seq = ev.seq
-                            yield ev
-                            if ev.type == "local_tool_call":
-                                pool.submit(self._dispatch_local_tool, run_id, ev, handlers)
-                            if ev.type in ("result", "error", "cancelled"):
-                                terminal_seen = True
-                                break
+                    for attempt_reason in ("initial", "unauthorized"):
+                        headers = self._auth_headers(attempt_reason)
+                        headers["Accept"] = "text/event-stream"
+                        if last_seq > 0:
+                            headers["Last-Event-ID"] = str(last_seq)
+                        with self._http.stream(
+                            "GET", url, params=params, headers=headers, timeout=None
+                        ) as resp:
+                            if (
+                                resp.status_code == 401
+                                and self.token_source is not None
+                                and attempt_reason == "initial"
+                            ):
+                                # Refresh + retry once.
+                                continue
+                            if resp.status_code != 200:
+                                self._raise_for_status(resp)
+                            for sse_ev in iter_sse(resp.iter_bytes()):
+                                ev = _to_run_event(sse_ev, last_seq)
+                                if ev.seq > last_seq:
+                                    last_seq = ev.seq
+                                yield ev
+                                if ev.type == "local_tool_call":
+                                    pool.submit(self._dispatch_local_tool, run_id, ev, handlers)
+                                if ev.type in ("result", "error", "cancelled"):
+                                    terminal_seen = True
+                                    break
+                            break  # successful open path; don't try "unauthorized"
                 except httpx.HTTPError:  # network blip — retry
                     if terminal_seen:
                         return
@@ -569,8 +620,21 @@ class MantyxClient:
     def _absolute_url(self, path: str) -> str:
         return f"{self.base_url}/api/v1/workspaces/{_quote(self.workspace_slug)}{path}"
 
-    def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}"}
+    def _resolve_bearer(self, reason: str = "initial") -> str:
+        """Resolve the bearer credential to send on the next request.
+
+        Static ``api_key`` / ``access_token`` clients reach into the
+        cached value; ``token_source`` clients delegate so the source
+        can refresh expired access tokens before we hit the wire. Pass
+        ``reason="unauthorized"`` immediately after a 401 to force a
+        refresh.
+        """
+        if self.token_source is not None:
+            return self.token_source(reason)  # type: ignore[arg-type]
+        return self.api_key
+
+    def _auth_headers(self, reason: str = "initial") -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._resolve_bearer(reason)}"}
 
     def _request(
         self,
@@ -578,8 +642,17 @@ class MantyxClient:
         path: str,
         body: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        return self._request_with_retry(method, path, body, reason="initial")
+
+    def _request_with_retry(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None,
+        reason: str,
+    ) -> dict[str, Any] | None:
         url = self._absolute_url(path)
-        headers = self._auth_headers()
+        headers = self._auth_headers(reason)
         headers["Accept"] = "application/json"
         request_kwargs: dict[str, Any] = {"method": method, "url": url, "headers": headers}
         if body is not None:
@@ -589,6 +662,11 @@ class MantyxClient:
             resp = self._http.request(**request_kwargs)
         except httpx.HTTPError as exc:
             raise MantyxNetworkError(str(exc), cause=exc) from exc
+        # 401 with a configured token_source: refresh the access token
+        # and retry the original request exactly once. Static-credential
+        # clients fall through to ``MantyxAuthError`` as before.
+        if resp.status_code == 401 and self.token_source is not None and reason == "initial":
+            return self._request_with_retry(method, path, body, reason="unauthorized")
         if resp.status_code >= 400:
             self._raise_for_status(resp)
         text = resp.text
@@ -614,6 +692,21 @@ class MantyxClient:
         hint = hint_raw if isinstance(hint_raw, str) else None
         if resp.status_code == 401:
             raise MantyxAuthError(message)
+        # `403 insufficient_scope` is the OAuth "missing scope" signal.
+        # See `docs/agent-runs-protocol.md` §2.3.
+        if resp.status_code == 403 and (
+            body.get("error") == "insufficient_scope" or body.get("code") == "insufficient_scope"
+        ):
+            required = _parse_required_scopes(
+                body.get("required"),
+                resp.headers.get("WWW-Authenticate"),
+            )
+            scope_msg = (
+                f"Missing OAuth scope{'s' if len(required) > 1 else ''}: {', '.join(required)}"
+                if required
+                else "OAuth access token is missing a required scope"
+            )
+            raise MantyxScopeError(scope_msg, required_scopes=required)
         raise MantyxError(message, code=code, status=resp.status_code, hint=hint)
 
 
@@ -743,6 +836,71 @@ class AgentSession:
 
 
 # -------------------------------------------------------------------- Helpers
+
+
+def _resolve_credential(
+    *,
+    api_key: str | None,
+    access_token: str | None,
+    token_source: Any | None = None,
+) -> tuple[str, Any | None]:
+    """Pick exactly one of ``api_key`` / ``access_token`` / ``token_source``
+    and return ``(credential, source)``.
+
+    ``api_key`` and ``access_token`` are both static workspace bearers
+    — the server resolves whichever token it sees by token-prefix
+    sniffing, so they share a single header code path. ``token_source``
+    is the dynamic alternative the HTTP layer calls before every
+    request and on 401 retries; it is mutually exclusive with the
+    static options because mixing them would obscure where the
+    credential actually came from.
+    """
+    api_key_val = api_key if isinstance(api_key, str) else ""
+    access_token_val = access_token if isinstance(access_token, str) else ""
+    source = token_source if callable(token_source) else None
+    provided = [
+        name
+        for name, present in (
+            ("api_key", bool(api_key_val)),
+            ("access_token", bool(access_token_val)),
+            ("token_source", source is not None),
+        )
+        if present
+    ]
+    if len(provided) > 1:
+        raise MantyxError(
+            "Pass exactly one of `api_key`, `access_token`, or `token_source` — got "
+            + " + ".join(provided)
+        )
+    if not provided:
+        raise MantyxError(
+            "One of `api_key` (workspace API key), `access_token` (OAuth access token), "
+            "or `token_source` (dynamic credential provider) is required"
+        )
+    credential = api_key_val or access_token_val
+    return credential, source
+
+
+def _parse_required_scopes(
+    body_required: Any,
+    www_authenticate: str | None,
+) -> tuple[str, ...]:
+    """Extract the list of scopes the server reported as required for a
+    route, from either the response body's ``required`` field or the
+    ``WWW-Authenticate: Bearer error="insufficient_scope", scope="…"``
+    header (RFC 6750).
+    """
+    if isinstance(body_required, list):
+        return tuple(s for s in body_required if isinstance(s, str) and s)
+    if isinstance(body_required, str) and body_required:
+        return (body_required,)
+    if isinstance(www_authenticate, str):
+        import re
+
+        m = re.search(r'scope="([^"]+)"', www_authenticate, re.IGNORECASE)
+        if m:
+            return tuple(s for s in m.group(1).split() if s)
+    return ()
 
 
 def _quote(s: str) -> str:

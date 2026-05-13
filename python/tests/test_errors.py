@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from mantyx import (
@@ -9,6 +10,7 @@ from mantyx import (
     MantyxClient,
     MantyxError,
     MantyxRunError,
+    MantyxScopeError,
     define_local_tool,
 )
 
@@ -21,11 +23,69 @@ def test_auth_error_on_401(mantyx_client: MantyxClient, mock_server: MockServer)
         mantyx_client.list_models()
 
 
+def test_auth_error_default_message_mentions_both_credentials() -> None:
+    err = MantyxAuthError()
+    assert "API key" in err.message
+    assert "OAuth" in err.message
+
+
 def test_constructor_validates_inputs() -> None:
     with pytest.raises(MantyxError):
         MantyxClient(api_key="", workspace_slug="acme")
     with pytest.raises(MantyxError):
         MantyxClient(api_key="x", workspace_slug="")
+
+
+def test_constructor_accepts_access_token_alias(mock_server: MockServer) -> None:
+    transport = httpx.MockTransport(mock_server.handle)
+    http = httpx.Client(transport=transport, base_url="http://mock")
+    client = MantyxClient(
+        access_token="mantyx_at_test",
+        workspace_slug="acme",
+        base_url="http://mock",
+        http_client=http,
+    )
+    try:
+        assert client.api_key == "mantyx_at_test"
+        client.list_models()
+        assert mock_server.last_auth_header == "Bearer mantyx_at_test"
+    finally:
+        client.close()
+
+
+def test_constructor_rejects_both_credentials() -> None:
+    with pytest.raises(MantyxError):
+        MantyxClient(
+            api_key="mantyx_x",
+            access_token="mantyx_at_y",
+            workspace_slug="acme",
+        )
+
+
+def test_constructor_requires_at_least_one_credential() -> None:
+    with pytest.raises(MantyxError):
+        MantyxClient(workspace_slug="acme")
+
+
+def test_scope_error_carries_required_scopes(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.fail_scope = ["runs:write"]
+    with pytest.raises(MantyxScopeError) as exc_info:
+        mantyx_client.list_models()
+    err = exc_info.value
+    assert err.code == "insufficient_scope"
+    assert err.status == 403
+    assert err.required_scopes == ("runs:write",)
+
+
+def test_scope_error_handles_multi_scope_routes(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.fail_scope = ["runs:read", "runs:write"]
+    with pytest.raises(MantyxScopeError) as exc_info:
+        mantyx_client.list_models()
+    assert exc_info.value.required_scopes == ("runs:read", "runs:write")
 
 
 def test_local_tool_name_validation() -> None:

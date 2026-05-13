@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // mockServer mirrors the subset of the MANTYX agent-runs HTTP surface used by
@@ -20,7 +22,17 @@ type mockServer struct {
 	mu                     sync.Mutex
 	scriptForNextRun       *runScript
 	failAuth               bool
+	// failScope, when non-nil, makes every route return 403
+	// `insufficient_scope` with the configured `required` payload.
+	// One element → string body; >1 elements → array body. Matches the
+	// server's serialisation. See docs/agent-runs-protocol.md §2.3.
+	failScope              []string
+	// failAuthCount, when > 0, makes the next N API requests return
+	// 401; subsequent requests fall through to normal handling. Used
+	// to exercise the SDK's "refresh + retry once on 401" flow.
+	failAuthCount          int
 	lastAuthHeader         string
+	authHeaderHistory      []string
 	lastToolResultBody     []byte
 	lastRunCreateBody      []byte
 	lastSessionCreateBody  []byte
@@ -35,6 +47,26 @@ type mockServer struct {
 	a2aReplyText    string         // text portion of POST /a2a/rpc reply
 	lastA2ARequest  []byte
 	a2aAuthHeader   string
+
+	// OAuth authorization server simulation.
+	oauthAccessToken        string
+	oauthRefreshToken       string
+	oauthExpiresIn          int
+	oauthScope              string
+	oauthRotateAccessToken  bool
+	oauthNextError          *oauthMockError
+	oauthTokenCallCount     int
+	oauthLastTokenRequest   url.Values
+	oauthRevokeCallCount    int
+	oauthLastRevokeRequest  url.Values
+	oauthTokenLatency       time.Duration
+	oauthTokenHook          func() // optional pre-response hook on /token (for single-flight tests)
+}
+
+type oauthMockError struct {
+	Error       string
+	Description string
+	Status      int
 }
 
 type runScript struct {
@@ -60,9 +92,14 @@ type runState struct {
 
 func newMockServer() *mockServer {
 	m := &mockServer{
-		runs:           map[string]*runState{},
-		sessions:       map[string][]Message{},
-		sessionScripts: map[string]*runScript{},
+		runs:                   map[string]*runState{},
+		sessions:               map[string][]Message{},
+		sessionScripts:         map[string]*runScript{},
+		oauthAccessToken:       "mantyx_at_mock_initial",
+		oauthRefreshToken:      "mantyx_rt_mock_initial",
+		oauthExpiresIn:         3600,
+		oauthScope:             "models:read runs:write",
+		oauthRotateAccessToken: true,
 		models: ModelCatalog{
 			Models: []ModelInfo{{
 				ID:                  "platform:demo",
@@ -89,13 +126,51 @@ func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.mu.Lock()
-	m.lastAuthHeader = r.Header.Get("Authorization")
-	failAuth := m.failAuth
+	auth := r.Header.Get("Authorization")
+	m.lastAuthHeader = auth
+	if auth != "" {
+		m.authHeaderHistory = append(m.authHeaderHistory, auth)
+	}
 	m.mu.Unlock()
-	if failAuth {
+	// ── OAuth authorization server simulation ────────────────────────
+	// Not gated by failAuth/failScope — these endpoints use their own
+	// RFC 6749 error model (invalid_grant / invalid_client).
+	if r.URL.Path == "/api/oauth/token" && r.Method == http.MethodPost {
+		m.handleOAuthToken(w, r)
+		return
+	}
+	if r.URL.Path == "/api/oauth/revoke" && r.Method == http.MethodPost {
+		m.handleOAuthRevoke(w, r)
+		return
+	}
+	m.mu.Lock()
+	failAuth := m.failAuth
+	consumeFailAuth := m.failAuthCount > 0
+	if consumeFailAuth {
+		m.failAuthCount--
+	}
+	failScope := m.failScope
+	m.mu.Unlock()
+	if failAuth || consumeFailAuth {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = io.WriteString(w, `{"error":"Invalid API key"}`)
+		_, _ = io.WriteString(w, `{"error":"Invalid API key or OAuth access token"}`)
+		return
+	}
+	if failScope != nil {
+		var requiredJSON []byte
+		if len(failScope) == 1 {
+			requiredJSON, _ = json.Marshal(failScope[0])
+		} else {
+			requiredJSON, _ = json.Marshal(failScope)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(
+			"WWW-Authenticate",
+			fmt.Sprintf(`Bearer error="insufficient_scope", scope=%q`, strings.Join(failScope, " ")),
+		)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"error":"insufficient_scope","required":%s}`, string(requiredJSON)))
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
@@ -445,6 +520,88 @@ func (m *mockServer) handleSseStream(w http.ResponseWriter, r *http.Request, run
 			return
 		}
 	}
+}
+
+func (m *mockServer) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
+	rawBody, _ := io.ReadAll(r.Body)
+	form, _ := url.ParseQuery(string(rawBody))
+	m.mu.Lock()
+	m.oauthTokenCallCount++
+	m.oauthLastTokenRequest = form
+	latency := m.oauthTokenLatency
+	hook := m.oauthTokenHook
+	nextErr := m.oauthNextError
+	m.oauthNextError = nil
+	access := m.oauthAccessToken
+	refresh := m.oauthRefreshToken
+	expiresIn := m.oauthExpiresIn
+	scope := m.oauthScope
+	rotate := m.oauthRotateAccessToken
+	callIdx := m.oauthTokenCallCount
+	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if latency > 0 {
+		time.Sleep(latency)
+	}
+	if nextErr != nil {
+		status := nextErr.Status
+		if status == 0 {
+			status = http.StatusBadRequest
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		payload := map[string]string{"error": nextErr.Error}
+		if nextErr.Description != "" {
+			payload["error_description"] = nextErr.Description
+		}
+		_ = json.NewEncoder(w).Encode(payload)
+		return
+	}
+	grant := form.Get("grant_type")
+	if grant != "authorization_code" && grant != "refresh_token" && grant != "client_credentials" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"unsupported_grant_type"}`)
+		return
+	}
+	accessToken := access
+	if rotate {
+		accessToken = fmt.Sprintf("%s_v%d", access, callIdx)
+	}
+	resp := map[string]any{
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   expiresIn,
+		"scope":        valueOrDefault(form.Get("scope"), scope),
+	}
+	// refresh_token grant echoes back the same value the client sent
+	// (non-rotating per docs/oauth.md). client_credentials never
+	// returns one. authorization_code returns the persistent value.
+	if grant == "refresh_token" {
+		resp["refresh_token"] = valueOrDefault(form.Get("refresh_token"), refresh)
+	} else if grant == "authorization_code" {
+		resp["refresh_token"] = refresh
+	}
+	m.writeJSON(w, http.StatusOK, resp)
+}
+
+func (m *mockServer) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
+	rawBody, _ := io.ReadAll(r.Body)
+	form, _ := url.ParseQuery(string(rawBody))
+	m.mu.Lock()
+	m.oauthRevokeCallCount++
+	m.oauthLastRevokeRequest = form
+	m.mu.Unlock()
+	m.writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+func valueOrDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 func (m *mockServer) writeJSON(w http.ResponseWriter, status int, body any) {

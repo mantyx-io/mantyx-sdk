@@ -13,7 +13,10 @@ process.
   a tool-result POST.
 - Tunable provider thinking via `reasoningLevel` (string anchors or 0–100).
 - One-shot runs and multi-turn sessions, both with persisted observability.
-- Authenticated with a single workspace API key.
+- Authenticated with a single bearer credential — either a workspace API
+  key (token prefix `mantyx_`) or a MANTYX OAuth 2.0 access token
+  (`mantyx_at_`). Both flow through the same `Authorization: Bearer …`
+  header and are interchangeable end-to-end.
 
 For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md)
 and the messaging-layer reference in [`docs/wire-protocol.md`](./docs/wire-protocol.md)
@@ -43,7 +46,12 @@ import fs from "node:fs/promises";
 import { MantyxClient, defineLocalTool, mantyxTool } from "@mantyx/sdk";
 
 const client = new MantyxClient({
+  // Use *either* `apiKey` (workspace API key, token prefix `mantyx_`) or
+  // `accessToken` (OAuth 2.0 access token, prefix `mantyx_at_`). The
+  // server resolves either kind by token-prefix, so the SDK only ships
+  // one `Authorization: Bearer …` header.
   apiKey: process.env.MANTYX_API_KEY!,
+  // accessToken: process.env.MANTYX_ACCESS_TOKEN!,
   workspaceSlug: process.env.MANTYX_WORKSPACE_SLUG!,
   // baseUrl: "https://app.mantyx.io", // override for self-hosted
 });
@@ -530,10 +538,75 @@ interface MantyxClientOptions {
 
 All thrown errors extend `MantyxError`. Common subclasses:
 
-- `MantyxAuthError` — 401/403 from the server (bad API key, wrong workspace).
+- `MantyxAuthError` — 401 from the server (bad / missing API key or
+  OAuth access token).
+- `MantyxScopeError` — 403 `insufficient_scope` from the server. The
+  OAuth access token is missing one of the scopes the route demands;
+  `err.requiredScopes` lists them so callers can drive a re-consent
+  flow (e.g. "please re-authorise the app with `sessions:write`
+  enabled"). API keys never trip this — it is OAuth-only.
+- `MantyxOAuthError` — non-2xx from the OAuth token / revoke endpoint.
+  Carries the RFC 6749 `oauthError` (`"invalid_grant"`, …) and the
+  optional `oauthErrorDescription`. `invalid_grant` on refresh means
+  the refresh token was revoked — route the user back to first sign-in.
 - `MantyxNetworkError` — transport-layer failures.
 - `MantyxRunError` — the agent loop terminated with an error.
 - `MantyxToolError` — a local tool handler threw or timed out.
+
+### OAuth 2.0 refresh
+
+For long-running services, hand the SDK a `TokenSource` instead of a
+static `accessToken` — the client refreshes proactively before
+expiry and again on 401, retrying the original request exactly once.
+Refresh tokens are **persistent and non-rotating** per
+[`docs/oauth.md`](./docs/oauth.md): the caller persists the
+`refreshToken` once at first sign-in (treat it as long-lived,
+encrypted at rest) and the SDK re-mints access tokens from it
+transparently.
+
+```ts
+import { MantyxClient, MantyxOAuthClient } from "@mantyx/sdk";
+
+const oauth = new MantyxOAuthClient({
+  clientId: process.env.MANTYX_OAUTH_CLIENT_ID!,        // mantyx_oa_…
+  clientSecret: process.env.MANTYX_OAUTH_CLIENT_SECRET!, // mantyx_oas_…
+});
+
+// (1) Authorization-code: swap a `code` for the initial token pair, persist
+//     the refresh token against the user record. See docs/oauth.md for the
+//     full PKCE redirect dance the calling app is responsible for.
+const initial = await oauth.exchangeAuthorizationCode({
+  code: authCode,
+  redirectUri: "https://app.example.com/cb",
+  codeVerifier: storedVerifier,
+});
+await db.users.update(userId, { mantyxRefreshToken: initial.refreshToken });
+
+// (2) End-user clients: build a refresh-driven TokenSource from the
+//     persisted refresh token. The SDK calls it before every request and on
+//     401s; concurrent requests collapse onto one refresh.
+const client = new MantyxClient({
+  tokenSource: oauth.refreshTokenSource({
+    refreshToken: initial.refreshToken!,
+    initialToken: initial,
+  }),
+  workspaceSlug: "acme",
+});
+
+// (3) Service-to-service: client_credentials sources never hold a refresh
+//     token; they re-mint access tokens on demand.
+const svcClient = new MantyxClient({
+  tokenSource: oauth.clientCredentialsTokenSource({ scope: ["agents:invoke"] }),
+  workspaceSlug: "acme",
+});
+
+// (4) Manual override is still supported for short-lived access tokens that
+//     the caller already manages.
+const oneShot = new MantyxClient({ accessToken: "mantyx_at_…", workspaceSlug: "acme" });
+```
+
+See [`docs/oauth.md`](./docs/oauth.md) for grant types, token formats,
+and revocation.
 
 ## Examples
 

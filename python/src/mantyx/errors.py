@@ -37,10 +37,67 @@ class MantyxNetworkError(MantyxError):
 
 
 class MantyxAuthError(MantyxError):
-    """The server rejected the API key (401) or the workspace mismatch (403)."""
+    """The server rejected the API key / OAuth access token (HTTP 401)."""
 
-    def __init__(self, message: str = "Invalid or missing API key") -> None:
+    def __init__(self, message: str = "Invalid or missing API key / OAuth access token") -> None:
         super().__init__(message, code="unauthorized", status=401)
+
+
+class MantyxOAuthError(MantyxError):
+    """Raised on a non-2xx from ``/api/oauth/token`` or ``/api/oauth/revoke``.
+
+    Carries the RFC 6749 ``error`` discriminator (``"invalid_grant"``,
+    ``"invalid_client"``, ``"unsupported_grant_type"``, …) on
+    :attr:`oauth_error` and the optional ``error_description`` on
+    :attr:`oauth_error_description` so callers can branch without
+    parsing the human-readable message.
+
+    ``invalid_grant`` from the refresh path specifically signals the
+    refresh token has been revoked (or its grant / application was
+    deleted); the SDK does **not** loop on this — callers should route
+    the user back to a fresh sign-in.
+    """
+
+    def __init__(
+        self,
+        oauth_error: str,
+        oauth_error_description: str | None,
+        status: int,
+    ) -> None:
+        message = (
+            f"OAuth {oauth_error}: {oauth_error_description}"
+            if oauth_error_description
+            else f"OAuth {oauth_error}"
+        )
+        super().__init__(message, code=oauth_error, status=status)
+        self.oauth_error = oauth_error
+        self.oauth_error_description = oauth_error_description
+
+
+class MantyxScopeError(MantyxError):
+    """Raised on ``403 insufficient_scope`` from the server.
+
+    This signals that the OAuth 2.0 access token presented on the
+    request is missing one of the scopes the route demands (see
+    ``docs/agent-runs-protocol.md`` §2.2 for the per-endpoint table).
+
+    The ``required_scopes`` attribute carries the verbatim ``required``
+    value from the server's response — a single scope for most routes,
+    an array when the route demands more than one. Surface this to the
+    caller so they can drive a re-consent flow (e.g. "please re-authorise
+    the app with ``sessions:write`` enabled").
+
+    Workspace API keys never trip this error — they carry no granular
+    scopes. It is OAuth-only.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        required_scopes: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        super().__init__(message, code="insufficient_scope", status=403)
+        self.required_scopes: tuple[str, ...] = tuple(required_scopes or ())
 
 
 class MantyxToolError(MantyxError):
@@ -126,7 +183,9 @@ __all__ = [
     "MantyxAuthError",
     "MantyxError",
     "MantyxNetworkError",
+    "MantyxOAuthError",
     "MantyxParseError",
     "MantyxRunError",
+    "MantyxScopeError",
     "MantyxToolError",
 ]

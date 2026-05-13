@@ -7,9 +7,11 @@ import {
   MantyxNetworkError,
   MantyxParseError,
   MantyxRunError,
+  MantyxScopeError,
   MantyxToolError,
 } from "./errors.js";
 import { callA2A, callMcpTool, closeMcpRefs, resolveLocalRefs } from "./local-resolver.js";
+import type { TokenSource } from "./oauth.js";
 import { readSseStream } from "./sse.js";
 import type {
   LocalA2ATool,
@@ -24,7 +26,64 @@ import { toToolParametersWire } from "./zod-to-json-schema.js";
 export const DEFAULT_BASE_URL = "https://app.mantyx.io";
 
 export interface MantyxClientOptions {
-  apiKey: string;
+  /**
+   * Workspace API key (token prefix `mantyx_`) **or** a MANTYX OAuth 2.0
+   * access token (token prefix `mantyx_at_`). The server resolves either
+   * kind by token-prefix, so the SDK uses a single credential code path.
+   *
+   * Prefer the {@link accessToken} alias when wiring up an OAuth-based
+   * application — the two options are semantically identical (the value
+   * is forwarded as `Authorization: Bearer <credential>`), but
+   * `accessToken` makes the intent obvious at the call site.
+   *
+   * Exactly one of `apiKey` / `accessToken` must be set. Passing both —
+   * even to the same value — throws `MantyxError` at construction time.
+   *
+   * See `docs/agent-runs-protocol.md` §2 for the full credential table
+   * (including which prefix means what, scope semantics, and the
+   * `insufficient_scope` 403 SDKs surface via
+   * {@link MantyxScopeError}).
+   */
+  apiKey?: string;
+  /**
+   * MANTYX OAuth 2.0 access token (token prefix `mantyx_at_…`). Exactly
+   * one of {@link apiKey} / `accessToken` / {@link tokenSource} must be
+   * set; passing more than one throws `MantyxError` at construction
+   * time.
+   *
+   * Functionally identical to {@link apiKey} — the SDK ships either
+   * value verbatim on `Authorization: Bearer <credential>` — but using
+   * the OAuth-specific name makes scope-driven applications easier to
+   * read.
+   *
+   * OAuth tokens additionally enforce per-route **scopes**
+   * (`runs:read`, `runs:write`, `sessions:read`, `sessions:write`,
+   * `models:read`, `mantyx.identity:read`); see
+   * `docs/agent-runs-protocol.md` §2.2 for the table. Missing scopes
+   * land as {@link MantyxScopeError} so callers can route the user
+   * back to a re-consent flow.
+   *
+   * Static `accessToken` values are 1-hour-lived per `docs/oauth.md`
+   * §"Token lifetimes & lifecycle" — for long-running processes
+   * prefer {@link tokenSource} so the SDK can refresh transparently.
+   */
+  accessToken?: string;
+  /**
+   * Dynamic credential provider. The SDK calls it before every request
+   * to obtain the current access token, and again with
+   * `reason: "unauthorized"` after a 401 so it can refresh and retry
+   * the request exactly once.
+   *
+   * Build one via `oauthClient.refreshTokenSource({ refreshToken })`
+   * or `oauthClient.clientCredentialsTokenSource()` — see
+   * [`./oauth.ts`](./oauth.ts) for the helpers, or pass any function
+   * matching the {@link TokenSource} signature for full custom
+   * control (e.g. tokens minted by an upstream auth proxy).
+   *
+   * Exactly one of {@link apiKey} / {@link accessToken} / `tokenSource`
+   * must be set.
+   */
+  tokenSource?: TokenSource;
   workspaceSlug: string;
   /** Defaults to `https://app.mantyx.io`. Override for self-hosted instances. */
   baseUrl?: string;
@@ -451,15 +510,32 @@ export interface SessionInfo {
 }
 
 export class MantyxClient {
-  readonly options: Required<Pick<MantyxClientOptions, "apiKey" | "workspaceSlug" | "baseUrl">> & {
+  readonly options: Required<Pick<MantyxClientOptions, "workspaceSlug" | "baseUrl">> & {
+    /**
+     * Single resolved bearer credential — either a workspace API key
+     * (token prefix `mantyx_`) or an OAuth access token (`mantyx_at_…`).
+     * The SDK does not need to distinguish them on the wire; the value
+     * is forwarded verbatim on `Authorization: Bearer …`.
+     *
+     * Kept as `apiKey` (instead of e.g. `credential`) for backwards
+     * compatibility — older releases exposed it under this name.
+     *
+     * Empty string when a {@link tokenSource} is configured — every
+     * request resolves the bearer from the source instead.
+     */
+    apiKey: string;
     fetch: typeof fetch;
     timeoutMs: number;
+    /**
+     * Dynamic credential provider when constructed with
+     * `tokenSource` — see {@link MantyxClientOptions.tokenSource}.
+     * `null` for static `apiKey` / `accessToken` clients.
+     */
+    tokenSource: TokenSource | null;
   };
 
   constructor(opts: MantyxClientOptions) {
-    if (!opts.apiKey || typeof opts.apiKey !== "string") {
-      throw new MantyxError("apiKey is required");
-    }
+    const { credential, tokenSource } = resolveCredential(opts);
     if (!opts.workspaceSlug || typeof opts.workspaceSlug !== "string") {
       throw new MantyxError("workspaceSlug is required");
     }
@@ -470,11 +546,12 @@ export class MantyxClient {
       );
     }
     this.options = {
-      apiKey: opts.apiKey,
+      apiKey: credential,
       workspaceSlug: opts.workspaceSlug,
       baseUrl: (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, ""),
       fetch: f,
       timeoutMs: opts.timeoutMs ?? 60_000,
+      tokenSource,
     };
   }
 
@@ -656,19 +733,7 @@ export class MantyxClient {
     let lastSeq = 0;
     while (true) {
       const reqUrl = lastSeq > 0 ? `${url}?lastSeq=${lastSeq}` : url;
-      const res = await this.options.fetch(reqUrl, {
-        method: "GET",
-        headers: {
-          ...this.authHeaders(),
-          Accept: "text/event-stream",
-          ...(lastSeq > 0 ? { "Last-Event-ID": String(lastSeq) } : {}),
-        },
-        ...(signal ? { signal } : {}),
-      }).catch((err: unknown) => {
-        throw new MantyxNetworkError(`Failed to open SSE stream: ${(err as Error).message}`, {
-          cause: err,
-        });
-      });
+      const res = await this.openSseStream(reqUrl, lastSeq, signal);
       if (!res.ok) {
         throw await this.errorFromResponse(res);
       }
@@ -796,8 +861,67 @@ export class MantyxClient {
     return `${this.options.baseUrl}/api/v1/workspaces/${encodeURIComponent(this.options.workspaceSlug)}${path}`;
   }
 
-  private authHeaders(): Record<string, string> {
-    return { Authorization: `Bearer ${this.options.apiKey}` };
+  /**
+   * Resolve the bearer credential to send on the next request. With a
+   * static `apiKey` / `accessToken` this is a synchronous reach into
+   * `options.apiKey`; with a {@link TokenSource} it delegates so the
+   * source can refresh expired access tokens before we hit the wire.
+   *
+   * The `reason` is forwarded to the source verbatim. Pass
+   * `"unauthorized"` immediately after a 401 so the source forces a
+   * refresh rather than handing back its (now-invalid) cached value.
+   */
+  private async resolveBearer(reason: "initial" | "unauthorized" = "initial"): Promise<string> {
+    if (this.options.tokenSource) return this.options.tokenSource(reason);
+    return this.options.apiKey;
+  }
+
+  /**
+   * Open an SSE stream against `reqUrl` with at-most-one refresh +
+   * retry on 401. The caller is responsible for the subsequent
+   * `readSseStream` loop; this helper only handles the initial GET.
+   * Mid-stream 401s propagate as `MantyxNetworkError` from the read
+   * loop and trigger a reconnect via the outer `while` in
+   * {@link streamRunEvents}.
+   */
+  private async openSseStream(
+    reqUrl: string,
+    lastSeq: number,
+    signal: AbortSignal | undefined,
+  ): Promise<Response> {
+    const openOnce = async (reason: "initial" | "unauthorized"): Promise<Response> => {
+      const auth = await this.authHeaders(reason);
+      return this.options.fetch(reqUrl, {
+        method: "GET",
+        headers: {
+          ...auth,
+          Accept: "text/event-stream",
+          ...(lastSeq > 0 ? { "Last-Event-ID": String(lastSeq) } : {}),
+        },
+        ...(signal ? { signal } : {}),
+      }).catch((err: unknown) => {
+        throw new MantyxNetworkError(`Failed to open SSE stream: ${(err as Error).message}`, {
+          cause: err,
+        });
+      });
+    };
+    const res = await openOnce("initial");
+    if (res.status === 401 && this.options.tokenSource !== null) {
+      try {
+        await res.text();
+      } catch {
+        // ignore
+      }
+      return openOnce("unauthorized");
+    }
+    return res;
+  }
+
+  private async authHeaders(
+    reason: "initial" | "unauthorized" = "initial",
+  ): Promise<Record<string, string>> {
+    const bearer = await this.resolveBearer(reason);
+    return { Authorization: `Bearer ${bearer}` };
   }
 
   async request<T>(args: {
@@ -806,14 +930,22 @@ export class MantyxClient {
     body?: unknown;
     timeoutMs?: number;
   }): Promise<T> {
+    return this.requestWithRetry<T>(args, "initial");
+  }
+
+  private async requestWithRetry<T>(
+    args: { method: string; path: string; body?: unknown; timeoutMs?: number },
+    reason: "initial" | "unauthorized",
+  ): Promise<T> {
     const url = this.absoluteUrl(args.path);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), args.timeoutMs ?? this.options.timeoutMs);
     try {
+      const auth = await this.authHeaders(reason);
       const res = await this.options.fetch(url, {
         method: args.method,
         headers: {
-          ...this.authHeaders(),
+          ...auth,
           ...(args.body !== undefined ? { "Content-Type": "application/json" } : {}),
           Accept: "application/json",
         },
@@ -826,6 +958,23 @@ export class MantyxClient {
         throw new MantyxNetworkError(`Network error: ${(err as Error).message}`, { cause: err });
       });
       if (!res.ok) {
+        // 401 with a configured TokenSource: refresh the access token
+        // and retry the original request exactly once. Static-credential
+        // clients (no source) fall straight through to `MantyxAuthError`.
+        if (
+          res.status === 401 &&
+          this.options.tokenSource !== null &&
+          reason === "initial"
+        ) {
+          // Drain the body so the socket can be reused.
+          try {
+            await res.text();
+          } catch {
+            // ignore
+          }
+          clearTimeout(t);
+          return this.requestWithRetry<T>(args, "unauthorized");
+        }
         throw await this.errorFromResponse(res);
       }
       const text = await res.text();
@@ -841,14 +990,29 @@ export class MantyxClient {
   }
 
   private async errorFromResponse(res: Response): Promise<MantyxError> {
-    let body: { error?: string; code?: string; hint?: string } = {};
+    let body: {
+      error?: string;
+      code?: string;
+      hint?: string;
+      required?: string | string[];
+    } = {};
     try {
       body = (await res.json()) as typeof body;
     } catch {
       // ignore
     }
     if (res.status === 401) {
-      return new MantyxAuthError(body.error ?? "Invalid API key");
+      return new MantyxAuthError(body.error ?? "Invalid API key or OAuth access token");
+    }
+    // `403 insufficient_scope` is the OAuth "missing scope" signal. The
+    // server may report `error` or `code` as the discriminator depending
+    // on the route; check both. See `docs/agent-runs-protocol.md` §2.3.
+    if (res.status === 403 && (body.error === "insufficient_scope" || body.code === "insufficient_scope")) {
+      const required = parseRequiredScopes(body.required, res.headers.get("WWW-Authenticate"));
+      const msg = required.length > 0
+        ? `Missing OAuth scope${required.length > 1 ? "s" : ""}: ${required.join(", ")}`
+        : "OAuth access token is missing a required scope";
+      return new MantyxScopeError(msg, required);
     }
     return new MantyxError(body.error ?? `HTTP ${res.status}`, {
       code: body.code ?? `http_${res.status}`,
@@ -1380,4 +1544,72 @@ export function parseRunOutput<T = unknown>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Pick exactly one of `apiKey` / `accessToken` / `tokenSource` from
+ * {@link MantyxClientOptions} and return the resolved bearer credential
+ * (plus the optional dynamic source).
+ *
+ * `apiKey` and `accessToken` are both static workspace bearers — the
+ * server resolves whichever credential it sees by token-prefix, so the
+ * SDK can use a single header path. `tokenSource` is the dynamic
+ * alternative that the HTTP layer calls before every request and on
+ * 401 retries; it is mutually exclusive with the static options
+ * because mixing them would obscure where the credential actually
+ * came from.
+ */
+function resolveCredential(opts: MantyxClientOptions): {
+  credential: string;
+  tokenSource: TokenSource | null;
+} {
+  const apiKey = typeof opts.apiKey === "string" ? opts.apiKey : "";
+  const accessToken = typeof opts.accessToken === "string" ? opts.accessToken : "";
+  const tokenSource = typeof opts.tokenSource === "function" ? opts.tokenSource : null;
+  const provided = [apiKey ? "apiKey" : "", accessToken ? "accessToken" : "", tokenSource ? "tokenSource" : ""]
+    .filter((s) => s.length > 0);
+  if (provided.length > 1) {
+    throw new MantyxError(
+      `Pass exactly one of \`apiKey\`, \`accessToken\`, or \`tokenSource\` — got ${provided.join(" + ")}.`,
+    );
+  }
+  if (provided.length === 0) {
+    throw new MantyxError(
+      "One of `apiKey` (workspace API key), `accessToken` (OAuth access token), or `tokenSource` (dynamic credential provider) is required",
+    );
+  }
+  return {
+    credential: apiKey || accessToken,
+    tokenSource,
+  };
+}
+
+/**
+ * Extract the list of scopes the server reported as required for the
+ * route, from either the response body's `required` field or the
+ * `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` header.
+ *
+ * The body field can be a single string (most routes) or an array
+ * (multi-scope routes). The header carries a space-delimited scope
+ * string per RFC 6750. We prefer the body since it's stricter, and
+ * fall back to the header so we surface *something* even when the
+ * route only returned the header.
+ */
+function parseRequiredScopes(
+  bodyRequired: string | string[] | undefined,
+  wwwAuthenticate: string | null,
+): string[] {
+  if (Array.isArray(bodyRequired)) {
+    return bodyRequired.filter((s): s is string => typeof s === "string" && s.length > 0);
+  }
+  if (typeof bodyRequired === "string" && bodyRequired.length > 0) {
+    return [bodyRequired];
+  }
+  if (typeof wwwAuthenticate === "string") {
+    const m = /scope="([^"]+)"/i.exec(wwwAuthenticate);
+    if (m && m[1]) {
+      return m[1].split(/\s+/).filter((s) => s.length > 0);
+    }
+  }
+  return [];
 }

@@ -7,7 +7,12 @@ Example:
     >>> class ReadFileArgs(BaseModel):
     ...     path: str
     >>>
+    >>> # Workspace API key (token prefix ``mantyx_``):
     >>> client = MantyxClient(api_key="...", workspace_slug="acme-corp")
+    >>>
+    >>> # Or, equivalently, a MANTYX OAuth 2.0 access token
+    >>> # (token prefix ``mantyx_at_``):
+    >>> client = MantyxClient(access_token="...", workspace_slug="acme-corp")
     >>> result = client.run_agent(
     ...     system_prompt="You are a helpful filesystem assistant.",
     ...     prompt="Read /etc/hostname and tell me what it says.",
@@ -42,9 +47,22 @@ from .errors import (
     MantyxAuthError,
     MantyxError,
     MantyxNetworkError,
+    MantyxOAuthError,
     MantyxParseError,
     MantyxRunError,
+    MantyxScopeError,
     MantyxToolError,
+)
+from .oauth import (
+    DEFAULT_OAUTH_BASE_URL,
+    DEFAULT_REFRESH_SKEW_S,
+    AsyncTokenSource,
+    MantyxOAuthClient,
+    OAuthToken,
+    TokenRequestReason,
+    TokenSource,
+    generate_pkce_verifier,
+    pkce_challenge,
 )
 from .tools import (
     LocalA2ATool,
@@ -76,10 +94,13 @@ from .tools import (
 
 __all__ = [
     "DEFAULT_BASE_URL",
+    "DEFAULT_OAUTH_BASE_URL",
+    "DEFAULT_REFRESH_SKEW_S",
     "SDK_VERSION",
     "AgentSession",
     "AsyncAgentSession",
     "AsyncMantyxClient",
+    "AsyncTokenSource",
     "LocalA2ATool",
     "LocalMcpHttpTransport",
     "LocalMcpServer",
@@ -92,19 +113,25 @@ __all__ = [
     "MantyxError",
     "MantyxMcpToolRef",
     "MantyxNetworkError",
+    "MantyxOAuthClient",
+    "MantyxOAuthError",
     "MantyxParseError",
     "MantyxPluginToolRef",
     "MantyxRunError",
+    "MantyxScopeError",
     "MantyxToolError",
     "MantyxToolRef",
     "ModelCatalog",
     "ModelInfo",
+    "OAuthToken",
     "OutputSchema",
     "PricingInfo",
     "ReasoningLevel",
     "RunEvent",
     "RunResult",
     "SessionInfo",
+    "TokenRequestReason",
+    "TokenSource",
     "ToolBudget",
     "ToolBudgets",
     "ToolRef",
@@ -112,6 +139,7 @@ __all__ = [
     "define_local_a2a",
     "define_local_mcp",
     "define_local_tool",
+    "generate_pkce_verifier",
     "is_local_a2a_tool",
     "is_local_mcp_server",
     "is_local_tool",
@@ -120,4 +148,5 @@ __all__ = [
     "mantyx_plugin_tool",
     "mantyx_tool",
     "parse_run_output",
+    "pkce_challenge",
 ]

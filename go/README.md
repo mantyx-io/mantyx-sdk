@@ -13,7 +13,10 @@ program.
   tool-result POST.
 - Tunable provider thinking via `ReasoningLevel` (string anchors or 0–100).
 - One-shot runs and multi-turn sessions, both with persisted observability.
-- Authenticated with a single workspace API key.
+- Authenticated with a single bearer credential — either a workspace API
+  key (token prefix `mantyx_`) or a MANTYX OAuth 2.0 access token
+  (`mantyx_at_`). Both flow through the same `Authorization: Bearer …`
+  header and are interchangeable end-to-end.
 
 For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md).
 
@@ -51,8 +54,13 @@ type readFileArgs struct {
 }
 
 func main() {
+    // Pass *either* APIKey (workspace API key, prefix `mantyx_`) or
+    // AccessToken (OAuth 2.0 access token, prefix `mantyx_at_`). The
+    // server resolves either by token-prefix; the SDK ships one
+    // `Authorization: Bearer …` header regardless.
     client := mantyx.NewClient(mantyx.Options{
         APIKey:        os.Getenv("MANTYX_API_KEY"),
+        // AccessToken: os.Getenv("MANTYX_ACCESS_TOKEN"),
         WorkspaceSlug: os.Getenv("MANTYX_WORKSPACE_SLUG"),
     })
 
@@ -543,7 +551,11 @@ session, err := client.ResumeSession(ctx, sessionID, []mantyx.ToolRef{
 
 ```go
 type Options struct {
+    // Exactly one of APIKey or AccessToken must be set. Both flow
+    // through `Authorization: Bearer …`; the server distinguishes them
+    // by token-prefix (`mantyx_` vs `mantyx_at_`).
     APIKey        string
+    AccessToken   string
     WorkspaceSlug string
     BaseURL       string        // default: https://app.mantyx.io
     HTTPClient    *http.Client  // default: &http.Client{Timeout: 5 * time.Minute}
@@ -583,12 +595,78 @@ func NewClient(opts Options) *Client
 
 The SDK returns typed errors that wrap `*mantyx.Error`:
 
-- `*mantyx.AuthError` — 401/403 from the server.
+- `*mantyx.AuthError` — 401 from the server (bad / missing API key or
+  OAuth access token).
+- `*mantyx.ScopeError` — 403 `insufficient_scope` from the server. The
+  OAuth access token is missing one of the scopes a route demands; the
+  `RequiredScopes` slice on the error lists them so callers can drive a
+  re-consent flow. API keys never trip this — it is OAuth-only.
+- `*mantyx.OAuthError` — non-2xx from the OAuth token / revoke
+  endpoint. Carries the RFC 6749 `OAuthErrorCode` (`"invalid_grant"`,
+  …) and the optional `OAuthErrorDescription`. `invalid_grant` on
+  refresh means the refresh token was revoked — route the user back
+  to first sign-in.
 - `*mantyx.NetworkError` — transport-layer failures.
 - `*mantyx.RunError` — the agent loop terminated with an error.
 - `*mantyx.ToolError` — a local tool handler returned an error or timed out.
 
 Use `errors.As(err, &target)` to branch on type.
+
+### OAuth 2.0 refresh
+
+For long-running services, hand the client an `Options.TokenSource`
+instead of a static `AccessToken` — the SDK refreshes proactively
+before expiry and again on 401, retrying the original request
+exactly once. Refresh tokens are **persistent and non-rotating** per
+[`docs/oauth.md`](./docs/oauth.md): the caller persists the refresh
+token once at first sign-in (treat it as long-lived, encrypted at
+rest) and the SDK re-mints access tokens from it transparently.
+
+```go
+import "github.com/mantyx-io/mantyx-sdk/go"
+
+oauth := mantyx.NewOAuthClient(mantyx.OAuthClientOptions{
+    ClientID:     os.Getenv("MANTYX_OAUTH_CLIENT_ID"),     // mantyx_oa_…
+    ClientSecret: os.Getenv("MANTYX_OAUTH_CLIENT_SECRET"), // mantyx_oas_…
+})
+
+// (1) Authorization-code: swap a `code` for the initial token pair, persist
+//     the refresh token against the user record. See docs/oauth.md for the
+//     full PKCE redirect dance the calling app is responsible for.
+initial, err := oauth.ExchangeAuthorizationCode(ctx, mantyx.ExchangeAuthorizationCodeOptions{
+    Code:         authCode,
+    RedirectURI:  "https://app.example.com/cb",
+    CodeVerifier: storedVerifier,
+})
+// db.Users.Update(userID, "mantyx_refresh_token", initial.RefreshToken)
+
+// (2) End-user clients: build a refresh-driven TokenSource from the
+//     persisted refresh token. The SDK calls it before every request and on
+//     401s; concurrent requests collapse onto one refresh.
+client := mantyx.NewClient(mantyx.Options{
+    TokenSource: oauth.RefreshTokenSource(mantyx.RefreshTokenSourceOptions{
+        RefreshToken: initial.RefreshToken,
+        InitialToken: initial,
+    }),
+    WorkspaceSlug: "acme",
+})
+
+// (3) Service-to-service: ClientCredentialsTokenSource never holds a
+//     refresh token; it re-mints access tokens on demand.
+svc := mantyx.NewClient(mantyx.Options{
+    TokenSource: oauth.ClientCredentialsTokenSource(mantyx.ClientCredentialsTokenSourceOptions{
+        Scope: []string{"agents:invoke"},
+    }),
+    WorkspaceSlug: "acme",
+})
+
+// (4) Manual override is still supported for short-lived access tokens
+//     the caller already manages.
+oneShot := mantyx.NewClient(mantyx.Options{AccessToken: "mantyx_at_…", WorkspaceSlug: "acme"})
+```
+
+See [`docs/oauth.md`](./docs/oauth.md) for grant types, token formats,
+and revocation.
 
 ## Examples
 

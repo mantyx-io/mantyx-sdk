@@ -16,8 +16,46 @@ import (
 const DefaultBaseURL = "https://app.mantyx.io"
 
 // Options configures a Client.
+//
+// Exactly one of APIKey / AccessToken must be set:
+//
+//   - APIKey — a workspace API key (token prefix `mantyx_…`).
+//   - AccessToken — a MANTYX OAuth 2.0 access token (token prefix
+//     `mantyx_at_…`).
+//
+// The server resolves either kind by token-prefix sniffing, so the SDK
+// only ships one `Authorization: Bearer <credential>` header. Exposing
+// both option names makes call sites self-documenting; passing both
+// returns an `invalid_request` Error.
+//
+// See `docs/agent-runs-protocol.md` §2 for the full credential table,
+// scope semantics, and the `insufficient_scope` 403 surfaced as
+// *ScopeError.
 type Options struct {
-	APIKey        string
+	// APIKey is a workspace API key (token prefix `mantyx_…`). Mutually
+	// exclusive with AccessToken / TokenSource; see the Options doc.
+	APIKey string
+	// AccessToken is a MANTYX OAuth 2.0 access token (token prefix
+	// `mantyx_at_…`). Mutually exclusive with APIKey / TokenSource;
+	// see the Options doc. OAuth tokens additionally enforce per-route
+	// scopes (`runs:read`, `runs:write`, `sessions:read`,
+	// `sessions:write`, `models:read`, `mantyx.identity:read`);
+	// missing scopes surface as *ScopeError.
+	//
+	// Static access tokens live 1 hour per `docs/oauth.md` §"Token
+	// lifetimes & lifecycle" — for long-running processes prefer
+	// TokenSource.
+	AccessToken string
+	// TokenSource is a dynamic credential provider that the SDK calls
+	// before every request, and again with reason=ReasonUnauthorized
+	// after a 401 (refresh + retry once). Build one with
+	// (*OAuthClient).RefreshTokenSource or
+	// (*OAuthClient).ClientCredentialsTokenSource, or supply any
+	// implementation of TokenSource for full custom control (e.g.
+	// tokens minted by an upstream auth proxy).
+	//
+	// Mutually exclusive with APIKey / AccessToken.
+	TokenSource   TokenSource
 	WorkspaceSlug string
 	// BaseURL defaults to DefaultBaseURL when empty.
 	BaseURL string
@@ -30,6 +68,7 @@ type Options struct {
 // Client is the entry point of the SDK.
 type Client struct {
 	apiKey        string
+	tokenSource   TokenSource
 	workspaceSlug string
 	baseURL       string
 	httpClient    *http.Client
@@ -37,9 +76,7 @@ type Client struct {
 
 // NewClient returns a configured Client. Panics on missing required fields.
 func NewClient(opts Options) *Client {
-	if opts.APIKey == "" {
-		panic("mantyx: APIKey is required")
-	}
+	credential, source := resolveCredential(opts)
 	if opts.WorkspaceSlug == "" {
 		panic("mantyx: WorkspaceSlug is required")
 	}
@@ -51,11 +88,38 @@ func NewClient(opts Options) *Client {
 	}
 	opts.BaseURL = strings.TrimRight(opts.BaseURL, "/")
 	return &Client{
-		apiKey:        opts.APIKey,
+		apiKey:        credential,
+		tokenSource:   source,
 		workspaceSlug: opts.WorkspaceSlug,
 		baseURL:       opts.BaseURL,
 		httpClient:    opts.HTTPClient,
 	}
+}
+
+// resolveCredential picks exactly one of APIKey / AccessToken /
+// TokenSource and returns (credential, source). Mixing options panics.
+func resolveCredential(opts Options) (string, TokenSource) {
+	var provided []string
+	if opts.APIKey != "" {
+		provided = append(provided, "APIKey")
+	}
+	if opts.AccessToken != "" {
+		provided = append(provided, "AccessToken")
+	}
+	if opts.TokenSource != nil {
+		provided = append(provided, "TokenSource")
+	}
+	if len(provided) > 1 {
+		panic("mantyx: pass exactly one of Options.APIKey, Options.AccessToken, or Options.TokenSource — got " + strings.Join(provided, " + "))
+	}
+	if len(provided) == 0 {
+		panic("mantyx: one of Options.APIKey (workspace API key), Options.AccessToken (OAuth access token), or Options.TokenSource (dynamic credential provider) is required")
+	}
+	credential := opts.APIKey
+	if credential == "" {
+		credential = opts.AccessToken
+	}
+	return credential, opts.TokenSource
 }
 
 // ----- Models ---------------------------------------------------------------
@@ -721,20 +785,15 @@ func (c *Client) consumeStream(
 		if lastSeq > 0 {
 			path = fmt.Sprintf("%s?lastSeq=%d", path, lastSeq)
 		}
-		req, err := c.newRequest(ctx, "GET", path, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Accept", "text/event-stream")
-		if lastSeq > 0 {
-			req.Header.Set("Last-Event-ID", fmt.Sprintf("%d", lastSeq))
-		}
-		resp, err := c.httpClient.Do(req)
+		// At-most-one refresh + retry on 401 for the initial SSE open
+		// when a TokenSource is configured. Mid-stream 401s drop into
+		// the network-blip reconnect path below.
+		resp, err := c.openSSEStream(ctx, path, lastSeq)
 		if err != nil {
 			if ctx.Err() != nil {
 				return &RunError{RunID: runID, Code: "cancelled", Message: ctx.Err().Error()}, nil
 			}
-			return nil, &NetworkError{Inner: &Error{Message: err.Error(), Code: "network"}, Cause: err}
+			return nil, err
 		}
 		if resp.StatusCode != http.StatusOK {
 			defer resp.Body.Close()
@@ -931,7 +990,51 @@ func (c *Client) CancelRun(ctx context.Context, runID string) error {
 
 // ----- HTTP plumbing --------------------------------------------------------
 
-func (c *Client) newRequest(ctx context.Context, method, path string, body any) (*http.Request, error) {
+// openSSEStream opens the SSE stream against `path` with at-most-one
+// refresh + retry on 401 when a TokenSource is configured. The caller
+// is responsible for consuming the response body and reconnecting on
+// mid-stream disconnects.
+func (c *Client) openSSEStream(ctx context.Context, path string, lastSeq int) (*http.Response, error) {
+	openOnce := func(reason TokenRequestReason) (*http.Response, error) {
+		req, err := c.newRequest(ctx, "GET", path, nil, reason)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		if lastSeq > 0 {
+			req.Header.Set("Last-Event-ID", fmt.Sprintf("%d", lastSeq))
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, &NetworkError{Inner: &Error{Message: err.Error(), Code: "network"}, Cause: err}
+		}
+		return resp, nil
+	}
+	resp, err := openOnce(ReasonInitial)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized && c.tokenSource != nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return openOnce(ReasonUnauthorized)
+	}
+	return resp, nil
+}
+
+// resolveBearer returns the bearer credential for the next request.
+// Static APIKey / AccessToken clients reach into the cached value;
+// TokenSource clients delegate so the source can refresh expired access
+// tokens before we hit the wire. Pass ReasonUnauthorized immediately
+// after a 401 to force a refresh.
+func (c *Client) resolveBearer(ctx context.Context, reason TokenRequestReason) (string, error) {
+	if c.tokenSource != nil {
+		return c.tokenSource.Token(ctx, reason)
+	}
+	return c.apiKey, nil
+}
+
+func (c *Client) newRequest(ctx context.Context, method, path string, body any, reason TokenRequestReason) (*http.Request, error) {
 	url := c.baseURL + "/api/v1/workspaces/" + pathEscape(c.workspaceSlug) + path
 	var bodyReader io.Reader
 	if body != nil {
@@ -945,7 +1048,11 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	bearer, err := c.resolveBearer(ctx, reason)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -954,13 +1061,26 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
-	req, err := c.newRequest(ctx, method, path, body)
+	return c.doWithRetry(ctx, method, path, body, out, ReasonInitial)
+}
+
+// doWithRetry runs one HTTP attempt and, on 401 with a configured
+// TokenSource, refreshes and retries the request exactly once. Static-
+// credential clients fall straight through to *AuthError.
+func (c *Client) doWithRetry(ctx context.Context, method, path string, body any, out any, reason TokenRequestReason) error {
+	req, err := c.newRequest(ctx, method, path, body, reason)
 	if err != nil {
 		return err
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return &NetworkError{Inner: &Error{Message: err.Error(), Code: "network"}, Cause: err}
+	}
+	if resp.StatusCode == http.StatusUnauthorized && c.tokenSource != nil && reason == ReasonInitial {
+		// Drain + close so the connection can be reused.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return c.doWithRetry(ctx, method, path, body, out, ReasonUnauthorized)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -984,10 +1104,15 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 }
 
 func (c *Client) errorFromResponse(resp *http.Response) error {
+	// `Required` is the verbatim `required` field on `403 insufficient_scope`
+	// responses. The server returns either a single scope (string) or, on
+	// multi-scope routes, an array — we accept json.RawMessage so we can
+	// parse either shape downstream. See `docs/agent-runs-protocol.md` §2.3.
 	body := struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
-		Hint  string `json:"hint"`
+		Error    string          `json:"error"`
+		Code     string          `json:"code"`
+		Hint     string          `json:"hint"`
+		Required json.RawMessage `json:"required"`
 	}{}
 	raw, _ := io.ReadAll(resp.Body)
 	_ = json.Unmarshal(raw, &body)
@@ -999,10 +1124,69 @@ func (c *Client) errorFromResponse(resp *http.Response) error {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return &AuthError{Inner: base}
 	}
+	// `403 insufficient_scope` is the OAuth "missing scope" signal.
+	if resp.StatusCode == http.StatusForbidden &&
+		(body.Error == "insufficient_scope" || body.Code == "insufficient_scope") {
+		required := parseRequiredScopes(body.Required, resp.Header.Get("WWW-Authenticate"))
+		scopeMsg := msg
+		if scopeMsg == "" || scopeMsg == "insufficient_scope" {
+			if len(required) > 0 {
+				plural := ""
+				if len(required) > 1 {
+					plural = "s"
+				}
+				scopeMsg = fmt.Sprintf("Missing OAuth scope%s: %s", plural, strings.Join(required, ", "))
+			} else {
+				scopeMsg = "OAuth access token is missing a required scope"
+			}
+		}
+		base.Message = scopeMsg
+		base.Code = "insufficient_scope"
+		return &ScopeError{Inner: base, RequiredScopes: required}
+	}
 	if base.Code == "" {
 		base.Code = fmt.Sprintf("http_%d", resp.StatusCode)
 	}
 	return base
+}
+
+// parseRequiredScopes extracts the list of scopes the server reported
+// as required for a route, from either the response body's `required`
+// field (string or []string) or the `WWW-Authenticate: Bearer
+// error="insufficient_scope", scope="…"` header (RFC 6750).
+func parseRequiredScopes(raw json.RawMessage, wwwAuthenticate string) []string {
+	if len(raw) > 0 {
+		var arr []string
+		if err := json.Unmarshal(raw, &arr); err == nil {
+			out := arr[:0]
+			for _, s := range arr {
+				if s != "" {
+					out = append(out, s)
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+		var one string
+		if err := json.Unmarshal(raw, &one); err == nil && one != "" {
+			return []string{one}
+		}
+	}
+	if wwwAuthenticate != "" {
+		// Crude but spec-compliant: look for scope="..." inside the header.
+		const marker = `scope="`
+		if i := strings.Index(wwwAuthenticate, marker); i >= 0 {
+			rest := wwwAuthenticate[i+len(marker):]
+			if j := strings.IndexByte(rest, '"'); j >= 0 {
+				parts := strings.Fields(rest[:j])
+				if len(parts) > 0 {
+					return parts
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ----- helpers --------------------------------------------------------------

@@ -66,17 +66,124 @@ All SDK-facing endpoints sit under
 /api/v1/workspaces/{workspaceSlug}/...
 ```
 
-and are authenticated with a workspace API key with usage `developer_api`:
+and accept **either** of two bearer credentials interchangeably. The same
+header carries either, so SDKs only need one code path:
 
 ```
-Authorization: Bearer <api-key>
+Authorization: Bearer <credential>
 # or, equivalently:
-X-API-Key: <api-key>
+X-API-Key: <credential>
 ```
 
-The workspace slug in the URL must match the key's tenant. Mismatches return
-`404 not_found`. Missing/invalid keys return `401 unauthorized`. Rate limits
-follow the workspace's existing developer-API sliding-window policy.
+| Credential                | Token format    | Identifies               | Bound to                | Use when |
+| ------------------------- | --------------- | ------------------------ | ----------------------- | -------- |
+| **Workspace API key**     | `mantyx_…`      | The workspace            | One workspace, no end-user | Personal scripts, internal automations, anything the SDK caller owns end-to-end. |
+| **OAuth 2.0 access token**| `mantyx_at_…`   | An end user **and** the workspace they consented for | One workspace, one user (or one app for `client_credentials`) | "Sign in with MANTYX" apps, third-party integrations, anywhere consent + scopes matter. |
+
+The server resolves whichever it sees by token-prefix sniffing (see
+`packages/api/src/services/bearer-credential.ts`) — SDKs do **not** need
+separate code paths or env variables for the two flavours.
+
+The workspace slug in the URL must match the credential's tenant.
+Mismatches return `404 not_found` with a `hint` field pointing at the
+correct slug. Missing/invalid credentials return `401 unauthorized`.
+Rate limits follow the workspace's existing developer-API sliding-window
+policy and are tracked per-credential.
+
+### 2.1 Workspace API keys (machine credentials)
+
+A workspace admin issues an API key under **Settings → API keys** with
+**Usage = Developer API**. The key inherits two optional restrictions:
+
+- **Agent allowlist** (`ApiKey.agentIds`) — empty list = "every
+  non-system agent in the workspace"; otherwise only the listed agents
+  are visible to `spec.agentId` and ephemeral runs created from the key.
+- **Plan gate** — the workspace tier must include the `apiKeys` feature.
+
+API keys carry no granular scopes; possession of a Developer-API key is
+enough to call every route in this document.
+
+### 2.2 OAuth 2.0 access tokens
+
+OAuth tokens are a drop-in alternative for the same set of routes, with
+two differences:
+
+1. **Scopes are required.** Each route checks the token carries the
+   right scope via `requireScope(...)` and returns
+   `403 { "error": "insufficient_scope", "required": "runs:write" }`
+   (the value is a string for single-scope routes, an array for
+   multi-scope ones — see §2.3). The SDK is expected to surface this
+   verbatim. The agent-runs surface uses these scopes:
+
+   | Endpoint                                                     | Required scope |
+   | ------------------------------------------------------------ | -------------- |
+   | `GET    .../models`                                          | `models:read` |
+   | `POST   .../agent-runs`                                      | `runs:write` |
+   | `GET    .../agent-runs/{runId}`                              | `runs:read` |
+   | `GET    .../agent-runs/{runId}/stream`                       | `runs:read` |
+   | `POST   .../agent-runs/{runId}/cancel`                       | `runs:write` |
+   | `POST   .../agent-runs/{runId}/tool-results`                 | `runs:write` |
+   | `POST   .../agent-sessions`                                  | `sessions:write` |
+   | `GET    .../agent-sessions/{sessionId}`                      | `sessions:read` |
+   | `DELETE .../agent-sessions/{sessionId}`                      | `sessions:write` |
+   | `POST   .../agent-sessions/{sessionId}/messages`             | `sessions:write` |
+   | `GET    /api/oauth/userinfo`                                 | `mantyx.identity:read` |
+
+   For an SDK that exposes one-shot runs and sessions end-to-end, request
+   at minimum `models:read runs:read runs:write sessions:read sessions:write`,
+   and add `mantyx.identity:read` if the SDK calls
+   `/api/oauth/userinfo` to discover the workspace slug after sign-in.
+
+2. **Tokens are workspace-scoped.** An access token is minted for one
+   workspace (chosen by the user at consent time for public apps, or the
+   registering workspace for private apps). Calling
+   `/api/v1/workspaces/{otherSlug}/...` with such a token returns
+   `404 not_found` plus a `hint` with the correct slug.
+
+OAuth tokens **also** honor the per-token agent allow-list
+(`OAuthAccessToken.agentIds`) the user picked at consent time — see
+[`docs/oauth.md`](./oauth.md) for the full registration / authorization-code
++ PKCE flow. PKCE (`S256`) is mandatory and every MANTYX OAuth app is a
+confidential client, so the token endpoint requires both `client_secret`
+and `code_verifier`.
+
+**Token lifetimes.** Access tokens live **1 hour** (`expires_in: 3600`).
+Refresh tokens are **persistent and non-rotating**: they have no
+time-based expiry and `grant_type=refresh_token` returns the **same**
+refresh token the SDK already holds while minting a brand-new short-lived
+access token. Multiple processes may refresh concurrently using the same
+refresh token without invalidating each other. Refresh tokens stop
+working only when the application access is revoked (`/oauth/revoke`,
+`DELETE /api/oauth/grants/:id`, or app deletion).
+
+> **SDK guidance.** Persist the refresh token at first sign-in, treat it
+> as long-lived, and keep refreshing the access token off it on demand
+> (e.g. ~5 minutes before `expires_in` runs out, or lazily on the first
+> `401`). Do **not** rotate or replace the refresh token after each
+> refresh — the value is stable.
+
+A single SDK call site looks identical regardless of credential:
+
+```http
+POST /api/v1/workspaces/acme/agent-runs HTTP/1.1
+Authorization: Bearer mantyx_at_…   # OAuth access token
+# — or —
+Authorization: Bearer mantyx_…      # workspace API key
+Content-Type: application/json
+
+{ "modelId": "openai:gpt-5.5", "prompt": "...", "tools": [...] }
+```
+
+### 2.3 Error model for credentials
+
+| Status | Body shape                                                                            | When |
+| ------ | ------------------------------------------------------------------------------------- | ---- |
+| `401`  | `{ "error": "Unauthorized", "message": "API key or OAuth access token required..." }` | No `Authorization` / `X-API-Key` header. |
+| `401`  | `{ "error": "Invalid API key or OAuth access token" }`                                | Token doesn't match a row, expired, or revoked. |
+| `403`  | `{ "error": "This API key is not for the Developer API", "hint": "..." }`             | API key has wrong `usage`. |
+| `403`  | `{ "error": "Workspace API keys are not available on this plan.", "code": "api_keys_plan" }` <br> `{ "error": "OAuth applications are not available on this plan.", "code": "oauth_apps_plan" }` | Workspace tier lacks the `apiKeys` / `oauthApps` feature. |
+| `403`  | `{ "error": "insufficient_scope", "required": "runs:write" }` (or an array if a route needs multiple) | OAuth token is missing a scope a route demands. The response also sets `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. |
+| `404`  | `{ "error": "Workspace path does not match this credential", "hint": "..." }`         | URL slug ≠ token's workspace. |
 
 ## 3. Models
 
@@ -843,21 +950,8 @@ data: <utf-8 JSON>
 // Gemini `includeThoughts`, OpenAI `reasoning_content` on reasoning models).
 { "seq": 2, "type": "thinking_delta", "data": { "text": "First, I should…" } }
 
-// completed assistant message (text + optional tool calls about to execute).
-// `turn` is the 0-based tool-turn index this message closes.
-// `finishReason` is the canonical lowercase stop reason normalized across
-// providers (`"end_turn"`, `"tool_use"`, `"max_tokens"`, `"refusal"`,
-// `"malformed_function_call"`, …); `null` / omitted when the provider did
-// not report one. `toolCalls` is omitted when the model called no tools.
-{ "seq": 3, "type": "assistant_message",
-  "data": {
-    "text": "...",
-    "turn": 0,
-    "finishReason": "tool_use",
-    "toolCalls": [
-      { "id": "call_abc", "name": "search", "input": { /* JSON-Schema-matching args */ } }
-    ]
-  } }
+// completed assistant message (text + any tool calls about to execute)
+{ "seq": 3, "type": "assistant_message", "data": { "text": "...", "toolCalls": [...] } }
 
 // server-side tool call/result (informational; SDK does not act on these)
 { "seq": 4, "type": "tool_call",   "data": { "toolUseId": "...", "name": "...", "input": {...} } }
@@ -884,70 +978,18 @@ data: <utf-8 JSON>
 // is observability so SDK clients can render "memory budget exhausted" status notes.
 { "seq": 7, "type": "tool_budget_exceeded", "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 } }
 
-// terminal event — exactly one of `result`, `error`, or `cancelled` lands per run.
+// terminal event
 { "seq": 8, "type": "result",    "data": { "subtype": "success", "text": "Final reply" } }
 { "seq": 8, "type": "result",    "data": { "subtype": "error_local_tool_timeout", "error": "..." } }
-{ "seq": 8, "type": "error",     "data": {
-    "error":        "Model output was truncated (stop_reason=max_tokens). …",
-    "code":         "truncation",
-    "errorClass":   "truncation",
-    "finishReason": "max_tokens",
-    "partialText":  "{\n  \"answer\":… (truncated JSON) …",
-    "retryable":    false
-} }
 { "seq": 8, "type": "cancelled", "data": {} }
 ```
 
-A run terminates with exactly one of `result`, `error`, or `cancelled`. The
-connection is closed by the server immediately after sending the terminal
-event. Clients should not assume any particular ordering between the
-human-readable `event:` field and the parsed `type` inside `data` — they
-are always equal, but implementations should rely on `data.type` because
-some HTTP middleware strips the `event:` line.
-
-**`error` event payload fields.** The runner enriches the `error` event
-with structured triage attributes when the failure carried a salvage
-path (typically truncation, upstream deadline, or max-budget-with-text):
-
-| Field          | Type     | Required | Notes |
-| -------------- | -------- | -------- | ----- |
-| `error`        | string   | yes      | Human-readable message (also persisted on the run row's `error` column). |
-| `code`         | string   | yes      | Legacy alias for `errorClass`. Equals `errorClass` when present; otherwise a small lowercase token (`"error"`, `"invalid_spec"`, `"worker_error"`, …) the SDK can switch on. |
-| `errorClass`   | string   | no       | Canonical category. One of `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"` (input too big), `"truncation"` (output budget exhausted), `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, `"unknown"`. New categories may land additively. |
-| `finishReason` | string \| null | no | Canonical lowercase stop reason normalized across providers (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When present, mirrors the value on the last `assistant_message`. |
-| `partialText`  | string   | no       | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is likely **incomplete JSON** that will fail `JSON.parse` — see §4.5 / `docs/wire-protocol.md` §7. Also persisted on the run row's `finalText` column so the Calls UI can render it alongside a truncation banner. |
-| `retryable`    | boolean  | no       | Coarse retry hint inherited from the pipeline's error classifier. Informational; the SDK still owns the actual retry decision. |
-
-**Truncation contract.** When the model is mid-output and Gemini /
-Anthropic / OpenAI hit the output budget, MANTYX does **not** discard
-the bytes that already streamed. Instead:
-
-1. The last `assistant_message` for the turn carries the partial text
-   plus `finishReason: "max_tokens"`.
-2. The terminal SSE event is an `error` (not `result`) with
-   `errorClass: "truncation"` and `data.partialText` set to the same
-   bytes.
-3. The run row exposed by `GET /agent-runs/:runId` has
-   `{ status: "failed", finalText: "<partial text>",
-   error: "Model output was truncated …", failureReason: { errorClass:
-   "truncation", finishReason: "max_tokens" } }`.
-
-`partialText` is a **best-effort raw byte sequence** — for `outputSchema`
-runs it will almost always fail `JSON.parse` because the JSON object was
-not closed. SDKs should treat it as diagnostic data, never as a
-schema-conformant reply. Surfacing it (as a "truncated reply — JSON
-likely incomplete" status note) is the recommended pattern; silently
-falling back to it as the answer is not.
-
-**Run snapshot fields.** `GET /agent-runs/:runId` returns the run row
-with these triage-relevant columns:
-
-| Field           | Notes |
-| --------------- | ----- |
-| `status`        | `"queued" \| "running" \| "succeeded" \| "failed" \| "cancelled"`. |
-| `finalText`     | Final assistant text on success; same string as terminal `data.partialText` when `failureReason.errorClass === "truncation"`. Otherwise `null`. |
-| `error`         | Human-readable error message (matches terminal `error.data.error`). `null` on success / cancellation. |
-| `failureReason` | JSON object `{ errorClass, finishReason }` on `status === "failed"` runs that carried a salvage payload. Future-proof for additional triage fields. `null` otherwise. |
+A run terminates with exactly one of `result` or `cancelled`. The connection
+is closed by the server immediately after sending the terminal event. Clients
+should not assume any particular ordering between the human-readable `event:`
+field and the parsed `type` inside `data` — they are always equal, but
+implementations should rely on `data.type` because some HTTP middleware
+strips the `event:` line.
 
 ## 8. Local tool result
 
@@ -1002,32 +1044,6 @@ Common codes:
 | `unknown_tool_use`     | 404  | Tool-result for an unknown `toolUseId` |
 | `run_terminal`         | 409  | Tool-result after run finished |
 | `rate_limited`         | 429  | Per-API-key sliding window |
-
-**Run-level error categories.** When a run terminates via the SSE `error`
-event (§7), the payload carries an `errorClass` triage category in
-addition to the human-readable `error` message. SDKs typically expose
-this as a typed field on their run-error type (TS `MantyxRunError.errorClass`,
-Python `MantyxRunError.error_class`, Go `RunError.ErrorClass`). The
-canonical set:
-
-| `errorClass`        | Typical cause | Has `partialText`? |
-| ------------------- | ------------- | ------------------ |
-| `rate_limit`        | Provider rate-limited the request (HTTP 429-equivalent). | No |
-| `overloaded`        | Provider returned a transient "overloaded" / 5xx. | No |
-| `server`            | Generic upstream provider error. | No |
-| `context_window`    | Input exceeded the model's context window. | No |
-| `truncation`        | Output budget exhausted mid-reply (`finishReason: "max_tokens"`). | **Yes** |
-| `invalid_request`   | Provider rejected the spec / params. | No |
-| `auth`              | BYOK credentials invalid for this run. | No |
-| `timeout`           | Generic upstream timeout (provider-side). | No |
-| `local_timeout`     | SDK didn't POST a `tool-result` within `localToolTimeoutMs`. | No |
-| `upstream_deadline` | MANTYX worker deadline exceeded waiting on the provider. | Sometimes |
-| `unknown`           | Anything else — fallback so SDKs always have a category. | No |
-
-The category set is **additive over the wire**: new categories may
-appear without bumping the protocol version, so SDKs should default to
-`unknown` (or simply pass the raw string through to callers) for
-unrecognized values rather than crashing.
 
 ## 11. Suggested client architecture
 
@@ -1084,13 +1100,7 @@ A reference SDK should:
      the event to the caller (status banner, log line, telemetry). Do
      **not** abort the run on these events; the run continues through
      `result` / `error` / `cancelled` as usual.
-   - On terminal `result` with `subtype === "success"`, resolve the call
-     with the final `text`. On a terminal `error` event, raise a typed
-     run-error that carries the new triage attributes (`errorClass`,
-     `finishReason`, `partialText`, `retryable`) so callers can render
-     "truncated reply — JSON likely incomplete" banners and short-circuit
-     retry policies. Treat `partialText` as **diagnostic** data — never
-     auto-fall-back to it as the final answer.
+   - On terminal `result`, resolve the call. On `error` subtype, throw.
 4. Re-emit assistant deltas/events as a stream/iterator for callers who care
    about live output.
 5. Treat the protocol as the contract. Implementation details such as Valkey

@@ -19,13 +19,35 @@ func (e *Error) Error() string {
 }
 
 // AuthError is returned when the API rejects the request as unauthenticated
-// (HTTP 401).
+// (HTTP 401) — typically because the workspace API key or OAuth 2.0 access
+// token is missing, invalid, expired, or revoked.
 type AuthError struct {
 	Inner *Error
 }
 
 func (e *AuthError) Error() string { return e.Inner.Error() }
 func (e *AuthError) Unwrap() error { return e.Inner }
+
+// ScopeError is returned on `403 insufficient_scope`, which signals that
+// the OAuth 2.0 access token presented on the request is missing one of
+// the scopes the route demands (see `docs/agent-runs-protocol.md` §2.2
+// for the per-endpoint table).
+//
+// RequiredScopes carries the verbatim `required` value the server
+// returned — a single scope for most routes, multiple when the route
+// demands more than one. Surface this to the caller so they can drive a
+// re-consent flow (e.g. "please re-authorise the app with
+// `sessions:write` enabled").
+//
+// Workspace API keys never trip this error — they carry no granular
+// scopes. It is OAuth-only.
+type ScopeError struct {
+	Inner          *Error
+	RequiredScopes []string
+}
+
+func (e *ScopeError) Error() string { return e.Inner.Error() }
+func (e *ScopeError) Unwrap() error { return e.Inner }
 
 // NetworkError is returned when an HTTP request fails before reaching the
 // server (DNS, TCP, TLS, etc.) or the response body times out.
@@ -36,6 +58,28 @@ type NetworkError struct {
 
 func (e *NetworkError) Error() string { return e.Inner.Error() }
 func (e *NetworkError) Unwrap() error { return e.Cause }
+
+// OAuthError is returned on a non-2xx response from `POST /api/oauth/token`
+// or `POST /api/oauth/revoke`.
+//
+// OAuthErrorCode carries the RFC 6749 `error` discriminator
+// (`"invalid_grant"`, `"invalid_client"`, `"unsupported_grant_type"`, …)
+// so callers can branch on machine-readable values without parsing the
+// human message. OAuthErrorDescription is the optional `error_description`
+// field.
+//
+// `OAuthErrorCode == "invalid_grant"` on the refresh path specifically
+// signals that the refresh token has been revoked (or the OAuth grant /
+// application was deleted); the SDK never loops on this — callers must
+// route the user back to a fresh sign-in.
+type OAuthError struct {
+	Inner                 *Error
+	OAuthErrorCode        string
+	OAuthErrorDescription string
+}
+
+func (e *OAuthError) Error() string { return e.Inner.Error() }
+func (e *OAuthError) Unwrap() error { return e.Inner }
 
 // ToolError is returned when a local tool's `Execute` callback returns an
 // error.

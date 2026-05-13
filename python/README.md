@@ -8,7 +8,10 @@ The official Python SDK for the [MANTYX](https://mantyx.com) agent runtime. Defi
 - Tune the LLM's thinking budget per run with `reasoning_level` (`"off" | "low" | "medium" | "high"` or an int 0..100).
 - Sync **and** async clients (`MantyxClient`, `AsyncMantyxClient`), both backed by [`httpx`](https://www.python-httpx.org/).
 - One-shot runs and multi-turn sessions, both with persisted observability.
-- Authenticated with a single workspace API key.
+- Authenticated with a single bearer credential — either a workspace API
+  key (token prefix `mantyx_`) or a MANTYX OAuth 2.0 access token
+  (`mantyx_at_`). Both flow through the same `Authorization: Bearer …`
+  header and are interchangeable end-to-end.
 
 For background, see the [agent-runs protocol spec](./docs/agent-runs-protocol.md) (a copy ships with the package).
 
@@ -37,7 +40,12 @@ class ReadFileArgs(BaseModel):
 
 
 client = MantyxClient(
+    # Use *either* `api_key` (workspace API key, prefix `mantyx_`) or
+    # `access_token` (OAuth 2.0 access token, prefix `mantyx_at_`). The
+    # server resolves either by token-prefix; the SDK only ever ships
+    # one `Authorization: Bearer …` header.
     api_key=os.environ["MANTYX_API_KEY"],
+    # access_token=os.environ["MANTYX_ACCESS_TOKEN"],
     workspace_slug=os.environ["MANTYX_WORKSPACE_SLUG"],
     # base_url="https://app.mantyx.io",  # override for self-hosted
 )
@@ -251,7 +259,8 @@ class MantyxClient:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | None = None,
+        access_token: str | None = None,
         workspace_slug: str,
         base_url: str = "https://app.mantyx.io",
         timeout: float = 60.0,
@@ -508,12 +517,79 @@ for the full guide.
 
 All raised errors extend `MantyxError`. Common subclasses:
 
-- `MantyxAuthError` — 401/403 from the server (bad API key, wrong workspace).
+- `MantyxAuthError` — 401 from the server (bad / missing API key or
+  OAuth access token).
+- `MantyxScopeError` — 403 `insufficient_scope` from the server. The
+  OAuth access token is missing one of the scopes a route demands;
+  `err.required_scopes` lists them so callers can drive a re-consent
+  flow. API keys never trip this — it is OAuth-only.
+- `MantyxOAuthError` — non-2xx from the OAuth token / revoke endpoint.
+  Carries the RFC 6749 `oauth_error` (`"invalid_grant"`, …) and the
+  optional `oauth_error_description`. `invalid_grant` on refresh means
+  the refresh token was revoked — route the user back to first sign-in.
 - `MantyxNetworkError` — transport-layer failures.
 - `MantyxRunError` — the agent loop terminated with an error.
 - `MantyxToolError` — a local tool handler raised or timed out.
 - `MantyxParseError` — `parse_run_output` failed to JSON-decode the run's
   terminal text (or the user-supplied validator rejected it).
+
+### OAuth 2.0 refresh
+
+For long-running services, hand the client a `token_source` instead
+of a static `access_token` — the SDK refreshes proactively before
+expiry and again on 401, retrying the original request exactly once.
+Refresh tokens are **persistent and non-rotating** per
+[`docs/oauth.md`](./docs/oauth.md): the caller persists the
+`refresh_token` once at first sign-in (treat it as long-lived,
+encrypted at rest) and the SDK re-mints access tokens from it
+transparently.
+
+```python
+from mantyx import MantyxClient, MantyxOAuthClient
+
+oauth = MantyxOAuthClient(
+    client_id=os.environ["MANTYX_OAUTH_CLIENT_ID"],         # mantyx_oa_…
+    client_secret=os.environ["MANTYX_OAUTH_CLIENT_SECRET"], # mantyx_oas_…
+)
+
+# (1) Authorization-code: swap a `code` for the initial token pair, persist
+#     the refresh token against the user record. See docs/oauth.md for the
+#     full PKCE redirect dance the calling app is responsible for.
+initial = oauth.exchange_authorization_code(
+    code=auth_code,
+    redirect_uri="https://app.example.com/cb",
+    code_verifier=stored_verifier,
+)
+db.users.update(user_id, mantyx_refresh_token=initial.refresh_token)
+
+# (2) End-user clients: build a refresh-driven TokenSource from the
+#     persisted refresh token. The SDK calls it before every request and on
+#     401s; concurrent requests collapse onto one refresh.
+client = MantyxClient(
+    token_source=oauth.refresh_token_source(
+        refresh_token=initial.refresh_token,
+        initial_token=initial,
+    ),
+    workspace_slug="acme",
+)
+
+# (3) Service-to-service: client_credentials sources never hold a refresh
+#     token; they re-mint access tokens on demand.
+svc = MantyxClient(
+    token_source=oauth.client_credentials_token_source(scope=["agents:invoke"]),
+    workspace_slug="acme",
+)
+
+# (4) Manual override is still supported for short-lived access tokens
+#     the caller already manages.
+one_shot = MantyxClient(access_token="mantyx_at_…", workspace_slug="acme")
+```
+
+For the async client use `oauth.async_refresh_token_source(...)` /
+`oauth.async_client_credentials_token_source(...)` and pass the
+result to `AsyncMantyxClient(token_source=...)`. See
+[`docs/oauth.md`](./docs/oauth.md) for grant types, token formats,
+and revocation.
 
 ## Examples
 

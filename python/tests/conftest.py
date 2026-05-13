@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.parse
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -58,7 +59,30 @@ class MockServer:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.fail_auth = False
+        # When > 0, the next N API requests return 401; subsequent calls
+        # fall through to normal handling. Drives the SDK's refresh +
+        # retry-once on 401 path.
+        self.fail_auth_count = 0
+        # When set, all routes return 403 ``insufficient_scope`` with the
+        # configured ``required`` payload (single-element list serialises
+        # as a string; longer lists serialise as a JSON array — matches
+        # the server contract).
+        self.fail_scope: list[str] | None = None
         self.last_auth_header: str | None = None
+        self.auth_header_history: list[str] = []
+        # ── OAuth authorization server simulation ───────────────────────
+        self.oauth_access_token = "mantyx_at_mock_initial"
+        self.oauth_refresh_token = "mantyx_rt_mock_initial"
+        self.oauth_expires_in = 3600
+        self.oauth_scope = "models:read runs:write"
+        self.oauth_rotate_access_token = True
+        self.oauth_next_error: dict[str, Any] | None = None
+        self.oauth_token_call_count = 0
+        self.oauth_last_token_request: dict[str, str] | None = None
+        self.oauth_revoke_call_count = 0
+        self.oauth_last_revoke_request: dict[str, str] | None = None
+        # Optional artificial latency on /token, in seconds.
+        self.oauth_token_latency_s = 0.0
         self.last_run_create_body: dict[str, Any] | None = None
         self.last_session_create_body: dict[str, Any] | None = None
         self.last_session_message_body: dict[str, Any] | None = None
@@ -97,10 +121,20 @@ class MockServer:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         with self.lock:
-            self.last_auth_header = request.headers.get("authorization")
+            auth = request.headers.get("authorization")
+            self.last_auth_header = auth
+            if auth is not None:
+                self.auth_header_history.append(auth)
             fail_auth = self.fail_auth
         path = request.url.path
         method = request.method
+        # ── OAuth authorization server simulation ────────────────────
+        # Not gated by ``fail_auth`` / ``fail_scope`` — these endpoints
+        # use their own RFC 6749 error model (invalid_grant / invalid_client).
+        if path == "/api/oauth/token" and method == "POST":
+            return self._handle_oauth_token(request)
+        if path == "/api/oauth/revoke" and method == "POST":
+            return self._handle_oauth_revoke(request)
         # ── A2A peer simulation routes ─────────────────────────────────
         if path == "/a2a/agent-card.json" and method == "GET":
             return httpx.Response(200, json=self.a2a_agent_card)
@@ -136,7 +170,26 @@ class MockServer:
             )
 
         if fail_auth:
-            return httpx.Response(401, json={"error": "Invalid API key"})
+            return httpx.Response(401, json={"error": "Invalid API key or OAuth access token"})
+        with self.lock:
+            consume_fail = self.fail_auth_count > 0
+            if consume_fail:
+                self.fail_auth_count -= 1
+        if consume_fail:
+            return httpx.Response(401, json={"error": "Invalid API key or OAuth access token"})
+        with self.lock:
+            fail_scope = self.fail_scope
+        if fail_scope is not None:
+            required_payload: Any = fail_scope[0] if len(fail_scope) == 1 else list(fail_scope)
+            return httpx.Response(
+                403,
+                json={"error": "insufficient_scope", "required": required_payload},
+                headers={
+                    "WWW-Authenticate": (
+                        f'Bearer error="insufficient_scope", scope="{" ".join(fail_scope)}"'
+                    ),
+                },
+            )
         parts = [p for p in path.strip("/").split("/") if p]
         if len(parts) < 4 or parts[0] != "api" or parts[1] != "v1" or parts[2] != "workspaces":
             return httpx.Response(404, json={"error": "not_found"})
@@ -265,6 +318,58 @@ class MockServer:
             )
         return httpx.Response(404, json={"error": "not_found"})
 
+    # ----- OAuth -------------------------------------------------------
+
+    def _handle_oauth_token(self, request: httpx.Request) -> httpx.Response:
+        import time
+
+        with self.lock:
+            self.oauth_token_call_count += 1
+        form = _parse_form(request.content or b"")
+        with self.lock:
+            self.oauth_last_token_request = form
+            latency = self.oauth_token_latency_s
+            err = self.oauth_next_error
+            self.oauth_next_error = None
+            access = self.oauth_access_token
+            refresh = self.oauth_refresh_token
+            scope = self.oauth_scope
+            expires_in = self.oauth_expires_in
+            rotate = self.oauth_rotate_access_token
+            call_idx = self.oauth_token_call_count
+        if latency > 0:
+            time.sleep(latency)
+        if err:
+            payload: dict[str, Any] = {"error": err.get("error", "invalid_request")}
+            if "description" in err:
+                payload["error_description"] = err["description"]
+            return httpx.Response(int(err.get("status", 400)), json=payload)
+        grant = form.get("grant_type")
+        if grant not in ("authorization_code", "refresh_token", "client_credentials"):
+            return httpx.Response(400, json={"error": "unsupported_grant_type"})
+        access_token = f"{access}_v{call_idx}" if rotate else access
+        response: dict[str, Any] = {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": expires_in,
+            "scope": form.get("scope") or scope,
+        }
+        # ``refresh_token`` grants echo the same value the client sent
+        # (non-rotating per docs/oauth.md); ``client_credentials`` never
+        # issues one; ``authorization_code`` returns the persistent value.
+        if grant == "refresh_token":
+            response["refresh_token"] = form.get("refresh_token") or refresh
+        elif grant == "authorization_code":
+            response["refresh_token"] = refresh
+        return httpx.Response(200, json=response)
+
+    def _handle_oauth_revoke(self, request: httpx.Request) -> httpx.Response:
+        form = _parse_form(request.content or b"")
+        with self.lock:
+            self.oauth_revoke_call_count += 1
+            self.oauth_last_revoke_request = form
+        return httpx.Response(200, json={})
+
     # ----- run lifecycle ----------------------------------------------
 
     def _start_run(self, run_id: str, script: RunScript) -> None:
@@ -343,6 +448,10 @@ class _RunState:
             yield (f"id: {seq}\nevent: {evt_type}\ndata: {json.dumps(data)}\n\n".encode())
             if ev.kind in ("result", "error", "cancelled"):
                 return
+
+
+def _parse_form(raw: bytes) -> dict[str, str]:
+    return {k: v for k, v in urllib.parse.parse_qsl(raw.decode("utf-8"), keep_blank_values=True)}
 
 
 def _last_result_text(script: RunScript) -> str:

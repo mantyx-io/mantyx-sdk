@@ -10,7 +10,9 @@ All three SDKs raise a small typed hierarchy so you can `try` / `except` (or che
 | Error | When |
 | --- | --- |
 | `MantyxError` (base) | Any other SDK-raised condition |
-| `MantyxAuthError` | `401` / `403` from the server (bad API key, wrong workspace, agent not in allowlist) |
+| `MantyxAuthError` | `401` from the server — bad / missing API key or OAuth access token. When a `tokenSource` is configured the SDK refreshes and retries once before raising. |
+| `MantyxScopeError` | `403 insufficient_scope` — OAuth-only. The access token is missing one of the scopes a route demands; the `requiredScopes` / `required_scopes` / `RequiredScopes` field lists them so callers can drive a re-consent flow. API keys never trip this. |
+| `MantyxOAuthError` | Non-2xx from `/api/oauth/token` or `/api/oauth/revoke` — carries the RFC 6749 `oauth_error` (e.g. `invalid_grant`, `invalid_client`) plus an optional description. `invalid_grant` on refresh means the refresh token was revoked; the caller must re-drive sign-in. |
 | `MantyxNetworkError` | Transport-layer failures (DNS, TCP reset, timeout) |
 | `MantyxRunError` | The agent loop terminated with a non-success `result`, a terminal `error` event, or a `cancelled` |
 | `MantyxToolError` | A local tool handler threw or timed out |
@@ -113,13 +115,16 @@ if err != nil {
 
 | Code | HTTP | Notes |
 | --- | --- | --- |
-| `unauthorized` | 401 | Missing/invalid API key |
+| `unauthorized` | 401 | Missing / invalid / expired bearer credential |
 | `forbidden` | 403 | API key not authorized for this agent |
+| `insufficient_scope` | 403 | OAuth access token is missing one of the required scopes (surfaced as `MantyxScopeError` with the required scope list) |
 | `not_found` | 404 | Workspace, run, or session unknown |
 | `invalid_request` | 400 | Body failed validation |
 | `invalid_model` | 400 | `modelId` couldn't be resolved |
+| `invalid_grant` | 400 | OAuth refresh token or auth-code is unknown / revoked / consumed — sign in again |
+| `invalid_client` | 401 | OAuth `client_id` / `client_secret` is wrong or the app is disabled |
 | `unknown_tool_use` | 404 | Tool-result for an unknown `toolUseId` |
 | `run_terminal` | 409 | Tool-result after run finished |
-| `rate_limited` | 429 | Per-API-key sliding window |
+| `rate_limited` | 429 | Per-credential sliding window |
 
 The full list (and run-level `result.subtype` codes) lives in [Wire protocol](/docs/protocol/) §10.

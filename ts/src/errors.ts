@@ -30,9 +30,37 @@ export class MantyxNetworkError extends MantyxError {
 }
 
 export class MantyxAuthError extends MantyxError {
-  constructor(message = "Invalid or missing API key") {
+  constructor(message = "Invalid or missing API key / OAuth access token") {
     super(message, { code: "unauthorized", status: 401 });
     this.name = "MantyxAuthError";
+  }
+}
+
+/**
+ * Raised on `403 insufficient_scope`, returned when an OAuth access token
+ * is missing one of the scopes a route demands (see
+ * `docs/agent-runs-protocol.md` §2.2 for the per-endpoint table).
+ *
+ * `requiredScopes` carries the verbatim `required` value from the
+ * server's response — a single scope for most routes, an array when the
+ * route demands more than one. The SDK is expected to surface this so
+ * callers can drive a re-consent flow (e.g. "please re-authorise the
+ * app with `sessions:write` enabled").
+ *
+ * Workspace API keys never trip this error — they carry no granular
+ * scopes. It is OAuth-only.
+ */
+export class MantyxScopeError extends MantyxError {
+  /**
+   * Scope(s) the route demanded. Always at least one entry; usually
+   * exactly one. New routes may demand more scopes in the future.
+   */
+  readonly requiredScopes: readonly string[];
+
+  constructor(message: string, requiredScopes: readonly string[]) {
+    super(message, { code: "insufficient_scope", status: 403 });
+    this.name = "MantyxScopeError";
+    this.requiredScopes = [...requiredScopes];
   }
 }
 

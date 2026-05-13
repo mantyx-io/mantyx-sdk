@@ -32,8 +32,10 @@ from .client import (
     SessionInfo,
     _describe_handler,
     _parse_model_catalog,
+    _parse_required_scopes,
     _parse_session_info,
     _quote,
+    _resolve_credential,
     _serialize_agent_spec,
     _to_run_event,
 )
@@ -42,8 +44,10 @@ from .errors import (
     MantyxError,
     MantyxNetworkError,
     MantyxRunError,
+    MantyxScopeError,
     MantyxToolError,
 )
+from .oauth import AsyncTokenSource
 from .sse import aiter_sse
 from .tools import (
     LoopDetection,
@@ -77,17 +81,41 @@ class AsyncMantyxClient:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | None = None,
+        access_token: str | None = None,
+        token_source: AsyncTokenSource | None = None,
         workspace_slug: str,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT_S,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        if not api_key or not isinstance(api_key, str):
-            raise MantyxError("api_key is required")
+        """Construct the async client.
+
+        Pass exactly one of ``api_key`` (workspace API key, token
+        prefix ``mantyx_``), ``access_token`` (OAuth 2.0 access token,
+        token prefix ``mantyx_at_``), or ``token_source`` (dynamic
+        credential provider). For ``token_source``, build one with
+        :meth:`MantyxOAuthClient.async_refresh_token_source` /
+        :meth:`MantyxOAuthClient.async_client_credentials_token_source`,
+        or supply any awaitable callable matching the
+        :class:`AsyncTokenSource` protocol. See
+        :class:`mantyx.MantyxClient` for the full credential discussion.
+        """
+        credential, source = _resolve_credential(
+            api_key=api_key, access_token=access_token, token_source=token_source
+        )
         if not workspace_slug or not isinstance(workspace_slug, str):
             raise MantyxError("workspace_slug is required")
-        self.api_key = api_key
+        # Kept as ``api_key`` for backwards compatibility — older
+        # releases exposed it under this name on the client instance.
+        # Empty when a ``token_source`` is configured.
+        self.api_key = credential
+        # The async client accepts an ``AsyncTokenSource`` (returns an
+        # awaitable). The shared ``_resolve_credential`` helper is
+        # protocol-agnostic.
+        self.token_source: AsyncTokenSource | None = (
+            cast(AsyncTokenSource, source) if source is not None else None
+        )
         self.workspace_slug = workspace_slug
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -356,6 +384,12 @@ class AsyncMantyxClient:
         run_id: str,
         handlers: _LocalHandlers,
     ) -> AsyncIterator[RunEvent]:
+        """Open the SSE stream and yield typed events.
+
+        At-most-one refresh + retry on 401 for the initial open when a
+        ``token_source`` is configured. Mid-stream 401s drop into the
+        outer reconnect path as normal network blips.
+        """
         last_seq = 0
         background: list[asyncio.Task[Any]] = []
         try:
@@ -365,30 +399,38 @@ class AsyncMantyxClient:
                 params: dict[str, Any] = {}
                 if last_seq > 0:
                     params["lastSeq"] = last_seq
-                headers = self._auth_headers()
-                headers["Accept"] = "text/event-stream"
-                if last_seq > 0:
-                    headers["Last-Event-ID"] = str(last_seq)
                 try:
-                    async with self._http.stream(
-                        "GET", url, params=params, headers=headers, timeout=None
-                    ) as resp:
-                        if resp.status_code != 200:
-                            await self._raise_for_status(resp)
-                        async for sse_ev in aiter_sse(resp.aiter_bytes()):
-                            ev = _to_run_event(sse_ev, last_seq)
-                            if ev.seq > last_seq:
-                                last_seq = ev.seq
-                            yield ev
-                            if ev.type == "local_tool_call":
-                                background.append(
-                                    asyncio.create_task(
-                                        self._dispatch_local_tool(run_id, ev, handlers)
+                    for attempt_reason in ("initial", "unauthorized"):
+                        headers = await self._auth_headers(attempt_reason)
+                        headers["Accept"] = "text/event-stream"
+                        if last_seq > 0:
+                            headers["Last-Event-ID"] = str(last_seq)
+                        async with self._http.stream(
+                            "GET", url, params=params, headers=headers, timeout=None
+                        ) as resp:
+                            if (
+                                resp.status_code == 401
+                                and self.token_source is not None
+                                and attempt_reason == "initial"
+                            ):
+                                continue  # refresh + retry once
+                            if resp.status_code != 200:
+                                await self._raise_for_status(resp)
+                            async for sse_ev in aiter_sse(resp.aiter_bytes()):
+                                ev = _to_run_event(sse_ev, last_seq)
+                                if ev.seq > last_seq:
+                                    last_seq = ev.seq
+                                yield ev
+                                if ev.type == "local_tool_call":
+                                    background.append(
+                                        asyncio.create_task(
+                                            self._dispatch_local_tool(run_id, ev, handlers)
+                                        )
                                     )
-                                )
-                            if ev.type in ("result", "error", "cancelled"):
-                                terminal_seen = True
-                                break
+                                if ev.type in ("result", "error", "cancelled"):
+                                    terminal_seen = True
+                                    break
+                            break  # successful open path
                 except httpx.HTTPError:
                     if terminal_seen:
                         return
@@ -500,8 +542,19 @@ class AsyncMantyxClient:
     def _absolute_url(self, path: str) -> str:
         return f"{self.base_url}/api/v1/workspaces/{_quote(self.workspace_slug)}{path}"
 
-    def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}"}
+    async def _resolve_bearer(self, reason: str = "initial") -> str:
+        """Resolve the bearer credential for the next request.
+
+        Static credentials reach into ``self.api_key`` synchronously;
+        async ``token_source`` clients await the source so it can
+        refresh expired access tokens before we hit the wire.
+        """
+        if self.token_source is not None:
+            return await self.token_source(reason)  # type: ignore[arg-type]
+        return self.api_key
+
+    async def _auth_headers(self, reason: str = "initial") -> dict[str, str]:
+        return {"Authorization": f"Bearer {await self._resolve_bearer(reason)}"}
 
     async def _request(
         self,
@@ -509,8 +562,17 @@ class AsyncMantyxClient:
         path: str,
         body: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        return await self._request_with_retry(method, path, body, reason="initial")
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None,
+        reason: str,
+    ) -> dict[str, Any] | None:
         url = self._absolute_url(path)
-        headers = self._auth_headers()
+        headers = await self._auth_headers(reason)
         headers["Accept"] = "application/json"
         request_kwargs: dict[str, Any] = {"method": method, "url": url, "headers": headers}
         if body is not None:
@@ -520,6 +582,8 @@ class AsyncMantyxClient:
             resp = await self._http.request(**request_kwargs)
         except httpx.HTTPError as exc:
             raise MantyxNetworkError(str(exc), cause=exc) from exc
+        if resp.status_code == 401 and self.token_source is not None and reason == "initial":
+            return await self._request_with_retry(method, path, body, reason="unauthorized")
         if resp.status_code >= 400:
             await self._raise_for_status(resp)
         text = resp.text
@@ -545,6 +609,19 @@ class AsyncMantyxClient:
         hint = hint_raw if isinstance(hint_raw, str) else None
         if resp.status_code == 401:
             raise MantyxAuthError(message)
+        if resp.status_code == 403 and (
+            body.get("error") == "insufficient_scope" or body.get("code") == "insufficient_scope"
+        ):
+            required = _parse_required_scopes(
+                body.get("required"),
+                resp.headers.get("WWW-Authenticate"),
+            )
+            scope_msg = (
+                f"Missing OAuth scope{'s' if len(required) > 1 else ''}: {', '.join(required)}"
+                if required
+                else "OAuth access token is missing a required scope"
+            )
+            raise MantyxScopeError(scope_msg, required_scopes=required)
         raise MantyxError(message, code=code, status=resp.status_code, hint=hint)
 
 

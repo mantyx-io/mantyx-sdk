@@ -92,6 +92,7 @@ export default defineConfig({
           items: [
             { label: "Agent-runs protocol", link: "/docs/protocol/" },
             { label: "Wire protocol — messaging", link: "/docs/wire-protocol/" },
+            { label: "OAuth 2.0", link: "/docs/oauth/" },
           ],
         },
         {

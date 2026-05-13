@@ -80,8 +80,60 @@ export class MockServer {
   scriptForNextSessionRun: MockRunScript | null = null;
   /** When true, all routes return 401. */
   failAuth = false;
+  /**
+   * When > 0, the next N API requests return 401; subsequent calls
+   * fall through to normal handling. Used to exercise the SDK's
+   * "refresh + retry once on 401" flow without making every request
+   * a permanent 401.
+   */
+  failAuthCount = 0;
+  /**
+   * When set, all routes return 403 `insufficient_scope` with the
+   * configured `required` payload. Single-element arrays serialise as a
+   * string (matches the server contract); longer arrays serialise as an
+   * array. Tests use this to drive `MantyxScopeError` paths end-to-end.
+   */
+  failScope: { required: string[] } | null = null;
   /** Auth header captured on the most recent request. */
   lastAuthHeader: string | null = null;
+  /** Auth headers across all requests, in arrival order. */
+  authHeaderHistory: string[] = [];
+
+  // ── OAuth authorization server simulation ───────────────────────────
+  /**
+   * Configuration for the mock `POST /api/oauth/token` endpoint.
+   * Subsequent test interactions can mutate these between calls.
+   */
+  oauth = {
+    /** Access token returned by the next /token call. */
+    accessToken: "mantyx_at_mock_initial",
+    /** Refresh token echoed by /token (persistent, non-rotating). */
+    refreshToken: "mantyx_rt_mock_initial",
+    /** `expires_in` to ship in the response. */
+    expiresIn: 3600,
+    /** `scope` to ship in the response. */
+    scope: "models:read runs:write",
+    /**
+     * When set, the next /token call returns this error and increments
+     * `tokenCallCount` as usual. Cleared after the call.
+     */
+    nextError: null as { error: string; description?: string; status?: number } | null,
+    /** How many distinct access tokens to mint (rolls forward each call). */
+    rotateAccessToken: true,
+    /** Number of /token requests served. */
+    tokenCallCount: 0,
+    /** Last form body received on /token. */
+    lastTokenRequest: null as Record<string, string> | null,
+    /** Number of /revoke requests served. */
+    revokeCallCount: 0,
+    /** Last form body received on /revoke. */
+    lastRevokeRequest: null as Record<string, string> | null,
+    /**
+     * Optional artificial latency on /token (ms). Lets tests verify
+     * single-flight refresh by ensuring concurrent observers race.
+     */
+    tokenLatencyMs: 0,
+  };
   /** Latest body posted to /tool-results endpoints. */
   lastToolResult: { runId: string; payload: Record<string, unknown> } | null = null;
   /** Latest body posted to POST /agent-runs (one-shot create). */
@@ -154,13 +206,48 @@ export class MockServer {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     this.lastAuthHeader = (req.headers.authorization ?? null) as string | null;
+    if (typeof this.lastAuthHeader === "string") {
+      this.authHeaderHistory.push(this.lastAuthHeader);
+    }
+    const url = new URL(req.url ?? "/", this.baseUrl());
+
+    // ── OAuth authorization server simulation ─────────────────────────
+    // These endpoints are *not* gated by `failAuth` / `failScope`; they
+    // use their own RFC 6749 error model (invalid_grant / invalid_client).
+    if (url.pathname === "/api/oauth/token" && req.method === "POST") {
+      return this.handleOAuthToken(req, res);
+    }
+    if (url.pathname === "/api/oauth/revoke" && req.method === "POST") {
+      return this.handleOAuthRevoke(req, res);
+    }
+
     if (this.failAuth) {
       res.statusCode = 401;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "Invalid API key" }));
+      res.end(JSON.stringify({ error: "Invalid API key or OAuth access token" }));
       return;
     }
-    const url = new URL(req.url ?? "/", this.baseUrl());
+    if (this.failAuthCount > 0) {
+      this.failAuthCount -= 1;
+      res.statusCode = 401;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "Invalid API key or OAuth access token" }));
+      return;
+    }
+    if (this.failScope) {
+      res.statusCode = 403;
+      res.setHeader("Content-Type", "application/json");
+      const required = this.failScope.required;
+      // Match the server's serialisation: string for single-scope routes,
+      // array for multi-scope ones.
+      const requiredPayload = required.length === 1 ? required[0]! : required;
+      res.setHeader(
+        "WWW-Authenticate",
+        `Bearer error="insufficient_scope", scope="${required.join(" ")}"`,
+      );
+      res.end(JSON.stringify({ error: "insufficient_scope", required: requiredPayload }));
+      return;
+    }
     const parts = url.pathname.split("/").filter(Boolean);
 
     // ── A2A peer simulation routes ──────────────────────────────────────
@@ -218,6 +305,63 @@ export class MockServer {
     }
     res.statusCode = 404;
     res.end(JSON.stringify({ error: "Not found" }));
+  }
+
+  private async handleOAuthToken(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    this.oauth.tokenCallCount += 1;
+    const form = await readForm(req);
+    this.oauth.lastTokenRequest = form;
+    if (this.oauth.tokenLatencyMs > 0) {
+      await new Promise<void>((r) => setTimeout(r, this.oauth.tokenLatencyMs));
+    }
+    if (this.oauth.nextError) {
+      const err = this.oauth.nextError;
+      this.oauth.nextError = null;
+      res.statusCode = err.status ?? 400;
+      res.setHeader("Content-Type", "application/json");
+      const payload: Record<string, string> = { error: err.error };
+      if (err.description) payload.error_description = err.description;
+      res.end(JSON.stringify(payload));
+      return;
+    }
+    const grant = form.grant_type;
+    if (grant !== "authorization_code" && grant !== "refresh_token" && grant !== "client_credentials") {
+      res.statusCode = 400;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "unsupported_grant_type" }));
+      return;
+    }
+    let accessToken: string;
+    if (this.oauth.rotateAccessToken) {
+      accessToken = `${this.oauth.accessToken}_v${this.oauth.tokenCallCount}`;
+    } else {
+      accessToken = this.oauth.accessToken;
+    }
+    const response: Record<string, unknown> = {
+      access_token: accessToken,
+      token_type: "Bearer",
+      expires_in: this.oauth.expiresIn,
+      scope: form.scope ?? this.oauth.scope,
+    };
+    // refresh_token grant echoes the same value the client just sent
+    // (non-rotating per docs/oauth.md). client_credentials never
+    // returns one. authorization_code returns the persistent value.
+    if (grant === "refresh_token") {
+      response.refresh_token = form.refresh_token ?? this.oauth.refreshToken;
+    } else if (grant === "authorization_code") {
+      response.refresh_token = this.oauth.refreshToken;
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(response));
+  }
+
+  private async handleOAuthRevoke(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    this.oauth.revokeCallCount += 1;
+    this.oauth.lastRevokeRequest = await readForm(req);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end("{}");
   }
 
   private async handleAgentRuns(
@@ -464,6 +608,22 @@ export class MockServer {
       }
     });
   }
+}
+
+function readForm(req: IncomingMessage): Promise<Record<string, string>> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c as Buffer));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      const out: Record<string, string> = {};
+      for (const [k, v] of new URLSearchParams(raw)) {
+        out[k] = v;
+      }
+      resolve(out);
+    });
+    req.on("error", reject);
+  });
 }
 
 function readJson(req: IncomingMessage): Promise<unknown> {
