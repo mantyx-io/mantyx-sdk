@@ -61,8 +61,6 @@ from .oauth import (
     OAuthToken,
     TokenRequestReason,
     TokenSource,
-    generate_pkce_verifier,
-    pkce_challenge,
 )
 from .tools import (
     LocalA2ATool,
@@ -139,7 +137,6 @@ __all__ = [
     "define_local_a2a",
     "define_local_mcp",
     "define_local_tool",
-    "generate_pkce_verifier",
     "is_local_a2a_tool",
     "is_local_mcp_server",
     "is_local_tool",
@@ -148,5 +145,4 @@ __all__ = [
     "mantyx_plugin_tool",
     "mantyx_tool",
     "parse_run_output",
-    "pkce_challenge",
 ]

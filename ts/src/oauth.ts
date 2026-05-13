@@ -1,28 +1,27 @@
 /**
- * MANTYX OAuth 2.0 client: authorization-code exchange, refresh-token
- * minting, client-credentials grant, and token revocation, plus typed
- * {@link TokenSource}s that {@link MantyxClient} can consume to refresh
- * access tokens transparently before they expire (and again on 401).
+ * MANTYX OAuth 2.0 refresh client: trade a stored refresh token for
+ * short-lived access tokens, revoke tokens at sign-out, and expose
+ * a {@link TokenSource} the {@link MantyxClient} HTTP layer calls
+ * before every request (and again on 401).
  *
- * The wire contract this implements is `docs/oauth.md` in the SDK monorepo:
+ * The library is intentionally **refresh-only**. It assumes the caller
+ * already obtained the refresh token through their own sign-in flow
+ * (Authorization Code + PKCE in a browser, native redirect, server-
+ * side exchange — whatever fits the host application). The SDK does
+ * not drive consent, does not initiate auth-code exchanges, and does
+ * not bundle PKCE helpers.
  *
- * - Token endpoint: `POST <baseUrl>/api/oauth/token`, form-encoded.
+ * Wire contract (`docs/oauth.md`):
+ *
+ * - Token endpoint: `POST <baseUrl>/api/oauth/token`, form-encoded,
+ *   `grant_type=refresh_token`. Echoes back the same `refresh_token`
+ *   the client sent (refresh tokens are persistent and non-rotating).
  * - Revoke endpoint: `POST <baseUrl>/api/oauth/revoke`, form-encoded.
  * - Access tokens (`mantyx_at_…`) live 1 hour (`expires_in: 3600`).
- * - Refresh tokens (`mantyx_rt_…`) are **persistent and non-rotating**:
- *   `grant_type=refresh_token` echoes back the same value the client
- *   sent. The caller persists the refresh token once at first sign-in
- *   (encrypted at rest) and the SDK re-mints access tokens from it on
- *   demand.
- *
- * See also `docs/oauth.md` for the authorization-code + PKCE consent
- * flow (which the SDK does **not** drive — the calling app owns the
- * redirect dance; once it has the auth code, `exchangeAuthorizationCode`
- * swaps it for the initial `{access_token, refresh_token}` pair).
+ * - Refresh tokens (`mantyx_rt_…`) are long-lived; the caller persists
+ *   them once at first sign-in (encrypted at rest) and the SDK re-mints
+ *   access tokens from the same value on demand.
  */
-
-import { Buffer } from "node:buffer";
-import { createHash, randomBytes } from "node:crypto";
 
 import { MantyxError, MantyxNetworkError } from "./errors.js";
 
@@ -64,12 +63,12 @@ export class MantyxOAuthError extends MantyxError {
 
 /**
  * Decoded `POST /api/oauth/token` response, augmented with an absolute
- * `expiresAt` timestamp the SDK can use to decide when to refresh.
+ * `expiresAt` timestamp the SDK uses to decide when to refresh.
  *
- * `refreshToken` is present on the initial `authorization_code` exchange
- * and on subsequent `refresh_token` calls (where it is identical to the
- * value the client just sent — refresh tokens never rotate). The
- * `client_credentials` grant never returns one.
+ * On the refresh grant the response's `refreshToken` is identical to
+ * the value the client just sent (refresh tokens never rotate). The
+ * field is surfaced for symmetry with whatever the calling app's
+ * sign-in flow already does.
  */
 export interface OAuthToken {
   readonly accessToken: string;
@@ -120,12 +119,6 @@ export interface MantyxOAuthClientOptions {
   timeoutMs?: number;
 }
 
-export interface ExchangeAuthorizationCodeOptions {
-  code: string;
-  redirectUri: string;
-  codeVerifier: string;
-}
-
 export interface RefreshOptions {
   refreshToken: string;
   /**
@@ -134,10 +127,6 @@ export interface RefreshOptions {
    * an SDK consumer wants a short-scope access token for a specific
    * sub-operation.
    */
-  scope?: string | readonly string[];
-}
-
-export interface ClientCredentialsOptions {
   scope?: string | readonly string[];
 }
 
@@ -156,23 +145,25 @@ export interface RefreshTokenSourceOptions {
   refreshSkewMs?: number;
   /**
    * Optional initial access token + expiry to seed the source's cache
-   * with (e.g. the token already in hand from the authorization-code
-   * exchange). When omitted, the source mints one on the first call.
+   * with (e.g. the token already in hand from the host application's
+   * sign-in flow). When omitted, the source mints one on the first
+   * call.
    */
   initialToken?: OAuthToken;
 }
 
-export interface ClientCredentialsTokenSourceOptions {
-  scope?: string | readonly string[];
-  refreshSkewMs?: number;
-}
-
 /**
- * Wraps the MANTYX OAuth 2.0 authorization-server endpoints. App-scoped
- * (one per `{clientId, clientSecret}` pair); construct independently of
- * {@link MantyxClient}, then either call its grant helpers directly or
- * hand a `TokenSource` it produces to `MantyxClient` for fully
- * transparent refresh.
+ * Refresh-only wrapper around the MANTYX OAuth 2.0 authorization-server
+ * endpoints. App-scoped (one per `{clientId, clientSecret}` pair);
+ * construct independently of {@link MantyxClient}, then either call
+ * {@link refresh} / {@link revoke} directly or hand a `TokenSource`
+ * produced by {@link refreshTokenSource} to `MantyxClient` for fully
+ * transparent refresh on every request.
+ *
+ * The client deliberately does **not** drive the authorization-code
+ * exchange or any other "initiate sign-in" grant. The caller is
+ * expected to obtain the refresh token through their own consent flow
+ * and persist it before constructing this client.
  */
 export class MantyxOAuthClient {
   readonly clientId: string;
@@ -202,26 +193,10 @@ export class MantyxOAuthClient {
   }
 
   /**
-   * Swap an authorization-code + PKCE verifier for the initial
-   * `{access_token, refresh_token}` pair. Call this exactly once per
-   * sign-in after the browser/native redirect lands back on your
-   * `redirectUri` with a `code` parameter. Persist the returned
-   * `refreshToken` against the user record — it is long-lived and
-   * non-rotating per `docs/oauth.md` §"Token lifetimes & lifecycle".
-   */
-  async exchangeAuthorizationCode(opts: ExchangeAuthorizationCodeOptions): Promise<OAuthToken> {
-    return this.token({
-      grant_type: "authorization_code",
-      code: opts.code,
-      redirect_uri: opts.redirectUri,
-      code_verifier: opts.codeVerifier,
-    });
-  }
-
-  /**
    * Mint a fresh access token from a stored refresh token. The
-   * returned `refreshToken` is identical to the input — the field is
-   * surfaced for symmetry with {@link exchangeAuthorizationCode} only.
+   * returned `refreshToken` is identical to the input — refresh
+   * tokens are persistent and non-rotating, so the field is
+   * surfaced only for symmetry with the response shape.
    *
    * On `400 invalid_grant` the refresh token has been revoked (or its
    * grant / app was deleted); the SDK surfaces a
@@ -234,22 +209,6 @@ export class MantyxOAuthClient {
     const body: Record<string, string> = {
       grant_type: "refresh_token",
       refresh_token: opts.refreshToken,
-    };
-    const scope = normalizeScope(opts.scope);
-    if (scope !== undefined) body.scope = scope;
-    return this.token(body);
-  }
-
-  /**
-   * Request a workspace-scoped access token without a user via the
-   * `client_credentials` grant. Available only on private OAuth apps
-   * that were registered with `allowsClientCredentials: true`. No
-   * refresh token is issued; re-call this method whenever a new
-   * access token is needed.
-   */
-  async clientCredentials(opts: ClientCredentialsOptions = {}): Promise<OAuthToken> {
-    const body: Record<string, string> = {
-      grant_type: "client_credentials",
     };
     const scope = normalizeScope(opts.scope);
     if (scope !== undefined) body.scope = scope;
@@ -278,6 +237,10 @@ export class MantyxOAuthClient {
    * source caches the access token in-memory and refreshes
    * proactively when the cached value is within `refreshSkewMs` of
    * `expiresAt`, or eagerly when `MantyxClient` reports a 401.
+   *
+   * Pass `initialToken` if the calling app already has a non-expired
+   * access token in hand (e.g. straight out of the sign-in flow) to
+   * avoid an extra round-trip on the first request.
    */
   refreshTokenSource(opts: RefreshTokenSourceOptions): TokenSource {
     if (!opts.refreshToken) {
@@ -288,21 +251,6 @@ export class MantyxOAuthClient {
     const refreshToken = opts.refreshToken;
     return makeTokenSource(cache, skew, async () => {
       return this.refresh({ refreshToken, scope: opts.scope });
-    });
-  }
-
-  /**
-   * Build a long-lived {@link TokenSource} backed by the
-   * `client_credentials` grant. On every refresh the source re-mints
-   * a workspace-scoped access token by calling the token endpoint
-   * with `grant_type=client_credentials`. Available only on private
-   * apps with `allowsClientCredentials: true`.
-   */
-  clientCredentialsTokenSource(opts: ClientCredentialsTokenSourceOptions = {}): TokenSource {
-    const skew = opts.refreshSkewMs ?? DEFAULT_REFRESH_SKEW_MS;
-    const cache: TokenCache = { token: undefined, inflight: null };
-    return makeTokenSource(cache, skew, async () => {
-      return this.clientCredentials({ scope: opts.scope });
     });
   }
 
@@ -390,46 +338,6 @@ export class MantyxOAuthClient {
   }
 }
 
-// -------------------------------------------------------------- PKCE helpers
-
-/**
- * Generate a high-entropy PKCE `code_verifier` (RFC 7636 §4.1). The
- * verifier is the raw secret you keep across the redirect; the
- * `code_challenge` you send on `/api/oauth/authorize` is derived from
- * it via {@link pkceChallenge}.
- *
- * Default length is 64 characters (≈ 384 bits of entropy after
- * base64url-encoding the 32 random bytes). Pass `length` to clamp to
- * the RFC's 43..128 inclusive range.
- */
-export function generatePkceVerifier(length = 64): string {
-  if (length < 43 || length > 128) {
-    throw new MantyxError("PKCE code_verifier length must be in [43, 128]");
-  }
-  // 32 random bytes -> 43 base64url chars; we then slice / pad up to the
-  // requested length using the unreserved RFC 7636 alphabet.
-  const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-  const bytes = randomBytes(length);
-  let out = "";
-  for (let i = 0; i < length; i++) {
-    out += ALPHABET[bytes[i]! % ALPHABET.length];
-  }
-  return out;
-}
-
-/**
- * Compute the PKCE `S256` `code_challenge` for a given verifier:
- * `base64url(sha256(verifier))` with no padding (RFC 7636 §4.2).
- */
-export function pkceChallenge(verifier: string): string {
-  const hash = createHash("sha256").update(verifier, "utf8").digest();
-  return Buffer.from(hash)
-    .toString("base64")
-    .replace(/=+$/, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-}
-
 // -------------------------------------------------------------- internals
 
 interface TokenCache {
@@ -459,11 +367,10 @@ function makeTokenSource(
     }
     if (cache.inflight) {
       const t = await cache.inflight;
-      // If the inflight refresh was triggered by a benign cache miss
-      // and we observed an unauthorized hint after it started, retry
-      // once with a forced mint so the caller never gets a stale token.
       if (reason === "unauthorized" && t === cache.token) {
-        // fallthrough to fresh mint below
+        // If the inflight refresh was triggered by a benign cache miss
+        // and we observed an unauthorized hint after it started, fall
+        // through and mint again so the caller never gets a stale token.
       } else {
         return t.accessToken;
       }

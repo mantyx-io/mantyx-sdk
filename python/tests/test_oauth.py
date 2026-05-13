@@ -1,4 +1,4 @@
-"""Tests for the OAuth client + token-source plumbing.
+"""Tests for the OAuth refresh client + token-source plumbing.
 
 Mirrors ``ts/test/oauth.test.ts`` across both sync and async clients.
 """
@@ -6,7 +6,6 @@ Mirrors ``ts/test/oauth.test.ts`` across both sync and async clients.
 from __future__ import annotations
 
 import asyncio
-import re
 
 import httpx
 import pytest
@@ -19,31 +18,9 @@ from mantyx import (
     MantyxOAuthClient,
     MantyxOAuthError,
     MantyxScopeError,
-    generate_pkce_verifier,
-    pkce_challenge,
 )
 
 from .conftest import MockServer
-
-# ---------------------------------------------------------------------- PKCE
-
-
-class TestPkceHelpers:
-    def test_verifier_within_rfc_length_range(self) -> None:
-        v = generate_pkce_verifier()
-        assert 43 <= len(v) <= 128
-        assert re.fullmatch(r"[A-Za-z0-9\-._~]+", v)
-
-    def test_pkce_challenge_matches_rfc_test_vector(self) -> None:
-        verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        assert pkce_challenge(verifier) == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
-
-    def test_rejects_out_of_range_length(self) -> None:
-        with pytest.raises(MantyxError):
-            generate_pkce_verifier(10)
-        with pytest.raises(MantyxError):
-            generate_pkce_verifier(200)
-
 
 # --------------------------------------------------------------- helpers
 
@@ -73,43 +50,6 @@ def _async_oauth_client(server: MockServer) -> MantyxOAuthClient:
     )
 
 
-# ---------------------------------------------------------------- exchange
-
-
-class TestExchangeAuthorizationCode:
-    def test_posts_form_body_and_returns_typed_token(self, mock_server: MockServer) -> None:
-        oauth = _oauth_client(mock_server)
-        token = oauth.exchange_authorization_code(
-            code="auth_code_123",
-            redirect_uri="https://app.example.com/cb",
-            code_verifier="verifier_value",
-        )
-        assert token.access_token.startswith("mantyx_at_mock_initial_v")
-        assert token.refresh_token == "mantyx_rt_mock_initial"
-        assert token.token_type == "Bearer"
-        assert token.expires_in == 3600
-        assert token.expires_at > 0
-        body = mock_server.oauth_last_token_request
-        assert body is not None
-        assert body["grant_type"] == "authorization_code"
-        assert body["code"] == "auth_code_123"
-        assert body["redirect_uri"] == "https://app.example.com/cb"
-        assert body["code_verifier"] == "verifier_value"
-        assert body["client_id"] == "mantyx_oa_test"
-        assert body["client_secret"] == "mantyx_oas_secret"
-
-    def test_invalid_grant_raises_oauth_error(self, mock_server: MockServer) -> None:
-        oauth = _oauth_client(mock_server)
-        mock_server.oauth_next_error = {"error": "invalid_grant", "description": "code expired"}
-        with pytest.raises(MantyxOAuthError) as exc_info:
-            oauth.exchange_authorization_code(
-                code="bad", redirect_uri="https://app.example.com/cb", code_verifier="v"
-            )
-        assert exc_info.value.oauth_error == "invalid_grant"
-        assert exc_info.value.oauth_error_description == "code expired"
-        assert exc_info.value.status == 400
-
-
 # ---------------------------------------------------------------- refresh
 
 
@@ -124,6 +64,7 @@ class TestRefresh:
         assert body["grant_type"] == "refresh_token"
         assert body["refresh_token"] == "mantyx_rt_alice"
         assert body["client_id"] == "mantyx_oa_test"
+        assert body["client_secret"] == "mantyx_oas_secret"
 
     def test_never_drifts_off_original_refresh_token(self, mock_server: MockServer) -> None:
         oauth = _oauth_client(mock_server)
@@ -143,26 +84,12 @@ class TestRefresh:
 
     def test_invalid_grant_surfaces_oauth_error(self, mock_server: MockServer) -> None:
         oauth = _oauth_client(mock_server)
-        mock_server.oauth_next_error = {"error": "invalid_grant"}
+        mock_server.oauth_next_error = {"error": "invalid_grant", "description": "refresh revoked"}
         with pytest.raises(MantyxOAuthError) as exc_info:
             oauth.refresh(refresh_token="mantyx_rt_revoked")
         assert exc_info.value.oauth_error == "invalid_grant"
-
-
-# ------------------------------------------------------- client_credentials
-
-
-class TestClientCredentials:
-    def test_posts_grant_type_and_returns_token_without_refresh(
-        self, mock_server: MockServer
-    ) -> None:
-        oauth = _oauth_client(mock_server)
-        token = oauth.client_credentials(scope="agents:invoke")
-        assert token.access_token.startswith("mantyx_at_mock_initial")
-        assert token.refresh_token is None
-        body = mock_server.oauth_last_token_request or {}
-        assert body.get("grant_type") == "client_credentials"
-        assert body.get("scope") == "agents:invoke"
+        assert exc_info.value.oauth_error_description == "refresh revoked"
+        assert exc_info.value.status == 400
 
 
 # --------------------------------------------------------------------- revoke
@@ -202,7 +129,6 @@ class TestRefreshTokenSourceSync:
         client.list_models()
         client.list_models()
         assert mock_server.oauth_token_call_count == 1
-        # Same bearer reused across requests.
         api_bearers = [h for h in mock_server.auth_header_history if "_mock_initial_v" in h]
         assert len(api_bearers) == 2
         assert api_bearers[0] == api_bearers[1]
@@ -239,7 +165,6 @@ class TestRefreshTokenSourceSync:
         mock_server.fail_scope = ["runs:write"]
         with pytest.raises(MantyxScopeError):
             client.list_models()
-        # Initial mint only — no extra refresh after the scope failure.
         assert mock_server.oauth_token_call_count == 1
         client.close()
 
@@ -271,9 +196,7 @@ class TestRefreshTokenSourceSync:
 
     def test_initial_token_seeds_cache(self, mock_server: MockServer) -> None:
         oauth = _oauth_client(mock_server)
-        seed = oauth.exchange_authorization_code(
-            code="auth_code", redirect_uri="https://app.example.com/cb", code_verifier="v"
-        )
+        seed = oauth.refresh(refresh_token="mantyx_rt_alice")
         baseline = mock_server.oauth_token_call_count
         assert seed.refresh_token is not None
         client = _client_with_source(
@@ -368,7 +291,6 @@ class TestRefreshTokenSourceAsync:
         await asyncio.sleep(0)
         gate.set()
         await asyncio.gather(*tasks)
-        # Exactly one mint was issued despite 8 concurrent callers.
         assert call_count == 1
         assert mock_server.oauth_token_call_count == 1
         await client.aclose()

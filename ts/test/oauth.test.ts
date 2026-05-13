@@ -3,91 +3,9 @@ import {
   MantyxAuthError,
   MantyxClient,
   MantyxOAuthClient,
-  MantyxOAuthError,
   MantyxScopeError,
-  generatePkceVerifier,
-  pkceChallenge,
 } from "../src/index.js";
 import { MockServer } from "./helpers/mock-server.js";
-
-describe("PKCE helpers", () => {
-  it("generates verifiers in the RFC 7636 length range", () => {
-    const v = generatePkceVerifier();
-    expect(v.length).toBeGreaterThanOrEqual(43);
-    expect(v.length).toBeLessThanOrEqual(128);
-    // unreserved alphabet
-    expect(v).toMatch(/^[A-Za-z0-9\-._~]+$/);
-  });
-
-  it("computes a deterministic S256 challenge (RFC 7636 §4.2 test vector)", () => {
-    // Test vector from RFC 7636 Appendix B.
-    const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-    expect(pkceChallenge(verifier)).toBe("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
-  });
-
-  it("rejects verifier lengths outside [43, 128]", () => {
-    expect(() => generatePkceVerifier(10)).toThrow();
-    expect(() => generatePkceVerifier(200)).toThrow();
-  });
-});
-
-describe("MantyxOAuthClient.exchangeAuthorizationCode", () => {
-  let server: MockServer;
-  beforeEach(async () => {
-    server = new MockServer();
-    await server.start();
-  });
-  afterEach(async () => {
-    await server.stop();
-  });
-
-  it("posts the form-encoded body and returns a typed OAuthToken", async () => {
-    const oauth = new MantyxOAuthClient({
-      clientId: "mantyx_oa_test",
-      clientSecret: "mantyx_oas_secret",
-      baseUrl: server.baseUrl(),
-    });
-    const token = await oauth.exchangeAuthorizationCode({
-      code: "auth_code_123",
-      redirectUri: "https://app.example.com/cb",
-      codeVerifier: "verifier_value",
-    });
-    expect(token.accessToken).toMatch(/^mantyx_at_mock_initial_v\d+$/);
-    expect(token.refreshToken).toBe("mantyx_rt_mock_initial");
-    expect(token.tokenType).toBe("Bearer");
-    expect(token.expiresIn).toBe(3600);
-    expect(token.expiresAt).toBeGreaterThan(Date.now());
-    expect(server.oauth.lastTokenRequest).toMatchObject({
-      grant_type: "authorization_code",
-      code: "auth_code_123",
-      redirect_uri: "https://app.example.com/cb",
-      code_verifier: "verifier_value",
-      client_id: "mantyx_oa_test",
-      client_secret: "mantyx_oas_secret",
-    });
-  });
-
-  it("raises MantyxOAuthError on invalid_grant", async () => {
-    const oauth = new MantyxOAuthClient({
-      clientId: "mantyx_oa_test",
-      clientSecret: "mantyx_oas_secret",
-      baseUrl: server.baseUrl(),
-    });
-    server.oauth.nextError = { error: "invalid_grant", description: "code expired" };
-    await expect(
-      oauth.exchangeAuthorizationCode({
-        code: "bad",
-        redirectUri: "https://app.example.com/cb",
-        codeVerifier: "v",
-      }),
-    ).rejects.toMatchObject({
-      name: "MantyxOAuthError",
-      oauthError: "invalid_grant",
-      oauthErrorDescription: "code expired",
-      status: 400,
-    });
-  });
-});
 
 describe("MantyxOAuthClient.refresh", () => {
   let server: MockServer;
@@ -113,6 +31,7 @@ describe("MantyxOAuthClient.refresh", () => {
       grant_type: "refresh_token",
       refresh_token: "mantyx_rt_alice",
       client_id: "mantyx_oa_test",
+      client_secret: "mantyx_oas_secret",
     });
   });
 
@@ -134,36 +53,12 @@ describe("MantyxOAuthClient.refresh", () => {
   });
 
   it("surfaces invalid_grant when the refresh token has been revoked", async () => {
-    server.oauth.nextError = { error: "invalid_grant" };
+    server.oauth.nextError = { error: "invalid_grant", description: "refresh revoked" };
     await expect(oauth.refresh({ refreshToken: "mantyx_rt_revoked" })).rejects.toMatchObject({
       name: "MantyxOAuthError",
       oauthError: "invalid_grant",
-    });
-  });
-});
-
-describe("MantyxOAuthClient.clientCredentials", () => {
-  let server: MockServer;
-  beforeEach(async () => {
-    server = new MockServer();
-    await server.start();
-  });
-  afterEach(async () => {
-    await server.stop();
-  });
-
-  it("posts grant_type=client_credentials and returns a token (no refresh)", async () => {
-    const oauth = new MantyxOAuthClient({
-      clientId: "mantyx_oa_test",
-      clientSecret: "mantyx_oas_secret",
-      baseUrl: server.baseUrl(),
-    });
-    const token = await oauth.clientCredentials({ scope: "agents:invoke" });
-    expect(token.accessToken).toMatch(/^mantyx_at_mock_initial/);
-    expect(token.refreshToken).toBeUndefined();
-    expect(server.oauth.lastTokenRequest).toMatchObject({
-      grant_type: "client_credentials",
-      scope: "agents:invoke",
+      oauthErrorDescription: "refresh revoked",
+      status: 400,
     });
   });
 });
@@ -250,11 +145,8 @@ describe("MantyxClient + refreshTokenSource", () => {
     server.failAuthCount = 1;
     const catalog = await client.listModels();
     expect(catalog.defaultModelId).toBe("platform:demo");
-    // 1 initial bad call + 1 retry = 2 API hits, with 2 token mints (one
-    // for the initial unprimed source and one forced by `unauthorized`).
     expect(server.authHeaderHistory.length).toBe(2);
     expect(server.oauth.tokenCallCount).toBe(2);
-    // Two distinct bearers used.
     expect(server.authHeaderHistory[0]).not.toBe(server.authHeaderHistory[1]);
   });
 
@@ -267,7 +159,6 @@ describe("MantyxClient + refreshTokenSource", () => {
     });
     server.failScope = { required: ["runs:write"] };
     await expect(client.listModels()).rejects.toBeInstanceOf(MantyxScopeError);
-    // Initial /token mint, no extra mints from the scope failure.
     expect(server.oauth.tokenCallCount).toBe(1);
   });
 
@@ -299,11 +190,7 @@ describe("MantyxClient + refreshTokenSource", () => {
   });
 
   it("seeds the cache with `initialToken` and skips the first /token call", async () => {
-    const seed = await oauth.exchangeAuthorizationCode({
-      code: "auth_code",
-      redirectUri: "https://app.example.com/cb",
-      codeVerifier: "v",
-    });
+    const seed = await oauth.refresh({ refreshToken: "mantyx_rt_alice" });
     const tokenCallsAfterSeed = server.oauth.tokenCallCount;
     const tokenSource = oauth.refreshTokenSource({
       refreshToken: seed.refreshToken!,

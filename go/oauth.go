@@ -1,10 +1,30 @@
+// MANTYX OAuth 2.0 refresh client: trade a stored refresh token for
+// short-lived access tokens, revoke tokens at sign-out, and expose a
+// TokenSource the Client HTTP layer calls before every request (and
+// again on 401).
+//
+// The library is intentionally refresh-only. It assumes the caller
+// already obtained the refresh token through their own sign-in flow
+// (Authorization Code + PKCE in a browser, native redirect, server-
+// side exchange — whatever fits the host application). The SDK does
+// not drive consent, does not initiate auth-code exchanges, and does
+// not bundle PKCE helpers.
+//
+// Wire contract (`docs/oauth.md`):
+//
+//   - Token endpoint: `POST <base>/api/oauth/token`, form-encoded,
+//     `grant_type=refresh_token`. Echoes back the same `refresh_token`
+//     the client sent (refresh tokens are persistent and non-rotating).
+//   - Revoke endpoint: `POST <base>/api/oauth/revoke`, form-encoded.
+//   - Access tokens (`mantyx_at_…`) live 1 hour.
+//   - Refresh tokens (`mantyx_rt_…`) are long-lived; the caller persists
+//     them once at first sign-in (encrypted at rest) and the SDK
+//     re-mints access tokens from the same value on demand.
+
 package mantyx
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,10 +46,10 @@ const DefaultRefreshSkew = 60 * time.Second
 // Token is the decoded `POST /api/oauth/token` response, augmented with an
 // absolute ExpiresAt timestamp the SDK uses to decide when to refresh.
 //
-// RefreshToken is populated on the initial `authorization_code` exchange
-// and on subsequent `refresh_token` calls (where it is identical to the
-// value the client just sent — refresh tokens never rotate per
-// `docs/oauth.md`). The `client_credentials` grant never returns one.
+// On the `refresh_token` grant RefreshToken is identical to the value the
+// client just sent — refresh tokens are persistent and non-rotating per
+// `docs/oauth.md`. The field is surfaced for symmetry with whatever
+// the calling app's sign-in flow already does.
 type Token struct {
 	AccessToken  string
 	RefreshToken string
@@ -78,12 +98,18 @@ type OAuthClientOptions struct {
 	HTTPClient *http.Client
 }
 
-// OAuthClient wraps the MANTYX OAuth 2.0 authorization-server endpoints
-// (`POST /api/oauth/token` and `POST /api/oauth/revoke`). It is
-// app-scoped (one per ClientID/ClientSecret pair); construct independently
-// of Client, then either call its grant helpers directly or hand a
-// TokenSource it produces to NewClient via Options.TokenSource for fully
-// transparent refresh.
+// OAuthClient is a refresh-only wrapper around the MANTYX OAuth 2.0
+// authorization-server endpoints (`POST /api/oauth/token` and
+// `POST /api/oauth/revoke`). It is app-scoped (one per
+// ClientID/ClientSecret pair); construct independently of Client,
+// then either call its grant helpers directly or hand a TokenSource
+// produced by RefreshTokenSource to NewClient via Options.TokenSource
+// for fully transparent refresh on every request.
+//
+// The client deliberately does not drive the authorization-code
+// exchange or any other "initiate sign-in" grant. The caller is
+// expected to obtain the refresh token through their own consent
+// flow and persist it before constructing this client.
 type OAuthClient struct {
 	ClientID     string
 	clientSecret string
@@ -113,30 +139,6 @@ func NewOAuthClient(opts OAuthClientOptions) *OAuthClient {
 	}
 }
 
-// ExchangeAuthorizationCodeOptions are the arguments for
-// (*OAuthClient).ExchangeAuthorizationCode.
-type ExchangeAuthorizationCodeOptions struct {
-	Code         string
-	RedirectURI  string
-	CodeVerifier string
-}
-
-// ExchangeAuthorizationCode swaps an authorization code + PKCE verifier
-// for the initial {AccessToken, RefreshToken} pair.
-//
-// Call this exactly once per sign-in after the browser/native redirect
-// lands back on your RedirectURI with a `code` parameter. Persist the
-// returned RefreshToken — it is long-lived and non-rotating per
-// `docs/oauth.md` §"Token lifetimes & lifecycle".
-func (c *OAuthClient) ExchangeAuthorizationCode(ctx context.Context, opts ExchangeAuthorizationCodeOptions) (*Token, error) {
-	return c.token(ctx, url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {opts.Code},
-		"redirect_uri":  {opts.RedirectURI},
-		"code_verifier": {opts.CodeVerifier},
-	})
-}
-
 // RefreshOptions are the arguments for (*OAuthClient).Refresh.
 type RefreshOptions struct {
 	RefreshToken string
@@ -148,10 +150,11 @@ type RefreshOptions struct {
 
 // Refresh mints a fresh access token from a stored refresh token.
 //
-// The returned RefreshToken is identical to the input — the field is
-// surfaced for symmetry with ExchangeAuthorizationCode only. On
-// `400 invalid_grant` the refresh token has been revoked (or its grant
-// / app was deleted); the returned *OAuthError carries
+// The returned RefreshToken is identical to the input — refresh
+// tokens are persistent and non-rotating, so the field is surfaced
+// only for symmetry with the response shape. On `400 invalid_grant`
+// the refresh token has been revoked (or its grant / app was
+// deleted); the returned *OAuthError carries
 // OAuthErrorCode == "invalid_grant" and callers must drive a fresh
 // sign-in.
 func (c *OAuthClient) Refresh(ctx context.Context, opts RefreshOptions) (*Token, error) {
@@ -161,28 +164,6 @@ func (c *OAuthClient) Refresh(ctx context.Context, opts RefreshOptions) (*Token,
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {opts.RefreshToken},
-	}
-	if scope := strings.TrimSpace(strings.Join(opts.Scope, " ")); scope != "" {
-		form.Set("scope", scope)
-	}
-	return c.token(ctx, form)
-}
-
-// ClientCredentialsOptions are the arguments for
-// (*OAuthClient).ClientCredentials.
-type ClientCredentialsOptions struct {
-	Scope []string
-}
-
-// ClientCredentials requests a workspace-scoped access token without a
-// user via the `client_credentials` grant.
-//
-// Available only on private OAuth apps registered with
-// `allowsClientCredentials: true`. No refresh token is issued; re-call
-// this method whenever a new access token is needed.
-func (c *OAuthClient) ClientCredentials(ctx context.Context, opts ClientCredentialsOptions) (*Token, error) {
-	form := url.Values{
-		"grant_type": {"client_credentials"},
 	}
 	if scope := strings.TrimSpace(strings.Join(opts.Scope, " ")); scope != "" {
 		form.Set("scope", scope)
@@ -217,7 +198,9 @@ type RefreshTokenSourceOptions struct {
 	// refreshes. Defaults to DefaultRefreshSkew (60s).
 	RefreshSkew time.Duration
 	// InitialToken optionally seeds the source's cache with the access
-	// token already in hand (e.g. from the authorization-code exchange).
+	// token already in hand (e.g. straight out of the host
+	// application's sign-in flow) to avoid an extra round-trip on the
+	// first request.
 	InitialToken *Token
 }
 
@@ -241,30 +224,6 @@ func (c *OAuthClient) RefreshTokenSource(opts RefreshTokenSourceOptions) TokenSo
 	scope := opts.Scope
 	src.mint = func(ctx context.Context) (*Token, error) {
 		return c.Refresh(ctx, RefreshOptions{RefreshToken: refreshToken, Scope: scope})
-	}
-	return src
-}
-
-// ClientCredentialsTokenSourceOptions configures a
-// ClientCredentialsTokenSource.
-type ClientCredentialsTokenSourceOptions struct {
-	Scope       []string
-	RefreshSkew time.Duration
-}
-
-// ClientCredentialsTokenSource builds a TokenSource backed by the
-// `client_credentials` grant. On every refresh the source re-mints a
-// workspace-scoped access token. Available only on private apps with
-// `allowsClientCredentials: true`.
-func (c *OAuthClient) ClientCredentialsTokenSource(opts ClientCredentialsTokenSourceOptions) TokenSource {
-	skew := opts.RefreshSkew
-	if skew <= 0 {
-		skew = DefaultRefreshSkew
-	}
-	src := &cachingTokenSource{skew: skew}
-	scope := opts.Scope
-	src.mint = func(ctx context.Context) (*Token, error) {
-		return c.ClientCredentials(ctx, ClientCredentialsOptions{Scope: scope})
 	}
 	return src
 }
@@ -363,7 +322,7 @@ func (c *OAuthClient) formPost(ctx context.Context, path string, body url.Values
 }
 
 // cachingTokenSource is the in-memory single-flight implementation
-// behind RefreshTokenSource / ClientCredentialsTokenSource.
+// behind RefreshTokenSource.
 //
 // A single goroutine wins the mu lock and mints; concurrent callers
 // observe inflight != nil and wait on the same channel so only one
@@ -424,39 +383,4 @@ func (s *cachingTokenSource) Token(ctx context.Context, reason TokenRequestReaso
 
 func isExpiring(t *Token, skew time.Duration) bool {
 	return time.Until(t.ExpiresAt) <= skew
-}
-
-// ----- PKCE helpers ---------------------------------------------------------
-
-// pkceAlphabet is the unreserved character set for RFC 7636
-// `code_verifier`s.
-const pkceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-
-// GeneratePKCEVerifier returns a high-entropy PKCE `code_verifier`
-// (RFC 7636 §4.1). The verifier is the raw secret you keep across the
-// redirect; the `code_challenge` you send on `/api/oauth/authorize`
-// is derived from it via PKCEChallenge.
-//
-// Length must satisfy 43 <= length <= 128 per the RFC.
-func GeneratePKCEVerifier(length int) (string, error) {
-	if length < 43 || length > 128 {
-		return "", &Error{Message: "PKCE code_verifier length must be in [43, 128]", Code: "invalid_request"}
-	}
-	b := make([]byte, length)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	out := make([]byte, length)
-	for i, v := range b {
-		out[i] = pkceAlphabet[int(v)%len(pkceAlphabet)]
-	}
-	return string(out), nil
-}
-
-// PKCEChallenge returns the S256 `code_challenge` for the supplied
-// verifier: `base64url(sha256(verifier))` without padding (RFC 7636
-// §4.2).
-func PKCEChallenge(verifier string) string {
-	digest := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(digest[:])
 }

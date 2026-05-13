@@ -117,20 +117,15 @@ export {
   MantyxOAuthError,
   DEFAULT_OAUTH_BASE_URL,
   DEFAULT_REFRESH_SKEW_MS,
-  generatePkceVerifier,
-  pkceChallenge,
 } from "./oauth.js";
 export type {
   OAuthToken,
   TokenSource,
   TokenRequestReason,
   MantyxOAuthClientOptions,
-  ExchangeAuthorizationCodeOptions,
   RefreshOptions,
-  ClientCredentialsOptions,
   RevokeOptions,
   RefreshTokenSourceOptions,
-  ClientCredentialsTokenSourceOptions,
 } from "./oauth.js";
 
 export { zodToJsonSchema, toToolParametersWire } from "./zod-to-json-schema.js";

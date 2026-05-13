@@ -27,7 +27,6 @@ const sdkDirs = ["go", "python", "ts"];
 const docs = [
   { name: "agent-runs-protocol.md" },
   { name: "wire-protocol.md" },
-  { name: "oauth.md" },
 ];
 
 function canonicalPath(doc) {

@@ -555,58 +555,64 @@ All thrown errors extend `MantyxError`. Common subclasses:
 
 ### OAuth 2.0 refresh
 
-For long-running services, hand the SDK a `TokenSource` instead of a
-static `accessToken` — the client refreshes proactively before
-expiry and again on 401, retrying the original request exactly once.
-Refresh tokens are **persistent and non-rotating** per
-[`docs/oauth.md`](./docs/oauth.md): the caller persists the
-`refreshToken` once at first sign-in (treat it as long-lived,
-encrypted at rest) and the SDK re-mints access tokens from it
-transparently.
+The SDK ships a **refresh-only** OAuth client. It assumes the calling
+app already obtained a refresh token through its own sign-in flow
+(browser PKCE redirect, native auth, server-side exchange — whatever
+fits the host). The library does not drive consent and does not
+initiate authorization-code or client-credentials grants. Once you
+have the refresh token, hand it to the SDK and the rest is
+transparent:
+
+- Refresh tokens are **persistent and non-rotating** per
+  [`docs/oauth.md`](./docs/oauth.md): store them once at first
+  sign-in (treat them as long-lived, encrypted at rest) and the SDK
+  re-mints access tokens from the same value on demand.
+- A `TokenSource` is called before every request and again on `401`,
+  with single-flight collapse on concurrent refreshes.
+- `400 invalid_grant` from the token endpoint is surfaced as
+  `MantyxOAuthError` — that means the refresh has been revoked and
+  the caller has to drive a fresh sign-in.
 
 ```ts
 import { MantyxClient, MantyxOAuthClient } from "@mantyx/sdk";
 
 const oauth = new MantyxOAuthClient({
-  clientId: process.env.MANTYX_OAUTH_CLIENT_ID!,        // mantyx_oa_…
+  clientId: process.env.MANTYX_OAUTH_CLIENT_ID!,         // mantyx_oa_…
   clientSecret: process.env.MANTYX_OAUTH_CLIENT_SECRET!, // mantyx_oas_…
 });
 
-// (1) Authorization-code: swap a `code` for the initial token pair, persist
-//     the refresh token against the user record. See docs/oauth.md for the
-//     full PKCE redirect dance the calling app is responsible for.
-const initial = await oauth.exchangeAuthorizationCode({
-  code: authCode,
-  redirectUri: "https://app.example.com/cb",
-  codeVerifier: storedVerifier,
-});
-await db.users.update(userId, { mantyxRefreshToken: initial.refreshToken });
-
-// (2) End-user clients: build a refresh-driven TokenSource from the
-//     persisted refresh token. The SDK calls it before every request and on
-//     401s; concurrent requests collapse onto one refresh.
+// (1) Hand the SDK a stored refresh token — it caches the access token in
+//     memory, refreshes proactively before expiry, and retries the original
+//     request once on a 401.
 const client = new MantyxClient({
   tokenSource: oauth.refreshTokenSource({
-    refreshToken: initial.refreshToken!,
-    initialToken: initial,
+    refreshToken: storedRefreshToken,                    // mantyx_rt_…
   }),
   workspaceSlug: "acme",
 });
 
-// (3) Service-to-service: client_credentials sources never hold a refresh
-//     token; they re-mint access tokens on demand.
-const svcClient = new MantyxClient({
-  tokenSource: oauth.clientCredentialsTokenSource({ scope: ["agents:invoke"] }),
+// (2) If the calling app already has a non-expired access token in hand
+//     (e.g. straight out of its sign-in flow), pass it as `initialToken` to
+//     skip the first /token round-trip.
+const seeded = new MantyxClient({
+  tokenSource: oauth.refreshTokenSource({
+    refreshToken: storedRefreshToken,
+    initialToken: tokenFromSignIn,
+  }),
   workspaceSlug: "acme",
 });
 
-// (4) Manual override is still supported for short-lived access tokens that
-//     the caller already manages.
+// (3) Manual override for short-lived access tokens the caller manages
+//     itself — no refresh, no retry, no OAuth client needed.
 const oneShot = new MantyxClient({ accessToken: "mantyx_at_…", workspaceSlug: "acme" });
+
+// Optional: revoke a refresh token at sign-out — this kills the refresh and
+// every live access token tied to its grant.
+await oauth.revoke({ token: storedRefreshToken });
 ```
 
 See [`docs/oauth.md`](./docs/oauth.md) for grant types, token formats,
-and revocation.
+scope catalog, and revocation semantics.
 
 ## Examples
 

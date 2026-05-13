@@ -535,14 +535,23 @@ All raised errors extend `MantyxError`. Common subclasses:
 
 ### OAuth 2.0 refresh
 
-For long-running services, hand the client a `token_source` instead
-of a static `access_token` — the SDK refreshes proactively before
-expiry and again on 401, retrying the original request exactly once.
-Refresh tokens are **persistent and non-rotating** per
-[`docs/oauth.md`](./docs/oauth.md): the caller persists the
-`refresh_token` once at first sign-in (treat it as long-lived,
-encrypted at rest) and the SDK re-mints access tokens from it
-transparently.
+The SDK ships a **refresh-only** OAuth client. It assumes the calling
+app already obtained a refresh token through its own sign-in flow
+(browser PKCE redirect, native auth, server-side exchange — whatever
+fits the host). The library does not drive consent and does not
+initiate authorization-code or client-credentials grants. Once you
+have the refresh token, hand it to the SDK and the rest is
+transparent:
+
+- Refresh tokens are **persistent and non-rotating** per
+  [`docs/oauth.md`](./docs/oauth.md): store them once at first
+  sign-in (treat them as long-lived, encrypted at rest) and the SDK
+  re-mints access tokens from the same value on demand.
+- A `TokenSource` is called before every request and again on `401`,
+  with single-flight collapse on concurrent refreshes.
+- `400 invalid_grant` from the token endpoint surfaces as
+  `MantyxOAuthError` — that means the refresh has been revoked and
+  the caller has to drive a fresh sign-in.
 
 ```python
 from mantyx import MantyxClient, MantyxOAuthClient
@@ -552,44 +561,40 @@ oauth = MantyxOAuthClient(
     client_secret=os.environ["MANTYX_OAUTH_CLIENT_SECRET"], # mantyx_oas_…
 )
 
-# (1) Authorization-code: swap a `code` for the initial token pair, persist
-#     the refresh token against the user record. See docs/oauth.md for the
-#     full PKCE redirect dance the calling app is responsible for.
-initial = oauth.exchange_authorization_code(
-    code=auth_code,
-    redirect_uri="https://app.example.com/cb",
-    code_verifier=stored_verifier,
-)
-db.users.update(user_id, mantyx_refresh_token=initial.refresh_token)
-
-# (2) End-user clients: build a refresh-driven TokenSource from the
-#     persisted refresh token. The SDK calls it before every request and on
-#     401s; concurrent requests collapse onto one refresh.
+# (1) Hand the SDK a stored refresh token — it caches the access token in
+#     memory, refreshes proactively before expiry, and retries the original
+#     request once on a 401.
 client = MantyxClient(
     token_source=oauth.refresh_token_source(
-        refresh_token=initial.refresh_token,
-        initial_token=initial,
+        refresh_token=stored_refresh_token,                  # mantyx_rt_…
     ),
     workspace_slug="acme",
 )
 
-# (3) Service-to-service: client_credentials sources never hold a refresh
-#     token; they re-mint access tokens on demand.
-svc = MantyxClient(
-    token_source=oauth.client_credentials_token_source(scope=["agents:invoke"]),
+# (2) If the calling app already has a non-expired access token in hand
+#     (e.g. straight out of its sign-in flow), pass it as `initial_token` to
+#     skip the first /token round-trip.
+seeded = MantyxClient(
+    token_source=oauth.refresh_token_source(
+        refresh_token=stored_refresh_token,
+        initial_token=token_from_sign_in,
+    ),
     workspace_slug="acme",
 )
 
-# (4) Manual override is still supported for short-lived access tokens
-#     the caller already manages.
+# (3) Manual override for short-lived access tokens the caller manages
+#     itself — no refresh, no retry, no OAuth client needed.
 one_shot = MantyxClient(access_token="mantyx_at_…", workspace_slug="acme")
+
+# Optional: revoke a refresh token at sign-out — this kills the refresh and
+# every live access token tied to its grant.
+oauth.revoke(token=stored_refresh_token)
 ```
 
-For the async client use `oauth.async_refresh_token_source(...)` /
-`oauth.async_client_credentials_token_source(...)` and pass the
-result to `AsyncMantyxClient(token_source=...)`. See
-[`docs/oauth.md`](./docs/oauth.md) for grant types, token formats,
-and revocation.
+For the async client use `oauth.async_refresh_token_source(...)`
+(and `await oauth.arefresh(...)` / `await oauth.arevoke(...)` for
+ad-hoc calls). See [`docs/oauth.md`](./docs/oauth.md) for grant
+types, token formats, scope catalog, and revocation semantics.
 
 ## Examples
 

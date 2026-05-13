@@ -46,37 +46,48 @@ use `X-API-Key: <key>` if you call the HTTP API directly).
 ## OAuth 2.0 access token
 
 For apps that other people sign in to (multi-tenant SaaS, end-user
-clients, service-to-service inside a customer's account), register an
-OAuth application in the MANTYX dashboard and run the
-Authorization Code + PKCE flow (or `client_credentials` for private
-machine-to-machine apps).
+clients, server-to-server backends), register an OAuth application in
+the MANTYX dashboard and run the consent flow yourself —
+Authorization Code + PKCE for browser/native apps,
+`client_credentials` for private machine-to-machine apps. The full
+grant matrix and PKCE redirect dance live in
+[OAuth 2.0](/docs/oauth/); the calling app is responsible for
+driving sign-in and persisting the refresh token it receives.
 
-The **fastest path** is to let the SDK's built-in OAuth client refresh
-tokens for you. Refresh tokens are persistent and non-rotating — you
-store them once at first sign-in.
+The SDK is **refresh-only**: once you have a refresh token, hand it to
+the built-in OAuth client and the rest is transparent. Refresh tokens
+are persistent and non-rotating, so you store them once at first
+sign-in (encrypted at rest, against the user record) and the SDK
+re-mints access tokens from the same value on demand:
 
 ```ts
 import { MantyxClient, MantyxOAuthClient } from "@mantyx/sdk";
 
 const oauth = new MantyxOAuthClient({
-  clientId: process.env.MANTYX_OAUTH_CLIENT_ID!,        // mantyx_oa_…
+  clientId: process.env.MANTYX_OAUTH_CLIENT_ID!,         // mantyx_oa_…
   clientSecret: process.env.MANTYX_OAUTH_CLIENT_SECRET!, // mantyx_oas_…
 });
 
 const client = new MantyxClient({
   tokenSource: oauth.refreshTokenSource({
-    refreshToken: storedRefreshToken,       // mantyx_rt_…
+    refreshToken: storedRefreshToken,                    // mantyx_rt_…
   }),
   workspaceSlug: "acme-corp",
 });
 ```
 
+The `TokenSource` caches the access token in memory, refreshes
+proactively before expiry, retries the original request once on a
+`401`, and collapses concurrent refreshes onto a single token-endpoint
+call. `400 invalid_grant` surfaces as `MantyxOAuthError` —
+that means the refresh has been revoked and the caller has to drive
+a fresh sign-in.
+
 If you already have a short-lived access token managed elsewhere, pass
 it directly via `accessToken` (TS / Python) or `AccessToken` (Go); the
-SDK will not refresh on your behalf. See [OAuth 2.0](/docs/oauth/) for
-the full grant matrix, scope catalog, and token-format reference, and
-each SDK README's "OAuth 2.0 refresh" subsection for the call-site
-shapes in Python and Go.
+SDK will not refresh on your behalf. See each SDK README's
+"OAuth 2.0 refresh" subsection for the call-site shapes in Python and
+Go.
 
 ## Required environment
 

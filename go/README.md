@@ -614,13 +614,23 @@ Use `errors.As(err, &target)` to branch on type.
 
 ### OAuth 2.0 refresh
 
-For long-running services, hand the client an `Options.TokenSource`
-instead of a static `AccessToken` — the SDK refreshes proactively
-before expiry and again on 401, retrying the original request
-exactly once. Refresh tokens are **persistent and non-rotating** per
-[`docs/oauth.md`](./docs/oauth.md): the caller persists the refresh
-token once at first sign-in (treat it as long-lived, encrypted at
-rest) and the SDK re-mints access tokens from it transparently.
+The SDK ships a **refresh-only** OAuth client. It assumes the calling
+app already obtained a refresh token through its own sign-in flow
+(browser PKCE redirect, native auth, server-side exchange — whatever
+fits the host). The library does not drive consent and does not
+initiate authorization-code or client-credentials grants. Once you
+have the refresh token, hand it to the SDK and the rest is
+transparent:
+
+- Refresh tokens are **persistent and non-rotating** per
+  [`docs/oauth.md`](./docs/oauth.md): store them once at first
+  sign-in (treat them as long-lived, encrypted at rest) and the SDK
+  re-mints access tokens from the same value on demand.
+- A `TokenSource` is called before every request and again on `401`,
+  with single-flight collapse on concurrent refreshes.
+- `400 invalid_grant` from the token endpoint surfaces as
+  `*mantyx.OAuthError` — that means the refresh has been revoked
+  and the caller has to drive a fresh sign-in.
 
 ```go
 import "github.com/mantyx-io/mantyx-sdk/go"
@@ -630,43 +640,38 @@ oauth := mantyx.NewOAuthClient(mantyx.OAuthClientOptions{
     ClientSecret: os.Getenv("MANTYX_OAUTH_CLIENT_SECRET"), // mantyx_oas_…
 })
 
-// (1) Authorization-code: swap a `code` for the initial token pair, persist
-//     the refresh token against the user record. See docs/oauth.md for the
-//     full PKCE redirect dance the calling app is responsible for.
-initial, err := oauth.ExchangeAuthorizationCode(ctx, mantyx.ExchangeAuthorizationCodeOptions{
-    Code:         authCode,
-    RedirectURI:  "https://app.example.com/cb",
-    CodeVerifier: storedVerifier,
-})
-// db.Users.Update(userID, "mantyx_refresh_token", initial.RefreshToken)
-
-// (2) End-user clients: build a refresh-driven TokenSource from the
-//     persisted refresh token. The SDK calls it before every request and on
-//     401s; concurrent requests collapse onto one refresh.
+// (1) Hand the SDK a stored refresh token — it caches the access token in
+//     memory, refreshes proactively before expiry, and retries the original
+//     request once on a 401.
 client := mantyx.NewClient(mantyx.Options{
     TokenSource: oauth.RefreshTokenSource(mantyx.RefreshTokenSourceOptions{
-        RefreshToken: initial.RefreshToken,
-        InitialToken: initial,
+        RefreshToken: storedRefreshToken, // mantyx_rt_…
     }),
     WorkspaceSlug: "acme",
 })
 
-// (3) Service-to-service: ClientCredentialsTokenSource never holds a
-//     refresh token; it re-mints access tokens on demand.
-svc := mantyx.NewClient(mantyx.Options{
-    TokenSource: oauth.ClientCredentialsTokenSource(mantyx.ClientCredentialsTokenSourceOptions{
-        Scope: []string{"agents:invoke"},
+// (2) If the calling app already has a non-expired access token in hand
+//     (e.g. straight out of its sign-in flow), pass it as InitialToken to
+//     skip the first /token round-trip.
+seeded := mantyx.NewClient(mantyx.Options{
+    TokenSource: oauth.RefreshTokenSource(mantyx.RefreshTokenSourceOptions{
+        RefreshToken: storedRefreshToken,
+        InitialToken: tokenFromSignIn,
     }),
     WorkspaceSlug: "acme",
 })
 
-// (4) Manual override is still supported for short-lived access tokens
-//     the caller already manages.
+// (3) Manual override for short-lived access tokens the caller manages
+//     itself — no refresh, no retry, no OAuth client needed.
 oneShot := mantyx.NewClient(mantyx.Options{AccessToken: "mantyx_at_…", WorkspaceSlug: "acme"})
+
+// Optional: revoke a refresh token at sign-out — this kills the refresh and
+// every live access token tied to its grant.
+_ = oauth.Revoke(ctx, mantyx.RevokeOptions{Token: storedRefreshToken})
 ```
 
 See [`docs/oauth.md`](./docs/oauth.md) for grant types, token formats,
-and revocation.
+scope catalog, and revocation semantics.
 
 ## Examples
 

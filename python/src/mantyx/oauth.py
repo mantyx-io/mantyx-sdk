@@ -1,36 +1,33 @@
-"""MANTYX OAuth 2.0 client: authorization-code exchange, refresh-token
-minting, client-credentials grant, and token revocation, plus
-:class:`TokenSource` adapters that :class:`MantyxClient` /
+"""MANTYX OAuth 2.0 refresh client.
+
+Trade a stored refresh token for short-lived access tokens, revoke
+tokens at sign-out, and expose :class:`TokenSource` /
+:class:`AsyncTokenSource` adapters that :class:`MantyxClient` /
 :class:`AsyncMantyxClient` consume to refresh access tokens
 transparently before they expire (and again on 401).
 
-The wire contract this implements is ``docs/oauth.md`` in the SDK
-monorepo:
+The library is intentionally **refresh-only**. It assumes the caller
+already obtained the refresh token through their own sign-in flow
+(Authorization Code + PKCE in a browser, native redirect, server-side
+exchange — whatever fits the host application). The SDK does not
+drive consent, does not initiate auth-code exchanges, and does not
+bundle PKCE helpers.
 
-- Token endpoint: ``POST <base_url>/api/oauth/token``, form-encoded.
+Wire contract (``docs/oauth.md``):
+
+- Token endpoint: ``POST <base_url>/api/oauth/token``, form-encoded,
+  ``grant_type=refresh_token``. Echoes back the same ``refresh_token``
+  the client sent (refresh tokens are persistent and non-rotating).
 - Revoke endpoint: ``POST <base_url>/api/oauth/revoke``, form-encoded.
-- Access tokens (``mantyx_at_…``) live 1 hour (``expires_in: 3600``).
-- Refresh tokens (``mantyx_rt_…``) are **persistent and non-rotating**:
-  ``grant_type=refresh_token`` echoes back the same value the client
-  sent. The caller persists the refresh token once at first sign-in
-  (encrypted at rest) and the SDK re-mints access tokens from it on
-  demand.
-
-The SDK does **not** drive the browser/native redirect dance — the
-calling app owns that — but ships ``generate_pkce_verifier`` and
-``pkce_challenge`` helpers so the consent step can stay self-contained,
-plus :meth:`MantyxOAuthClient.exchange_authorization_code` to swap a
-returned ``code`` for the initial ``{access_token, refresh_token}``
-pair.
+- Access tokens (``mantyx_at_…``) live 1 hour.
+- Refresh tokens (``mantyx_rt_…``) are long-lived; the caller persists
+  them once at first sign-in (encrypted at rest) and the SDK re-mints
+  access tokens from the same value on demand.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import secrets
-import string
 import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -57,11 +54,10 @@ TokenRequestReason = Literal["initial", "expired", "unauthorized"]
 class OAuthToken:
     """Decoded ``POST /api/oauth/token`` response.
 
-    :attr:`refresh_token` is populated on the initial
-    ``authorization_code`` exchange and on subsequent ``refresh_token``
-    calls (where it is identical to the value the client just sent —
-    refresh tokens never rotate). The ``client_credentials`` grant
-    never returns one.
+    On the ``refresh_token`` grant :attr:`refresh_token` is identical
+    to the value the client just sent — refresh tokens never rotate.
+    The field is surfaced for symmetry with whatever the calling
+    app's sign-in flow already does.
     """
 
     access_token: str
@@ -80,10 +76,9 @@ class TokenSource(Protocol):
     Implementations are called before every request and again with
     ``reason="unauthorized"`` after a 401 (forcing a refresh of the
     cached value). Concrete sources built via
-    :meth:`MantyxOAuthClient.refresh_token_source` or
-    :meth:`MantyxOAuthClient.client_credentials_token_source` are
-    thread-safe and single-flight expired-token observers into one
-    token-endpoint call.
+    :meth:`MantyxOAuthClient.refresh_token_source` are thread-safe
+    and single-flight expired-token observers into one token-endpoint
+    call.
     """
 
     def __call__(self, reason: TokenRequestReason = "initial") -> str: ...
@@ -100,46 +95,23 @@ class AsyncTokenSource(Protocol):
     def __call__(self, reason: TokenRequestReason = "initial") -> Awaitable[str]: ...
 
 
-# --------------------------------------------------------------- PKCE helpers
-
-
-_PKCE_ALPHABET = string.ascii_letters + string.digits + "-._~"
-
-
-def generate_pkce_verifier(length: int = 64) -> str:
-    """Return a high-entropy PKCE ``code_verifier`` (RFC 7636 §4.1).
-
-    The verifier is the raw secret the caller keeps across the
-    redirect; the ``code_challenge`` you send on
-    ``/api/oauth/authorize`` is derived from it via
-    :func:`pkce_challenge`. Length must satisfy ``43 <= length <= 128``
-    per the RFC.
-    """
-    if not 43 <= length <= 128:
-        raise MantyxError("PKCE code_verifier length must be in [43, 128]")
-    return "".join(secrets.choice(_PKCE_ALPHABET) for _ in range(length))
-
-
-def pkce_challenge(verifier: str) -> str:
-    """Compute ``base64url(sha256(verifier))`` with no padding (RFC 7636 §4.2)."""
-    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-
-
 # ----------------------------------------------------------------- OAuth client
 
 
 class MantyxOAuthClient:
-    """Wraps the MANTYX OAuth 2.0 authorization-server endpoints.
+    """Refresh-only wrapper around the MANTYX OAuth 2.0 endpoints.
 
-    App-scoped (one per ``(client_id, client_secret)`` pair); construct
-    independently of :class:`MantyxClient`, then either call its grant
-    helpers directly or hand a token source it produces to
-    ``MantyxClient(token_source=...)`` for transparent refresh.
+    App-scoped (one per ``(client_id, client_secret)`` pair). Construct
+    independently of :class:`MantyxClient`, then either call
+    :meth:`refresh` / :meth:`revoke` directly or hand a token source
+    produced by :meth:`refresh_token_source` /
+    :meth:`async_refresh_token_source` to a client constructor for
+    transparent refresh.
 
-    The same instance powers both the sync (:meth:`refresh_token_source`)
-    and async (:meth:`async_refresh_token_source`) flavours; pick the
-    builder that matches the client you're feeding.
+    The client deliberately does **not** drive the authorization-code
+    exchange or any other "initiate sign-in" grant. The caller is
+    expected to obtain the refresh token through their own consent
+    flow and persist it before constructing this client.
     """
 
     def __init__(
@@ -213,55 +185,23 @@ class MantyxOAuthClient:
 
     # --------------------------------------------------------------- Sync grants
 
-    def exchange_authorization_code(
-        self, *, code: str, redirect_uri: str, code_verifier: str
-    ) -> OAuthToken:
-        """Swap an authorization code + PKCE verifier for the initial
-        ``{access_token, refresh_token}`` pair.
-
-        Call this exactly once per sign-in after the browser / native
-        redirect lands back on your ``redirect_uri`` with a ``code``
-        query parameter. Persist the returned ``refresh_token`` — it
-        is long-lived and non-rotating per ``docs/oauth.md``.
-        """
-        return self._token(
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "code_verifier": code_verifier,
-            }
-        )
-
     def refresh(
         self, *, refresh_token: str, scope: str | Sequence[str] | None = None
     ) -> OAuthToken:
         """Mint a fresh access token from a stored refresh token.
 
-        The returned ``refresh_token`` is identical to the input — the
-        field is surfaced for symmetry with
-        :meth:`exchange_authorization_code` only.
+        The returned ``refresh_token`` is identical to the input —
+        refresh tokens are persistent and non-rotating, so the field
+        is surfaced only for symmetry with the response shape.
 
-        Raises :class:`MantyxOAuthError` with ``oauth_error="invalid_grant"``
-        if the refresh has been revoked (or its grant / app was
-        deleted); the caller must drive a fresh sign-in.
+        Raises :class:`MantyxOAuthError` with
+        ``oauth_error="invalid_grant"`` if the refresh has been
+        revoked (or its grant / app was deleted); the caller must
+        drive a fresh sign-in.
         """
         if not refresh_token:
             raise MantyxError("`refresh_token` is required for MantyxOAuthClient.refresh")
         body = {"grant_type": "refresh_token", "refresh_token": refresh_token}
-        scope_str = _normalize_scope(scope)
-        if scope_str is not None:
-            body["scope"] = scope_str
-        return self._token(body)
-
-    def client_credentials(self, *, scope: str | Sequence[str] | None = None) -> OAuthToken:
-        """Request a workspace-scoped access token without a user.
-
-        Available only on private OAuth apps registered with
-        ``allowsClientCredentials: true``. No refresh token is issued;
-        re-call this method whenever a new access token is needed.
-        """
-        body = {"grant_type": "client_credentials"}
         scope_str = _normalize_scope(scope)
         if scope_str is not None:
             body["scope"] = scope_str
@@ -295,6 +235,10 @@ class MantyxOAuthClient:
         source caches the access token in-memory and refreshes
         proactively when within ``refresh_skew_s`` of ``expires_at``,
         or eagerly when :class:`MantyxClient` reports a 401.
+
+        Pass ``initial_token`` if the calling app already has a
+        non-expired access token in hand (e.g. straight out of the
+        sign-in flow) to avoid an extra round-trip on the first call.
         """
         if not refresh_token:
             raise MantyxError(
@@ -328,55 +272,7 @@ class MantyxOAuthClient:
 
         return cache.as_source(mint)
 
-    def client_credentials_token_source(
-        self,
-        *,
-        scope: str | Sequence[str] | None = None,
-        refresh_skew_s: float = DEFAULT_REFRESH_SKEW_S,
-    ) -> TokenSource:
-        """Build a sync :class:`TokenSource` backed by the
-        ``client_credentials`` grant.
-
-        On every refresh the source re-mints a workspace-scoped access
-        token by calling the token endpoint with
-        ``grant_type=client_credentials``. Available only on private
-        apps with ``allowsClientCredentials: true``.
-        """
-        cache = _SyncTokenCache(None, refresh_skew_s)
-
-        def mint() -> OAuthToken:
-            return self.client_credentials(scope=scope)
-
-        return cache.as_source(mint)
-
-    def async_client_credentials_token_source(
-        self,
-        *,
-        scope: str | Sequence[str] | None = None,
-        refresh_skew_s: float = DEFAULT_REFRESH_SKEW_S,
-    ) -> AsyncTokenSource:
-        """Async variant of :meth:`client_credentials_token_source`."""
-        cache = _AsyncTokenCache(None, refresh_skew_s)
-
-        async def mint() -> OAuthToken:
-            return await self.aclient_credentials(scope=scope)
-
-        return cache.as_source(mint)
-
     # -------------------------------------------------------------- Async grants
-
-    async def aexchange_authorization_code(
-        self, *, code: str, redirect_uri: str, code_verifier: str
-    ) -> OAuthToken:
-        """Async :meth:`exchange_authorization_code`."""
-        return await self._token_async(
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "code_verifier": code_verifier,
-            }
-        )
 
     async def arefresh(
         self, *, refresh_token: str, scope: str | Sequence[str] | None = None
@@ -385,14 +281,6 @@ class MantyxOAuthClient:
         if not refresh_token:
             raise MantyxError("`refresh_token` is required for MantyxOAuthClient.arefresh")
         body = {"grant_type": "refresh_token", "refresh_token": refresh_token}
-        scope_str = _normalize_scope(scope)
-        if scope_str is not None:
-            body["scope"] = scope_str
-        return await self._token_async(body)
-
-    async def aclient_credentials(self, *, scope: str | Sequence[str] | None = None) -> OAuthToken:
-        """Async :meth:`client_credentials`."""
-        body = {"grant_type": "client_credentials"}
         scope_str = _normalize_scope(scope)
         if scope_str is not None:
             body["scope"] = scope_str
@@ -531,7 +419,6 @@ class _SyncTokenCache:
                 with self._lock:
                     self._inflight = None
                 return fresh.access_token
-            # Wait for the leader, outside the lock.
             return follower_future.result().access_token
 
         return source
@@ -557,9 +444,6 @@ class _AsyncTokenCache:
                 cached = self._token
                 if cached is not None and not _is_expiring(cached, self._skew_s):
                     return cached.access_token
-            # Coroutine-only synchronisation; no thread lock needed
-            # because asyncio guarantees only one coroutine runs at a
-            # time on the loop.
             if self._inflight is not None:
                 fresh = await self._inflight
                 return fresh.access_token
@@ -626,6 +510,4 @@ __all__ = [
     "OAuthToken",
     "TokenRequestReason",
     "TokenSource",
-    "generate_pkce_verifier",
-    "pkce_challenge",
 ]
