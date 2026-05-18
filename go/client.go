@@ -520,11 +520,81 @@ func (b ToolBudgets) validate() error {
 	return nil
 }
 
+// RunTokenUsage carries per-run token totals aggregated across every
+// model invocation for the run. Attached to terminal `result` / `error`
+// events (and to `GET /agent-runs/:runId`) by MANTYX ≥ 2026-09. Older
+// runners omit the cost-attribution triple entirely; SDK callers detect
+// "no usage data" by checking `result.Model == nil` or
+// `result.Model.Provider == ""`.
+//
+// See `docs/agent-runs-protocol.md` §7.1 for the per-provider mapping
+// and the relationship between buckets — `InputTokens` / `OutputTokens`
+// are the billable totals; `CachedTokens` and `ReasoningTokens` are
+// diagnostic breakdowns _inside_ those two totals, not separate
+// additive buckets.
+type RunTokenUsage struct {
+	// InputTokens is the total billable input — fresh prompt tokens
+	// plus the cached-read slice the provider still bills (at a
+	// discount) plus any cache-creation tokens plus tool-prompt tokens.
+	InputTokens int `json:"inputTokens"`
+	// CachedTokens is the discounted slice of `InputTokens` that came
+	// from a prompt cache hit (Anthropic prompt caching, OpenAI cached
+	// prompt, Gemini implicit cache). 0 when the provider doesn't
+	// report cache reads or the run didn't hit cache.
+	CachedTokens int `json:"cachedTokens"`
+	// ReasoningTokens is the non-visible thinking-token slice. Already
+	// counted inside `OutputTokens`; surfaced separately so dashboards
+	// can break out "thinking cost" vs visible output. 0 when the
+	// model didn't reason or didn't report it.
+	ReasoningTokens int `json:"reasoningTokens"`
+	// OutputTokens is the total tokens the model emitted for this run
+	// (visible + reasoning). Matches the provider's "completion
+	// tokens" / "output tokens" billing line.
+	OutputTokens int `json:"outputTokens"`
+}
+
+// RunModelInfo identifies the resolved model that actually executed
+// the run. Surfaced on terminal events (and `GET /agent-runs/:runId`)
+// by MANTYX ≥ 2026-09. See `docs/agent-runs-protocol.md` §7.1.
+type RunModelInfo struct {
+	// ID is the catalog id — the same string a caller would pass back
+	// as `ModelID` to re-select this exact entry (e.g. `"platform:demo"`,
+	// `"provider:cmf…"`). Empty against legacy fallbacks that didn't
+	// synthesise a catalog id.
+	ID string `json:"id"`
+	// Provider is the lowercase provider id (`"openai"`, `"anthropic"`,
+	// `"google"`, `"azure-openai"`). Empty against legacy runners that
+	// don't report usage data — that's the "no usage data" sentinel
+	// when `RunResult.Model` is non-nil.
+	Provider string `json:"provider"`
+	// VendorModelID is the model id the platform actually sent to the
+	// provider (e.g. `"gpt-5.4-mini"`, `"claude-opus-4-7"`,
+	// `"gemini-2.5-pro"`).
+	VendorModelID string `json:"vendorModelId"`
+	// ReasoningEffort is `"off" | "low" | "medium" | "high"`. Empty
+	// when the provider doesn't expose a reasoning-level knob or the
+	// run didn't request one.
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+}
+
 // RunResult is the outcome of a successful run.
 type RunResult struct {
 	RunID  string
 	Text   string
 	Events []RunEvent
+	// Tokens carries per-run token totals from the terminal event.
+	// nil against MANTYX servers older than 2026-09 (the "no usage
+	// data" signal). See RunTokenUsage and
+	// `docs/agent-runs-protocol.md` §7.1.
+	Tokens *RunTokenUsage
+	// Turns is the total `engine.completeTurn(...)` invocations for
+	// the run, including the failing call when a run errored mid-loop.
+	// A single-shot run reports 1; a tool loop is >= 2. 0 against
+	// legacy MANTYX servers.
+	Turns int
+	// Model identifies the resolved model that executed the run. nil
+	// against legacy MANTYX servers. See RunModelInfo.
+	Model *RunModelInfo
 }
 
 // RunEvent is one durable run event. Specific payload fields vary by Type.
@@ -745,6 +815,13 @@ func (c *Client) driveRunWithRegistry(
 ) (RunResult, error) {
 	collected := make([]RunEvent, 0, 32)
 	finalText := ""
+	// Cost-attribution triple captured from the terminal `result`
+	// event. Left zero/nil against legacy MANTYX servers — callers
+	// detect "no usage data" via `result.Model == nil`. See
+	// `docs/agent-runs-protocol.md` §7.1.
+	var tokens *RunTokenUsage
+	var turns int
+	var modelInfo *RunModelInfo
 	terminalErr, err := c.consumeStream(ctx, runID, handlers, func(ev RunEvent) {
 		collected = append(collected, ev)
 		if onEvent != nil {
@@ -759,6 +836,15 @@ func (c *Client) driveRunWithRegistry(
 			if t, ok := ev.Data["text"].(string); ok {
 				finalText = t
 			}
+			if t := parseRunTokens(ev.Data["tokens"]); t != nil {
+				tokens = t
+			}
+			if n, ok := parseRunTurns(ev.Data["turns"]); ok {
+				turns = n
+			}
+			if m := parseRunModel(ev.Data["model"]); m != nil {
+				modelInfo = m
+			}
 		}
 	})
 	if err != nil {
@@ -767,7 +853,14 @@ func (c *Client) driveRunWithRegistry(
 	if terminalErr != nil {
 		return RunResult{}, terminalErr
 	}
-	return RunResult{RunID: runID, Text: finalText, Events: collected}, nil
+	return RunResult{
+		RunID:  runID,
+		Text:   finalText,
+		Events: collected,
+		Tokens: tokens,
+		Turns:  turns,
+		Model:  modelInfo,
+	}, nil
 }
 
 // consumeStream opens the SSE stream, dispatches local tools, and notifies
@@ -865,6 +958,14 @@ func (c *Client) consumeStream(
 				if retryable, ok := data["retryable"].(bool); ok {
 					rerr.Retryable = &retryable
 				}
+				// Cost-attribution triple (MANTYX ≥ 2026-09). Failed
+				// runs report the failing model call's usage too — see
+				// `docs/agent-runs-protocol.md` §7.1.
+				rerr.Tokens = parseRunTokens(data["tokens"])
+				if n, ok := parseRunTurns(data["turns"]); ok {
+					rerr.Turns = n
+				}
+				rerr.Model = parseRunModel(data["model"])
 				terminalErr = rerr
 				return false
 			case "cancelled":
@@ -1268,6 +1369,74 @@ func ParseRunOutput(result RunResult, dest any) error {
 		return &ParseError{RunID: result.RunID, Text: result.Text, Cause: err}
 	}
 	return nil
+}
+
+// parseRunTokens defensively decodes a wire `tokens` object into a
+// *RunTokenUsage. Returns nil when the value is missing or not an
+// object — that's the "no usage data" sentinel against legacy MANTYX
+// servers. Unknown / missing buckets default to 0 (the protocol
+// contract is that misbehaving engines clamp to non-negative integers;
+// the SDK mirrors that here so dashboards never see negatives).
+func parseRunTokens(raw any) *RunTokenUsage {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return &RunTokenUsage{
+		InputTokens:     toNonNegativeInt(m["inputTokens"]),
+		CachedTokens:    toNonNegativeInt(m["cachedTokens"]),
+		ReasoningTokens: toNonNegativeInt(m["reasoningTokens"]),
+		OutputTokens:    toNonNegativeInt(m["outputTokens"]),
+	}
+}
+
+// parseRunTurns coerces a wire `turns` value into a non-negative int.
+// Returns (0, false) when the value is missing or unparseable so the
+// caller can leave `RunResult.Turns` at zero against legacy servers.
+func parseRunTurns(raw any) (int, bool) {
+	f, ok := raw.(float64)
+	if !ok {
+		return 0, false
+	}
+	if f < 0 {
+		return 0, true
+	}
+	return int(f), true
+}
+
+// parseRunModel decodes a wire `model` object into a *RunModelInfo.
+// Returns nil when the value is missing or not an object — the "no
+// usage data" sentinel for legacy servers.
+func parseRunModel(raw any) *RunModelInfo {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := &RunModelInfo{}
+	if s, ok := m["id"].(string); ok {
+		out.ID = s
+	}
+	if s, ok := m["provider"].(string); ok {
+		out.Provider = s
+	}
+	if s, ok := m["vendorModelId"].(string); ok {
+		out.VendorModelID = s
+	}
+	if s, ok := m["reasoningEffort"].(string); ok {
+		out.ReasoningEffort = s
+	}
+	return out
+}
+
+func toNonNegativeInt(raw any) int {
+	f, ok := raw.(float64)
+	if !ok {
+		return 0
+	}
+	if f < 0 {
+		return 0
+	}
+	return int(f)
 }
 
 func pathEscape(s string) string {

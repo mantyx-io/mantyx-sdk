@@ -9,7 +9,7 @@ SDK is expected to ship for client-resolved (`*_local`) tools.
 
 If you're just looking for HTTP routes, auth, body shapes, or session
 semantics, start with `agent-runs-protocol.md`. If you're writing or
-maintaining an SDK and want to know *exactly* what a `local_tool_call` event
+maintaining an SDK and want to know _exactly_ what a `local_tool_call` event
 looks like for `mcp_local`, you're in the right place.
 
 > **Authentication.** Every example below uses
@@ -21,9 +21,10 @@ looks like for `mcp_local`, you're in the right place.
 > `models:read`, `mantyx.identity:read`); see §2 of
 > `agent-runs-protocol.md` for the per-endpoint scope table and
 > [`docs/oauth.md`](./oauth.md) for the registration / Authorization Code
-> + PKCE flow.
+>
+> - PKCE flow.
 
-> **Stability.** Field names listed in *bold* are part of the documented
+> **Stability.** Field names listed in _bold_ are part of the documented
 > stable surface. Any other fields are passed through verbatim and survive
 > round-trips, but their semantics are not contractually guaranteed. The
 > server uses Zod with `passthrough` for all `*_local` resolved-content
@@ -34,15 +35,15 @@ looks like for `mcp_local`, you're in the right place.
 
 ## 0. Glossary
 
-| Term                | Meaning |
-| ------------------- | ------- |
-| **MANTYX**          | The agent operating system server (this repo). Owns LLM orchestration, tool execution for server-resolved tools, persistence. |
-| **SDK**             | Anything calling the public agent-runs API — typically `@mantyx/ts-sdk`, but also other-language SDKs and direct HTTP clients. |
-| **Agent run**       | A single LLM execution. Streams events; ends with a terminal `result` / `error` / `cancelled`. |
-| **Spec**            | The JSON object describing what the run does — model, prompt, tools, budgets, optional `reasoningLevel`. Sent in the `POST /agent-runs` (or `.../messages`) body. |
-| **Tool ref**        | One entry in `spec.tools[]`. A discriminated union keyed by `kind`. |
-| **Server-resolved** | A tool MANTYX executes itself (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`). The SDK only sees informational `tool_result` events. |
-| **Client-resolved** | A tool the SDK executes (`local`, `a2a_local`, `mcp_local`). MANTYX emits `local_tool_call`, the SDK does the work, the SDK posts back to `.../tool-results`. |
+| Term                | Meaning                                                                                                                                                                                         |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **MANTYX**          | The agent operating system server (this repo). Owns LLM orchestration, tool execution for server-resolved tools, persistence.                                                                   |
+| **SDK**             | Anything calling the public agent-runs API — typically `@mantyx/ts-sdk`, but also other-language SDKs and direct HTTP clients.                                                                  |
+| **Agent run**       | A single LLM execution. Streams events; ends with a terminal `result` / `error` / `cancelled`.                                                                                                  |
+| **Spec**            | The JSON object describing what the run does — model, prompt, tools, budgets, optional `reasoningLevel`. Sent in the `POST /agent-runs` (or `.../messages`) body.                               |
+| **Tool ref**        | One entry in `spec.tools[]`. A discriminated union keyed by `kind`.                                                                                                                             |
+| **Server-resolved** | A tool MANTYX executes itself (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`). The SDK only sees informational `tool_result` events.                                                                  |
+| **Client-resolved** | A tool the SDK executes (`local`, `a2a_local`, `mcp_local`). MANTYX emits `local_tool_call`, the SDK does the work, the SDK posts back to `.../tool-results`.                                   |
 | **Resolution**      | The act of turning an external resource (A2A peer, MCP server) into a self-contained JSON document the model can reason about. For `*_local` kinds, resolution is the **SDK's** responsibility. |
 
 ---
@@ -108,23 +109,30 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
 {
   "modelId": "openai:gpt-5.5",
   "systemPrompt": "...",
-  "prompt": "...",                     // OR "messages": [...]
-  "tools": [ /* tool refs — see §3 */ ],
-  "reasoningLevel": "medium",          // optional; see §6
+  "prompt": "...", // OR "messages": [...]
+  "tools": [
+    /* tool refs — see §3 */
+  ],
+  "reasoningLevel": "medium", // optional; see §6
   "budgets": { "maxToolTurns": 32 },
-  "outputSchema": {                    // optional; see §7
-    "name": "weather_report",          //   defaults to "output"
-    "schema": { /* JSON Schema */ }
+  "outputSchema": {
+    // optional; see §7
+    "name": "weather_report", //   defaults to "output"
+    "schema": {
+      /* JSON Schema */
+    },
   },
-  "loopDetection": {                   // optional; see §8
+  "loopDetection": {
+    // optional; see §8
     "consecutiveThreshold": 3,
-    "hardCutoffThreshold":  6
+    "hardCutoffThreshold": 6,
   },
-  "toolBudgets": {                     // optional; see §8
-    "recall":                { "maxCalls": 4 },
-    "hive_consult_ontology": { "maxCalls": 4 }
+  "toolBudgets": {
+    // optional; see §8
+    "recall": { "maxCalls": 4 },
+    "hive_consult_ontology": { "maxCalls": 4 },
   },
-  "metadata": { "customer": "acme" }   // optional, free-form k/v
+  "metadata": { "customer": "acme" }, // optional, free-form k/v
 }
 ```
 
@@ -132,7 +140,7 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
 
 Same body shape, posted to `POST /agent-sessions/:id/messages`. The session
 keeps the conversation history; per-message `tools`, `reasoningLevel`,
-`outputSchema`, `loopDetection`, and `toolBudgets` *replace* the session's
+`outputSchema`, `loopDetection`, and `toolBudgets` _replace_ the session's
 defaults for that single run only — the next run falls back to whatever
 the session was created with.
 
@@ -141,20 +149,20 @@ the session was created with.
 ## 3. Tool ref taxonomy
 
 Every entry in `spec.tools[]` is one of the seven shapes below. The
-*resolution column* is the contract that drives everything else: **server**
+_resolution column_ is the contract that drives everything else: **server**
 means MANTYX runs the tool itself and the SDK only ever sees a
 `tool_result` event; **client** means MANTYX is a transport and the SDK
 must answer `local_tool_call` events.
 
-| Kind             | Resolution | Wire-payload contract |
-| ---------------- | ---------- | --------------------- |
-| `mantyx`         | server     | `{ id }` reference to a workspace `Tool` row. |
-| `mantyx_plugin`  | server     | `{ name }` reference to a platform plugin tool. |
-| `local`          | client     | `{ name, description?, parameters?, outputSchema?, longRunning? }` — `parameters` is **JSON Schema** (object schema with `properties`/`required`); forwarded verbatim to the LLM provider and validated against incoming tool-call args before execution. `outputSchema` (optional) is JSON Schema for the tool's structured return value, surfaced to providers that accept per-tool response schemas. `longRunning` (optional, default `false`) annotates the model-facing description with a "don't double-call while pending" hint so every provider treats the tool as long-running. |
-| `a2a`            | server     | `{ name, agentCardUrl, headers?, contextId?, description? }`. |
-| `a2a_local`      | client     | `{ name, agentCard }` — **resolved A2A Agent Card JSON content**. |
-| `mcp`            | server     | `{ name, url, headers?, toolFilter? }`. |
-| `mcp_local`      | client     | `{ name, serverInfo?, tools[] }` — **resolved MCP `Tool[]`**. |
+| Kind            | Resolution | Wire-payload contract                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mantyx`        | server     | `{ id }` reference to a workspace `Tool` row.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `mantyx_plugin` | server     | `{ name }` reference to a platform plugin tool.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `local`         | client     | `{ name, description?, parameters?, outputSchema?, longRunning? }` — `parameters` is **JSON Schema** (object schema with `properties`/`required`); forwarded verbatim to the LLM provider and validated against incoming tool-call args before execution. `outputSchema` (optional) is JSON Schema for the tool's structured return value, surfaced to providers that accept per-tool response schemas. `longRunning` (optional, default `false`) annotates the model-facing description with a "don't double-call while pending" hint so every provider treats the tool as long-running. |
+| `a2a`           | server     | `{ name, agentCardUrl, headers?, contextId?, description? }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `a2a_local`     | client     | `{ name, agentCard }` — **resolved A2A Agent Card JSON content**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `mcp`           | server     | `{ name, url, headers?, toolFilter? }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `mcp_local`     | client     | `{ name, serverInfo?, tools[] }` — **resolved MCP `Tool[]`**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 The remainder of this document focuses on `local`, `a2a_local`, and
 `mcp_local`, because they're the ones that carry SDK-defined structured
@@ -173,38 +181,40 @@ caller-specific business logic.
 ```jsonc
 {
   "kind": "local",
-  "name": "send_email",                 // model-facing; /^[a-zA-Z0-9_]{1,64}$/
+  "name": "send_email", // model-facing; /^[a-zA-Z0-9_]{1,64}$/
   "description": "Send a transactional email.",
-  "parameters": {                       // OPTIONAL; JSON Schema for args
+  "parameters": {
+    // OPTIONAL; JSON Schema for args
     "type": "object",
     "properties": {
-      "to":      { "type": "string", "format": "email" },
+      "to": { "type": "string", "format": "email" },
       "subject": { "type": "string" },
-      "body":    { "type": "string" }
+      "body": { "type": "string" },
     },
     "required": ["to", "subject", "body"],
-    "additionalProperties": false
+    "additionalProperties": false,
   },
-  "outputSchema": {                     // OPTIONAL; JSON Schema for the return value
+  "outputSchema": {
+    // OPTIONAL; JSON Schema for the return value
     "type": "object",
     "properties": { "id": { "type": "string" } },
     "required": ["id"],
-    "additionalProperties": false
+    "additionalProperties": false,
   },
-  "longRunning": false                  // OPTIONAL; default false
+  "longRunning": false, // OPTIONAL; default false
 }
 ```
 
 **Field reference:**
 
-| Field          | Required | Notes |
-| -------------- | -------- | ----- |
-| `kind`         | yes      | Discriminator literal `"local"`. |
-| `name`         | yes      | Model-facing tool name. Must match `/^[a-zA-Z0-9_]{1,64}$/`. |
-| `description`  | no       | Free-form. When omitted the model sees an empty description (acceptable but reduces tool selection accuracy). |
-| `parameters`   | no       | JSON Schema for the tool's input. Must be an object schema (`type: "object"` with `properties`); other shapes are coerced to an empty object schema server-side. Nested constraints (`array.items`, `enum`, `anyOf`, …) are preserved end-to-end. Args that fail server-side validation produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the call. |
-| `outputSchema` | no       | JSON Schema for the structured value the tool returns. Forwarded to providers with per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. The model uses it to plan follow-up arguments more reliably. Must be an object schema; non-object roots are dropped server-side (engines reject non-object roots in this position). |
-| `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the description:<br>*"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."*<br>Useful for tools where a single call may yield a `pending` / status response and the SDK polls on its own; without the hint, models routinely fire repeat calls and waste turns. Pure declarative — MANTYX does not change scheduling. |
+| Field          | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kind`         | yes      | Discriminator literal `"local"`.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `name`         | yes      | Model-facing tool name. Must match `/^[a-zA-Z0-9_]{1,64}$/`.                                                                                                                                                                                                                                                                                                                                                                                     |
+| `description`  | no       | Free-form. When omitted the model sees an empty description (acceptable but reduces tool selection accuracy).                                                                                                                                                                                                                                                                                                                                    |
+| `parameters`   | no       | JSON Schema for the tool's input. Must be an object schema (`type: "object"` with `properties`); other shapes are coerced to an empty object schema server-side. Nested constraints (`array.items`, `enum`, `anyOf`, …) are preserved end-to-end. Args that fail server-side validation produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the call.                                           |
+| `outputSchema` | no       | JSON Schema for the structured value the tool returns. Forwarded to providers with per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. The model uses it to plan follow-up arguments more reliably. Must be an object schema; non-object roots are dropped server-side (engines reject non-object roots in this position).  |
+| `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the description:<br>_"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."_<br>Useful for tools where a single call may yield a `pending` / status response and the SDK polls on its own; without the hint, models routinely fire repeat calls and waste turns. Pure declarative — MANTYX does not change scheduling. |
 
 **Tool call dispatch.** When the model calls a `local` tool, the SSE
 stream emits `local_tool_call` with `kind: "local"` (or omitted, for
@@ -222,9 +232,10 @@ the `agentCard` field. MANTYX never reaches out to discover it.
 ```jsonc
 {
   "kind": "a2a_local",
-  "name": "intranet_hr_agent",          // model-facing; /^[a-zA-Z0-9_]{1,64}$/
-  "description": "...",                 // OPTIONAL; overrides the synthesized one
-  "agentCard": {                        // REQUIRED; A2A Agent Card content
+  "name": "intranet_hr_agent", // model-facing; /^[a-zA-Z0-9_]{1,64}$/
+  "description": "...", // OPTIONAL; overrides the synthesized one
+  "agentCard": {
+    // REQUIRED; A2A Agent Card content
     "protocolVersion": "0.3.0",
     "name": "Acme HR",
     "description": "Answers questions about HR policies and benefits.",
@@ -242,34 +253,38 @@ the `agentCard` field. MANTYX never reaches out to discover it.
         "name": "PTO lookup",
         "description": "Find a teammate's remaining PTO days for the year.",
         "tags": ["hr", "pto"],
-        "examples": ["How many PTO days does Alice have left?"]
-      }
+        "examples": ["How many PTO days does Alice have left?"],
+      },
     ],
-    "securitySchemes": { /* spec-shaped, never read by MANTYX */ },
-    "security": [ /* spec-shaped, never read by MANTYX */ ]
+    "securitySchemes": {
+      /* spec-shaped, never read by MANTYX */
+    },
+    "security": [
+      /* spec-shaped, never read by MANTYX */
+    ],
     /* …any other A2A spec field passes through unchanged. */
-  }
+  },
 }
 ```
 
 **Where the SDK obtains `agentCard`:**
 
-- *Well-known URL.* Most peers expose the card at
+- _Well-known URL._ Most peers expose the card at
   `<peer>/.well-known/agent-card.json`. The SDK can simply
   `fetch` it (with whatever auth applies on the local network).
-- *Static config.* For peers that don't publish a card, hand-craft one — the
+- _Static config._ For peers that don't publish a card, hand-craft one — the
   spec only requires a couple of fields and the rest is all metadata.
-- *Registry / cache.* Cache cards locally and refresh periodically. MANTYX
+- _Registry / cache._ Cache cards locally and refresh periodically. MANTYX
   treats every spec submission as a fresh snapshot, so new cards take
   effect on the next run / message.
 
 **What MANTYX does with `agentCard`:**
 
-| Field                    | Used for | Notes |
-| ------------------------ | -------- | ----- |
-| `name`, `description`    | Tool description for the model | Used to compose `"Delegate a task to <name>: <description>"` if no `description` override is supplied at the ref level. |
-| `skills[]` (first 12)    | Tool description for the model | Bulleted into the description so the model can choose a peer based on capability. |
-| All other fields         | Echo only | Forwarded back to the SDK in every `local_tool_call` event so the SDK can dispatch by `url`, by `provider.organization`, by `protocolVersion`, or whatever it indexed on. |
+| Field                 | Used for                       | Notes                                                                                                                                                                     |
+| --------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`, `description` | Tool description for the model | Used to compose `"Delegate a task to <name>: <description>"` if no `description` override is supplied at the ref level.                                                   |
+| `skills[]` (first 12) | Tool description for the model | Bulleted into the description so the model can choose a peer based on capability.                                                                                         |
+| All other fields      | Echo only                      | Forwarded back to the SDK in every `local_tool_call` event so the SDK can dispatch by `url`, by `provider.organization`, by `protocolVersion`, or whatever it indexed on. |
 
 ### 3.3 `mcp_local` — SDK-resolved Tool catalog
 
@@ -283,28 +298,32 @@ ship the `Implementation` block from MCP `Initialize` as `serverInfo`.
 ```jsonc
 {
   "kind": "mcp_local",
-  "name": "fs",                         // SDK-side server label; not a name prefix
-  "serverInfo": {                       // OPTIONAL; from MCP Initialize
+  "name": "fs", // SDK-side server label; not a name prefix
+  "serverInfo": {
+    // OPTIONAL; from MCP Initialize
     "name": "mcp-server-filesystem",
-    "version": "0.4.1"
+    "version": "0.4.1",
     /* …any other Implementation field passes through unchanged. */
   },
-  "tools": [                            // REQUIRED; verbatim MCP tools/list output
+  "tools": [
+    // REQUIRED; verbatim MCP tools/list output
     {
-      "name": "fs_read_file",           // model-facing; /^[a-zA-Z0-9_]{1,64}$/; SDK owns naming
+      "name": "fs_read_file", // model-facing; /^[a-zA-Z0-9_]{1,64}$/; SDK owns naming
       "description": "Read a file under /workspace.",
-      "inputSchema": {                  // MCP's term for the JSON Schema
+      "inputSchema": {
+        // MCP's term for the JSON Schema
         "type": "object",
         "properties": { "path": { "type": "string" } },
-        "required": ["path"]
+        "required": ["path"],
       },
-      "annotations": {                  // OPTIONAL; spec-defined hints
+      "annotations": {
+        // OPTIONAL; spec-defined hints
         "readOnlyHint": true,
-        "openWorldHint": false
-      }
+        "openWorldHint": false,
+      },
       /* …any other MCP Tool field passes through unchanged. */
-    }
-  ]
+    },
+  ],
 }
 ```
 
@@ -313,8 +332,8 @@ ship the `Implementation` block from MCP `Initialize` as `serverInfo`.
 ```ts
 // pseudo-code, MCP-SDK-flavoured
 const client = new McpClient(stdio("./fs-server"));
-const init = await client.initialize();        // → { name, version, … }
-const list = await client.listTools();         // → { tools: [...] }
+const init = await client.initialize(); // → { name, version, … }
+const list = await client.listTools(); // → { tools: [...] }
 
 // drop straight into the spec
 const ref = {
@@ -327,18 +346,18 @@ const ref = {
 
 **What MANTYX does with the catalog:**
 
-| Field                    | Used for | Notes |
-| ------------------------ | -------- | ----- |
-| `tools[].name`           | Model-facing tool name | Used as-is. MANTYX does **not** prefix with the ref's `name`. The SDK is responsible for any naming convention (e.g. emit `fs_read_file` instead of `read_file` if you have multiple servers). |
-| `tools[].description`    | Model-facing description | Used as-is. |
-| `tools[].inputSchema`    | LLM tool-call schema | Forwarded **verbatim** to the LLM provider as the tool's JSON Schema, then validated against incoming tool-call args (Ajv) before execution. Nested constraints (`array.items`, `enum`, `anyOf`, …) are preserved end-to-end. Empty / missing schema → no-arg tool. Args that violate the schema produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the tool. |
-| `tools[].annotations`    | Echo only | Forwarded to the SDK in `local_tool_call` events (as part of the call envelope) for observability. |
-| `serverInfo`             | Echo only | Forwarded to the SDK in `local_tool_call.mcpServerInfo`. |
+| Field                 | Used for                 | Notes                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tools[].name`        | Model-facing tool name   | Used as-is. MANTYX does **not** prefix with the ref's `name`. The SDK is responsible for any naming convention (e.g. emit `fs_read_file` instead of `read_file` if you have multiple servers).                                                                                                                                                                                                                  |
+| `tools[].description` | Model-facing description | Used as-is.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `tools[].inputSchema` | LLM tool-call schema     | Forwarded **verbatim** to the LLM provider as the tool's JSON Schema, then validated against incoming tool-call args (Ajv) before execution. Nested constraints (`array.items`, `enum`, `anyOf`, …) are preserved end-to-end. Empty / missing schema → no-arg tool. Args that violate the schema produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the tool. |
+| `tools[].annotations` | Echo only                | Forwarded to the SDK in `local_tool_call` events (as part of the call envelope) for observability.                                                                                                                                                                                                                                                                                                              |
+| `serverInfo`          | Echo only                | Forwarded to the SDK in `local_tool_call.mcpServerInfo`.                                                                                                                                                                                                                                                                                                                                                        |
 
 > **Naming convention reminder.** Because MANTYX doesn't prefix names for
 > `mcp_local`, two refs that both expose a tool called `read_file` will
 > collide. Either give the second one a different `name` in the catalog or
-> drop it via SDK-side filtering. (For `mcp` — *remote* MCP — MANTYX does
+> drop it via SDK-side filtering. (For `mcp` — _remote_ MCP — MANTYX does
 > auto-prefix with the ref's `name`, so collisions are impossible.)
 
 ---
@@ -352,24 +371,30 @@ so reconnects can use `Last-Event-ID`.
 Every event payload has the same envelope:
 
 ```jsonc
-{ "seq": 7, "type": "<event-type>", "data": { /* type-specific */ } }
+{
+  "seq": 7,
+  "type": "<event-type>",
+  "data": {
+    /* type-specific */
+  },
+}
 ```
 
 The vocabulary (`EphemeralEventType` in `bus.ts`):
 
-| Type                    | Direction | Frequency | Purpose |
-| ----------------------- | --------- | --------- | ------- |
-| `assistant_delta`       | M → SDK   | Many      | Streamed assistant text token / chunk. |
-| `thinking_delta`        | M → SDK   | Many (iff `reasoningLevel > 0`) | Streamed extended-thinking text (provider redacts when policy requires). |
-| `tool_result`           | M → SDK   | Per server-resolved tool call | Informational — tells the SDK that MANTYX ran a server-resolved tool (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) and got a result. The SDK does not need to act on it. |
-| `local_tool_call`       | M → SDK   | Per client-resolved tool call | **Action required.** SDK must POST a tool-result. |
-| `local_tool_result_in`  | M → SDK   | Per client-resolved tool call | Informational mirror of the tool-result the SDK just posted, persisted for observability. Re-emitted to late subscribers so they can replay the conversation. |
-| `loop_detected`         | M → SDK   | 0–2× per run (soft nudge + optional hard cutoff) | Observability for the loop-detection guard (see §8). The server already substituted the synthetic skip + steering nudge — SDK clients render a status note (`looping — nudged` / `looping — gave up`) and otherwise leave the run alone. |
-| `tool_budget_exceeded`  | M → SDK   | Per intercepted tool call | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner. |
-| `assistant_message`     | M → SDK   | 1× per turn | Final assistant message for the turn (concatenated, persistence-ready). |
-| `result`                | M → SDK   | 1× terminal | Successful completion. Carries the final assistant text and run summary. |
-| `error`                 | M → SDK   | 1× terminal | Failure. Carries `error` (message), `code` / `errorClass` (category), `finishReason`, and an optional `partialText` salvage payload. See §4.7. |
-| `cancelled`             | M → SDK   | 1× terminal | Cancellation. Run was aborted via `POST /cancel`. |
+| Type                   | Direction | Frequency                                        | Purpose                                                                                                                                                                                                                                     |
+| ---------------------- | --------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `assistant_delta`      | M → SDK   | Many                                             | Streamed assistant text token / chunk.                                                                                                                                                                                                      |
+| `thinking_delta`       | M → SDK   | Many (iff `reasoningLevel > 0`)                  | Streamed extended-thinking text (provider redacts when policy requires).                                                                                                                                                                    |
+| `tool_result`          | M → SDK   | Per server-resolved tool call                    | Informational — tells the SDK that MANTYX ran a server-resolved tool (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) and got a result. The SDK does not need to act on it.                                                                        |
+| `local_tool_call`      | M → SDK   | Per client-resolved tool call                    | **Action required.** SDK must POST a tool-result.                                                                                                                                                                                           |
+| `local_tool_result_in` | M → SDK   | Per client-resolved tool call                    | Informational mirror of the tool-result the SDK just posted, persisted for observability. Re-emitted to late subscribers so they can replay the conversation.                                                                               |
+| `loop_detected`        | M → SDK   | 0–2× per run (soft nudge + optional hard cutoff) | Observability for the loop-detection guard (see §8). The server already substituted the synthetic skip + steering nudge — SDK clients render a status note (`looping — nudged` / `looping — gave up`) and otherwise leave the run alone.    |
+| `tool_budget_exceeded` | M → SDK   | Per intercepted tool call                        | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner. |
+| `assistant_message`    | M → SDK   | 1× per turn                                      | Final assistant message for the turn (concatenated, persistence-ready).                                                                                                                                                                     |
+| `result`               | M → SDK   | 1× terminal                                      | Successful completion. Carries the final assistant text and run summary.                                                                                                                                                                    |
+| `error`                | M → SDK   | 1× terminal                                      | Failure. Carries `error` (message), `code` / `errorClass` (category), `finishReason`, and an optional `partialText` salvage payload. See §4.7.                                                                                              |
+| `cancelled`            | M → SDK   | 1× terminal                                      | Cancellation. Run was aborted via `POST /cancel`.                                                                                                                                                                                           |
 
 `result`, `error`, and `cancelled` are the **terminal** events — the SDK
 should close the SSE stream after one of them arrives.
@@ -395,8 +420,8 @@ progress text — it's not part of the canonical assistant response.
   "data": {
     "toolUseId": "tu_a",
     "name": "github_search_repos",
-    "result": "..."                     // truncated for display; never JSON-parsed by SDK
-  }
+    "result": "...", // truncated for display; never JSON-parsed by SDK
+  },
 }
 ```
 
@@ -436,8 +461,8 @@ No extras. Dispatch by `name`.
     "toolUseId": "tu_x",
     "name": "compute_total",
     "args": { "amount": 42, "currency": "USD" },
-    "kind": "local"                     // OR omitted (legacy)
-  }
+    "kind": "local", // OR omitted (legacy)
+  },
 }
 ```
 
@@ -455,17 +480,20 @@ dispatch to the right A2A client when it manages multiple peers.
     "name": "intranet_hr_agent",
     "args": { "message": "When does PTO reset?" },
     "kind": "a2a_local",
-    "agentCard": {                      // full Agent Card from the spec
+    "agentCard": {
+      // full Agent Card from the spec
       "name": "Acme HR",
       "url": "https://hr.intranet.acme/a2a",
-      "skills": [ /* ... */ ]
+      "skills": [
+        /* ... */
+      ],
       /* ...all other fields the SDK shipped... */
-    }
-  }
+    },
+  },
 }
 ```
 
-`args.message` is *always* `{ "message": string }` for `a2a_local` — the
+`args.message` is _always_ `{ "message": string }` for `a2a_local` — the
 LLM's task is reduced to "what do I want to ask the peer in plain text?"
 so the SDK doesn't have to re-derive an A2A `message` envelope from a
 tool-specific schema.
@@ -481,23 +509,24 @@ parsing the tool name back into pieces.
   "type": "local_tool_call",
   "data": {
     "toolUseId": "tu_z",
-    "name": "fs_read_file",             // identical to what the SDK declared
+    "name": "fs_read_file", // identical to what the SDK declared
     "args": { "path": "/etc/hosts" },
     "kind": "mcp_local",
-    "mcpServer": "fs",                  // ref's `name` — SDK's MCP-client key
-    "mcpToolName": "fs_read_file",      // duplicates `name` for the SDK's convenience
-    "mcpServerInfo": {                  // present iff the spec carried `serverInfo`
+    "mcpServer": "fs", // ref's `name` — SDK's MCP-client key
+    "mcpToolName": "fs_read_file", // duplicates `name` for the SDK's convenience
+    "mcpServerInfo": {
+      // present iff the spec carried `serverInfo`
       "name": "mcp-server-filesystem",
-      "version": "0.4.1"
-    }
-  }
+      "version": "0.4.1",
+    },
+  },
 }
 ```
 
 The SDK's typical dispatch path is:
 
 ```ts
-const client = mcpClients.get(call.mcpServer);  // by SDK label
+const client = mcpClients.get(call.mcpServer); // by SDK label
 if (!client) throw new Error(`unknown MCP server ${call.mcpServer}`);
 const result = await client.callTool({
   name: call.mcpToolName,
@@ -509,7 +538,10 @@ const text = result.content
   .join("\n");
 await fetch(`${baseUrl}/agent-runs/${runId}/tool-results`, {
   method: "POST",
-  headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  },
   body: JSON.stringify({ toolUseId: call.toolUseId, result: text }),
 });
 ```
@@ -523,20 +555,27 @@ await fetch(`${baseUrl}/agent-runs/${runId}/tool-results`, {
   "data": {
     "text": "Here's what I found...",
     "turn": 0,
-    "finishReason": "tool_use",       // optional; canonical lowercase token
-    "toolCalls": [                    // optional; absent when the turn was text-only
-      { "id": "call_abc", "name": "search", "input": { /* JSON Schema-matching args */ } }
-    ]
-  }
+    "finishReason": "tool_use", // optional; canonical lowercase token
+    "toolCalls": [
+      // optional; absent when the turn was text-only
+      {
+        "id": "call_abc",
+        "name": "search",
+        "input": {
+          /* JSON Schema-matching args */
+        },
+      },
+    ],
+  },
 }
 ```
 
-| Field            | Type     | Required | Notes |
-| ---------------- | -------- | -------- | ----- |
-| `text`           | string   | yes      | Full assistant text for this turn (concatenation of every preceding `assistant_delta` for this turn, plus any non-streaming snapshot the engine appended at close). May be empty when the turn was tool-only. |
-| `turn`           | integer  | yes      | 0-based tool-turn index this assistant message closes. Useful for SDK clients pairing the message with the subsequent `tool_result` rows. |
-| `finishReason`   | string\|null | no   | Canonical lowercase stop reason normalized across providers (`"end_turn"`, `"tool_use"`, `"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). Pulled from the engine's per-turn `stopReason` after normalization — Gemini's `MAX_TOKENS` lands as `"max_tokens"`, OpenAI's `length` lands as `"max_tokens"`, etc. `null` / omitted when the provider did not report one. |
-| `toolCalls`      | array    | no       | Tool calls the model emitted on this turn (id, sanitized pipeline-side name, JSON-matching `input`). Omitted when the model did not call any tools. |
+| Field          | Type         | Required | Notes                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------- | ------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text`         | string       | yes      | Full assistant text for this turn (concatenation of every preceding `assistant_delta` for this turn, plus any non-streaming snapshot the engine appended at close). May be empty when the turn was tool-only.                                                                                                                                                                     |
+| `turn`         | integer      | yes      | 0-based tool-turn index this assistant message closes. Useful for SDK clients pairing the message with the subsequent `tool_result` rows.                                                                                                                                                                                                                                         |
+| `finishReason` | string\|null | no       | Canonical lowercase stop reason normalized across providers (`"end_turn"`, `"tool_use"`, `"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). Pulled from the engine's per-turn `stopReason` after normalization — Gemini's `MAX_TOKENS` lands as `"max_tokens"`, OpenAI's `length` lands as `"max_tokens"`, etc. `null` / omitted when the provider did not report one. |
+| `toolCalls`    | array        | no       | Tool calls the model emitted on this turn (id, sanitized pipeline-side name, JSON-matching `input`). Omitted when the model did not call any tools.                                                                                                                                                                                                                               |
 
 **Emission frequency.** Exactly **one** `assistant_message` per completed
 assistant turn — including the last turn before a terminal `error`. SDK
@@ -548,7 +587,7 @@ and avoid stitching a turn out of `assistant_delta` chunks themselves
 Gemini `MAX_TOKENS` while emitting `outputSchema` JSON), the last
 `assistant_message` preceding the `error` carries the partial text plus
 `finishReason: "max_tokens"`. The terminal `error` event then carries the
-*same* text on `data.partialText` so reconnect / replay sees both pieces
+_same_ text on `data.partialText` so reconnect / replay sees both pieces
 without depending on event ordering.
 
 ### 4.5 `loop_detected`
@@ -563,11 +602,11 @@ without depending on event ordering.
   "data": { "consecutiveCount": 6, "hardCutoff": true,  "tools": ["recall"] } }
 ```
 
-| Field              | Type    | Notes |
-| ------------------ | ------- | ----- |
-| `consecutiveCount` | integer | Length of the identical-batch streak that just tripped the threshold (`>= consecutiveThreshold`). |
+| Field              | Type    | Notes                                                                                                                        |
+| ------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `consecutiveCount` | integer | Length of the identical-batch streak that just tripped the threshold (`>= consecutiveThreshold`).                            |
 | `hardCutoff`       | boolean | `false` for the soft nudge round; `true` once the pipeline forces finalisation. The SDK may see one of each in a single run. |
-| `tools`            | array   | Names of the tool calls in the looping batch (no args — those are persisted on the matching `tool_result` events). |
+| `tools`            | array   | Names of the tool calls in the looping batch (no args — those are persisted on the matching `tool_result` events).           |
 
 Observability only: the synthetic skip + steering nudge are emitted on the
 normal `tool_result` and assistant-message channels by the time this event
@@ -580,14 +619,17 @@ See §8 for the wire-spec field that controls thresholds.
 ### 4.6 `tool_budget_exceeded`
 
 ```jsonc
-{ "seq": 14, "type": "tool_budget_exceeded",
-  "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 } }
+{
+  "seq": 14,
+  "type": "tool_budget_exceeded",
+  "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 },
+}
 ```
 
-| Field       | Type    | Notes |
-| ----------- | ------- | ----- |
-| `tool`      | string  | Logical tool name as the model saw it (matches the key in `spec.toolBudgets`). |
-| `maxCalls`  | integer | Configured cap. |
+| Field       | Type    | Notes                                                                                                       |
+| ----------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `tool`      | string  | Logical tool name as the model saw it (matches the key in `spec.toolBudgets`).                              |
+| `maxCalls`  | integer | Configured cap.                                                                                             |
 | `callIndex` | integer | 1-based count of attempts to call this tool over the run lifetime; always strictly greater than `maxCalls`. |
 
 Observability only: the synthetic "budget exceeded — pivot or finalize"
@@ -601,14 +643,25 @@ See §8 for the wire-spec field that defines budgets.
 ### 4.7 Terminal events
 
 ```jsonc
-{ "seq": 14, "type": "result",    "data": { "ok": true,  "text": "..." } }
+// Every terminal `result` and `error` event also carries `tokens`, `turns`,
+// and `model` for cost attribution and dashboards — see §4.7.1.
+{ "seq": 14, "type": "result",    "data": {
+    "ok":      true,
+    "text":    "...",
+    "tokens":  { "inputTokens": 1283, "cachedTokens": 512, "reasoningTokens": 96, "outputTokens": 240 },
+    "turns":   3,
+    "model":   { "id": "platform:demo", "provider": "openai", "vendorModelId": "gpt-5.4-mini", "reasoningEffort": "low" }
+} }
 { "seq": 14, "type": "error",     "data": {
     "error": "Model output was truncated (stop_reason=max_tokens). …",
     "code":         "truncation",     // mirrors `errorClass`; legacy alias
     "errorClass":   "truncation",     // canonical category (see below)
     "finishReason": "max_tokens",     // canonical lowercase stop reason
     "partialText":  "{\n  \"answer\":… (truncated JSON) …",
-    "retryable":    false              // optional; per-class retry hint
+    "retryable":    false,             // optional; per-class retry hint
+    "tokens":       { "inputTokens": 8190, "cachedTokens": 0, "reasoningTokens": 0, "outputTokens": 1024 },
+    "turns":        1,
+    "model":        { "id": "provider:cmf…", "provider": "google", "vendorModelId": "gemini-2.5-pro" }
 } }
 { "seq": 14, "type": "cancelled", "data": { "reason": "user" } }
 ```
@@ -620,24 +673,115 @@ SSE stream.
 with structured triage attributes when the failure carried a salvage path
 (typically truncation, upstream deadline, or max-budget-with-text):
 
-| Field          | Type     | Required | Notes |
-| -------------- | -------- | -------- | ----- |
-| `error`        | string   | yes      | Human-readable message (also persisted on `EphemeralAgentRun.error`). |
-| `code`         | string   | yes      | Legacy alias for `errorClass`. Equals `errorClass` when present; otherwise a small lowercase token (`"error"`, `"invalid_spec"`, `"worker_error"`, …) the SDK can switch on. |
-| `errorClass`   | string   | no       | Canonical category. One of `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"` (input too big), `"truncation"` (output budget exhausted), `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, `"unknown"`. New categories may land additively. |
-| `finishReason` | string\|null | no   | Canonical lowercase stop reason normalized across providers (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When present, mirrors the value on the last `assistant_message`. |
-| `partialText`  | string   | no       | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is likely **incomplete JSON** that will fail `JSON.parse` — see §7 below. Also persisted on `EphemeralAgentRun.finalText` so the Calls UI can render it alongside a truncation banner. |
-| `retryable`    | boolean  | no       | Coarse retry hint inherited from the pipeline's error classifier. Informational; the SDK still owns the actual retry decision. |
+| Field          | Type         | Required | Notes                                                                                                                                                                                                                                                                                       |
+| -------------- | ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `error`        | string       | yes      | Human-readable message (also persisted on `EphemeralAgentRun.error`).                                                                                                                                                                                                                       |
+| `code`         | string       | yes      | Legacy alias for `errorClass`. Equals `errorClass` when present; otherwise a small lowercase token (`"error"`, `"invalid_spec"`, `"worker_error"`, …) the SDK can switch on.                                                                                                                |
+| `errorClass`   | string       | no       | Canonical category. One of `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"` (input too big), `"truncation"` (output budget exhausted), `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, `"unknown"`. New categories may land additively. |
+| `finishReason` | string\|null | no       | Canonical lowercase stop reason normalized across providers (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When present, mirrors the value on the last `assistant_message`.                                                                                                 |
+| `partialText`  | string       | no       | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is likely **incomplete JSON** that will fail `JSON.parse` — see §7 below. Also persisted on `EphemeralAgentRun.finalText` so the Calls UI can render it alongside a truncation banner.         |
+| `retryable`    | boolean      | no       | Coarse retry hint inherited from the pipeline's error classifier. Informational; the SDK still owns the actual retry decision.                                                                                                                                                              |
 
 When `errorClass` is `"truncation"`, the `EphemeralAgentRun` row that the
 SDK can re-fetch via `GET /agent-runs/:runId` will have:
 
-| Field           | Value |
-| --------------- | ----- |
-| `status`        | `"failed"` |
-| `finalText`     | Same string as `data.partialText` (so SDKs can ignore the SSE stream and still recover the salvage). |
-| `error`         | Same string as `data.error`. |
+| Field           | Value                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `status`        | `"failed"`                                                                                                               |
+| `finalText`     | Same string as `data.partialText` (so SDKs can ignore the SSE stream and still recover the salvage).                     |
+| `error`         | Same string as `data.error`.                                                                                             |
 | `failureReason` | `{ "errorClass": "truncation", "finishReason": "max_tokens" }` (JSON object, future-proof for additional triage fields). |
+
+### 4.7.1 Cost-attribution fields (`tokens`, `turns`, `model`)
+
+Every terminal `result` and `error` event carries three additional
+fields so callers can drive cost dashboards, per-turn budgets, and
+provider/model spend reports without a follow-up `GET /agent-runs/:runId`
+round trip. The same fields are persisted on the `EphemeralAgentRun`
+row (columns `tokens` / `turns` / `model`) and surfaced by that
+endpoint.
+
+| Field    | Type   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tokens` | object | Per-run token totals aggregated across every model invocation. Schema below.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `turns`  | int    | Total `engine.completeTurn(...)` invocations for the run, **including** the failing call when a run errors out mid-loop. A single-shot run reports `1`; a tool loop is `>= 2`. Tracked by the pipeline as `modelInvocations` in `PipelineLoopState` and emitted on the terminal `PipelineEvent` (see `packages/agent-pipeline/src/types.ts`). Distinct from "tool turns" — `turns` counts **model invocations**, regardless of whether the model called any tools. |
+| `model`  | object | Resolved model that actually executed the run. Schema below.                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+Always present on terminal events for runs created against
+**MANTYX ≥ 2026-09** servers. Older servers omit these fields entirely;
+SDK clients (TS/Go/Python) detect "no usage data" by checking that
+`model.provider` is empty / falsy. JSON keys follow MANTYX's standard
+camelCase wire convention.
+
+**`tokens` schema** — mirrors the wire shape produced by
+`tokenUsageToWireTokens` in `packages/ts-sdk/src/usage-wire.ts`, which
+is the single source of truth across the TS SDK return value, REST/SSE,
+and A2A surfaces:
+
+| Field             | Type | Notes                                                                                                                                                                                                                                                        |
+| ----------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `inputTokens`     | int  | **Total billable input** — fresh prompt tokens **plus** the cached-read slice the provider still bills (at a discount) **plus** any cache-creation tokens **plus** tool-prompt tokens. Equal to the sum of every provider-reported input bucket for the run. |
+| `cachedTokens`    | int  | The discounted slice of `inputTokens` that came from a prompt cache hit (Anthropic prompt caching, OpenAI cached prompt, Gemini implicit cache). `0` when the provider doesn't report cache reads or the run didn't hit cache.                               |
+| `reasoningTokens` | int  | Non-visible thinking tokens. **Already counted inside `outputTokens`** — surfaced separately so dashboards can break out "thinking cost" vs visible output. `0` when the model didn't reason or didn't report it.                                            |
+| `outputTokens`    | int  | **All** tokens the model emitted for this run, visible + reasoning. Matches the provider's "completion tokens" / "output tokens" billing line.                                                                                                               |
+
+`inputTokens` and `outputTokens` together cover every billable token the
+run consumed; `cachedTokens` and `reasoningTokens` are diagnostic
+breakdowns _inside_ those two totals (not separate buckets to be added).
+All four are clamped to non-negative integers — a misbehaving engine
+emitting `NaN` or negatives cannot poison the JSON snapshot or Prisma
+write.
+
+**`model` schema** — fields the platform stamps onto every successful
+or failed run via `services/agent-runs/resolve-model.ts`:
+
+| Field             | Type   | Notes                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`              | string | Catalog id — the same string a caller would pass back as `modelId` (in §2.1) to re-select this exact entry (e.g. `"platform:demo"`, `"provider:cmf…"`). Empty string against legacy fallbacks that didn't synthesise a catalog id.                                                                                                                       |
+| `provider`        | string | Lowercase provider id: `"openai"`, `"anthropic"`, `"google"`, `"azure-openai"`.                                                                                                                                                                                                                                                                          |
+| `vendorModelId`   | string | The model id the platform actually sent to the provider (e.g. `"gpt-5.4-mini"`, `"claude-opus-4-7"`, `"gemini-2.5-pro"`). Carried through from the `model` field on `AgentSpec` after resolution.                                                                                                                                                        |
+| `reasoningEffort` | string | Optional. `"off"`, `"low"`, `"medium"`, `"high"`. Computed via `resolveReasoningEffortForOptions` (`packages/ts-sdk/src/usage-wire.ts`) from the unified 0–100 `reasoningLevel` knob: 0 → `"off"`, 1–35 → `"low"`, 36–65 → `"medium"`, 66–100 → `"high"`. Omitted when the provider doesn't expose a reasoning-level knob or the run didn't request one. |
+
+**Per-provider token mapping.** Provider responses vary in how they
+report token usage. MANTYX normalises them into the wire shape above as
+follows (see `packages/agent-pipeline/src/engines/*` for the engine-
+side aggregation that feeds `tokenUsageToWireTokens`):
+
+| Provider  | `inputTokens` ←                                                                                 | `cachedTokens` ←                            | `reasoningTokens` ←                                                     | `outputTokens` ←                                                                                     |
+| --------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| OpenAI    | `usage.prompt_tokens` (already includes cached read tokens)                                     | `usage.prompt_tokens_details.cached_tokens` | `usage.completion_tokens_details.reasoning_tokens`                      | `usage.completion_tokens`                                                                            |
+| Anthropic | `usage.input_tokens` + `usage.cache_read_input_tokens` + `usage.cache_creation_input_tokens`    | `usage.cache_read_input_tokens`             | (extended-thinking tokens; folded into `output_tokens` by the provider) | `usage.output_tokens`                                                                                |
+| Google    | `usageMetadata.promptTokenCount` + `usageMetadata.cachedContentTokenCount` + tool-prompt tokens | `usageMetadata.cachedContentTokenCount`     | `usageMetadata.thoughtsTokenCount`                                      | `usageMetadata.candidatesTokenCount` (or `totalTokenCount - promptTokenCount` for older Gemini SDKs) |
+
+If a provider doesn't report a given bucket the corresponding field is
+`0`, never `null`.
+
+**Tool-loop accounting.** When the run executes tool turns, every
+`engine.completeTurn(...)` invocation contributes its usage to the
+aggregated `tokens` object — so a run with one tool round (model →
+tool → model) reports `turns: 2` and the **sum** of both model calls'
+token usage. The counter is incremented in a `try/finally` around the
+engine call inside `runMainPipelineLoop`
+(`packages/agent-pipeline/src/pipeline.ts`), so the failing call still
+counts toward `turns` even when the engine throws. The terminal event
+carries cumulative totals only; per-turn observability lives on
+`assistant_message` events.
+
+**A2A exposure.** The MANTYX-hosted A2A endpoint
+(`POST /api/a2a/{workspaceSlug}/agents/{agentSlug}`) returns the same
+triple under `result.metadata.mantyx`. The block is omitted entirely
+against legacy runners that haven't implemented the optional
+`runWithUsage` method on `AgentRunner` (see
+`packages/ts-sdk/src/a2a/adapter.ts`); cross-platform A2A clients
+should treat its absence as "no usage data" rather than as zero usage.
+
+**SDK return-value exposure.** The TS SDK exposes the same triple via
+the opt-in `runAgentWithUsage` (returning a `RunAgentResult` with
+`text`, `tokens`, `turns`, `model`). The legacy `runAgent` still
+returns just `string` for backward compatibility — see
+`packages/ts-sdk/src/run.ts`. Go and Python SDKs surface the fields
+directly on the existing `RunResult` struct/dataclass (additive,
+non-breaking since those return types were already objects).
 
 ---
 
@@ -657,19 +801,19 @@ Authorization: Bearer <api-key>
 }
 ```
 
-| Field        | Type    | Required | Notes |
-| ------------ | ------- | -------- | ----- |
-| `toolUseId`  | string  | yes      | Must match a pending `local_tool_call`'s id. |
-| `result`     | string  | one-of   | Successful textual result (≤ 2 MB). For MCP tools, flatten content blocks to text. For A2A delegations, the peer's reply text. |
-| `error`      | string  | one-of   | Human-readable failure message (≤ 8 KB). Surfaced to the model so it can recover. |
+| Field       | Type   | Required | Notes                                                                                                                          |
+| ----------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `toolUseId` | string | yes      | Must match a pending `local_tool_call`'s id.                                                                                   |
+| `result`    | string | one-of   | Successful textual result (≤ 2 MB). For MCP tools, flatten content blocks to text. For A2A delegations, the peer's reply text. |
+| `error`     | string | one-of   | Human-readable failure message (≤ 8 KB). Surfaced to the model so it can recover.                                              |
 
 Server response codes:
 
-| Code | When |
-| ---- | ---- |
-| `204` | Accepted; the runner was woken and will resume the model loop. |
-| `400` | Body failed Zod validation (missing `toolUseId`, both/neither of `result`/`error`, etc.). |
-| `404` | `unknown_tool_use` — `toolUseId` doesn't match any pending call (already answered or unknown id). |
+| Code  | When                                                                                                                |
+| ----- | ------------------------------------------------------------------------------------------------------------------- |
+| `204` | Accepted; the runner was woken and will resume the model loop.                                                      |
+| `400` | Body failed Zod validation (missing `toolUseId`, both/neither of `result`/`error`, etc.).                           |
+| `404` | `unknown_tool_use` — `toolUseId` doesn't match any pending call (already answered or unknown id).                   |
 | `409` | `run_terminal` — the run already finished (success, failure, cancel, or local-tool timeout). The result is dropped. |
 
 The runner enforces a per-call `localToolTimeoutMs` (default 5 minutes).
@@ -684,20 +828,20 @@ After timeout the model loop unblocks with a synthetic
 `spec.reasoningLevel` controls the LLM's extended-thinking effort. Two
 input shapes are accepted; both map to a numeric `0–100` internally.
 
-| Form        | Values                                | Notes |
-| ----------- | ------------------------------------- | ----- |
-| **String**  | `"off"`, `"low"`, `"medium"`, `"high"` | Snaps to `0`, `30`, `50`, `80` (matches the web composer). |
-| **Number**  | integer `0`–`100`                     | Pass-through. `0` explicitly disables provider thinking. |
+| Form       | Values                                 | Notes                                                      |
+| ---------- | -------------------------------------- | ---------------------------------------------------------- |
+| **String** | `"off"`, `"low"`, `"medium"`, `"high"` | Snaps to `0`, `30`, `50`, `80` (matches the web composer). |
+| **Number** | integer `0`–`100`                      | Pass-through. `0` explicitly disables provider thinking.   |
 
 Per provider:
 
-| Provider                   | Knob driven by `reasoningLevel` |
-| -------------------------- | ------------------------------- |
-| OpenAI Responses (o-series, GPT-5.x) | `reasoning.effort` |
-| Gemini ≥ 3                 | `thinkingConfig.thinkingLevel` |
-| Gemini ≤ 2.5               | `thinkingConfig.thinkingBudget` (token budget; scaled) |
-| Anthropic / Bedrock-Anthropic | extended thinking budget (≈ 512 tokens at `low` → ≈ 8 000 at `high`) |
-| xAI Grok, others           | ignored |
+| Provider                             | Knob driven by `reasoningLevel`                                      |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| OpenAI Responses (o-series, GPT-5.x) | `reasoning.effort`                                                   |
+| Gemini ≥ 3                           | `thinkingConfig.thinkingLevel`                                       |
+| Gemini ≤ 2.5                         | `thinkingConfig.thinkingBudget` (token budget; scaled)               |
+| Anthropic / Bedrock-Anthropic        | extended thinking budget (≈ 512 tokens at `low` → ≈ 8 000 at `high`) |
+| xAI Grok, others                     | ignored                                                              |
 
 When `reasoningLevel > 0` and the provider supports it, the SSE stream
 will include `thinking_delta` events alongside `assistant_delta`.
@@ -718,21 +862,21 @@ guaranteed-parseable JSON matching the supplied schema.
 }
 ```
 
-| Field    | Type   | Required | Notes |
-| -------- | ------ | -------- | ----- |
-| `name`   | string | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`. |
+| Field    | Type   | Required | Notes                                                                                                                                                                                                         |
+| -------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`   | string | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`.                                                                                     |
 | `schema` | object | yes      | JSON Schema for the assistant text. Root must be a JSON object — most providers reject array/scalar roots in structured-output mode. Passed through verbatim; MANTYX does not validate the schema's contents. |
 
 Per provider:
 
-| Provider                       | How the schema is enforced |
-| ------------------------------ | -------------------------- |
-| OpenAI Responses (o-series, GPT-5.x, …) | `text.format = { type: "json_schema", strict: true, name, schema }` on every `completeTurn` (compatible with tool calls). |
-| Gemini 3+ (any turn)           | `responseMimeType: "application/json"` + `responseJsonSchema` on every `completeTurn`. Gemini 3 accepts the schema alongside `functionDeclarations`. |
-| Gemini ≤ 2.5 with no tools     | Same as Gemini 3+: `responseMimeType: "application/json"` + `responseJsonSchema`. |
-| Gemini ≤ 2.5 **with tools**    | Synthetic `set_model_response` function declaration is injected; its `parametersJsonSchema` is the supplied schema. The system instruction is augmented to direct the model to call this tool with the final answer. The engine intercepts the call, hides it from the SDK, and surfaces the call's arguments as the assistant text (JSON-stringified). Sidesteps the API rejection ("Function calling with a response mime type: 'application/json' is unsupported") without round-tripping a 4xx. |
-| Anthropic / Bedrock-Anthropic  | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text. |
-| xAI Grok, others               | Ignored — the model returns plain text. |
+| Provider                                | How the schema is enforced                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAI Responses (o-series, GPT-5.x, …) | `text.format = { type: "json_schema", strict: true, name, schema }` on every `completeTurn` (compatible with tool calls).                                                                                                                                                                                                                                                                                                                                                                           |
+| Gemini 3+ (any turn)                    | `responseMimeType: "application/json"` + `responseJsonSchema` on every `completeTurn`. Gemini 3 accepts the schema alongside `functionDeclarations`.                                                                                                                                                                                                                                                                                                                                                |
+| Gemini ≤ 2.5 with no tools              | Same as Gemini 3+: `responseMimeType: "application/json"` + `responseJsonSchema`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Gemini ≤ 2.5 **with tools**             | Synthetic `set_model_response` function declaration is injected; its `parametersJsonSchema` is the supplied schema. The system instruction is augmented to direct the model to call this tool with the final answer. The engine intercepts the call, hides it from the SDK, and surfaces the call's arguments as the assistant text (JSON-stringified). Sidesteps the API rejection ("Function calling with a response mime type: 'application/json' is unsupported") without round-tripping a 4xx. |
+| Anthropic / Bedrock-Anthropic           | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text.                                                                                                                                                                                                                                                                                                              |
+| xAI Grok, others                        | Ignored — the model returns plain text.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 The synthetic-tool paths (Gemini 2.5 + tools, Anthropic) are entirely
 internal: the SDK still receives `data.text: string` on the terminal
@@ -741,11 +885,11 @@ or `final_report`. They never appear in the tools array the SDK declared.
 
 Validation (server-side, `400 invalid_request` on violation):
 
-| Constraint                                | Limit |
-| ----------------------------------------- | ----- |
-| Serialized JSON size of `outputSchema`    | ≤ 32 KB |
-| `name` regex                              | `/^[a-zA-Z0-9_-]{1,64}$/` |
-| `schema` shape                            | non-`null`, non-array JSON object |
+| Constraint                             | Limit                             |
+| -------------------------------------- | --------------------------------- |
+| Serialized JSON size of `outputSchema` | ≤ 32 KB                           |
+| `name` regex                           | `/^[a-zA-Z0-9_-]{1,64}$/`         |
+| `schema` shape                         | non-`null`, non-array JSON object |
 
 **SDK guidance.** Even though the server enforces JSON shape via the
 provider, transient model errors (refusal text, truncation under
@@ -768,8 +912,8 @@ bytes that already streamed. Instead:
    bytes (§4.7).
 3. The run row exposes the salvage on
    `GET /agent-runs/:runId` as `{ status: "failed", finalText: "<partial JSON>",
-   error: "Model output was truncated …", failureReason: { errorClass:
-   "truncation", finishReason: "max_tokens" } }`.
+error: "Model output was truncated …", failureReason: { errorClass:
+"truncation", finishReason: "max_tokens" } }`.
 
 `partialText` is a **best-effort raw byte sequence** — for `outputSchema`
 runs it will almost always fail `JSON.parse` because the JSON object was
@@ -781,7 +925,7 @@ falling back to it as the answer is not.
 `outputSchema` works for both ephemeral runs (`systemPrompt`-defined) and
 `agentId`-backed runs — the runner applies the schema to whichever
 `AgentSpec` it built. `outputSchema` is independent of `reasoningLevel`:
-the model can think extensively *and* emit JSON.
+the model can think extensively _and_ emit JSON.
 
 ---
 
@@ -798,10 +942,10 @@ The pipeline tracks an order-invariant canonical signature for every
 assistant turn that emits one or more tool calls. When the same signature
 repeats consecutively the guard intervenes:
 
-| Trigger                                            | Server action |
-| -------------------------------------------------- | ------------- |
+| Trigger                                           | Server action                                                                                                                                                                                                        |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `consecutiveThreshold` identical batches in a row | Skip the duplicate batch with a synthetic "you've made this exact call before" tool result, prepend a user-style **steering nudge** ("either deliver a final answer or change strategy") before the next model turn. |
-| `hardCutoffThreshold` identical batches in a row  | Force a tools-disabled finalise turn (same path as `budgets.maxToolTurnsExceeded: "finalize"`) so the run lands cleanly. |
+| `hardCutoffThreshold` identical batches in a row  | Force a tools-disabled finalise turn (same path as `budgets.maxToolTurnsExceeded: "finalize"`) so the run lands cleanly.                                                                                             |
 
 ```jsonc
 "loopDetection": {
@@ -813,11 +957,11 @@ repeats consecutively the guard intervenes:
 "loopDetection": false          // explicitly disable for this run
 ```
 
-| Field                  | Type            | Notes |
-| ---------------------- | --------------- | ----- |
-| `consecutiveThreshold` | integer ≥ 2     | Default `3`. Single batch = single tool call, not a loop, so the floor is `2`. |
+| Field                  | Type            | Notes                                                                                                                 |
+| ---------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `consecutiveThreshold` | integer ≥ 2     | Default `3`. Single batch = single tool call, not a loop, so the floor is `2`.                                        |
 | `hardCutoffThreshold`  | integer ≥ 3     | Default `6`. Must be **strictly greater** than `consecutiveThreshold` (otherwise the soft nudge never gets a chance). |
-| (top-level `false`)    | literal `false` | Disables the guard. `budgets.maxToolTurns` still applies. |
+| (top-level `false`)    | literal `false` | Disables the guard. `budgets.maxToolTurns` still applies.                                                             |
 
 Validation (server-side, `400 invalid_request` on violation): both
 thresholds capped at `100`; `hardCutoffThreshold` must exceed
@@ -844,10 +988,10 @@ loop and either changes strategy or finalises.
 }
 ```
 
-| Field      | Type        | Notes |
-| ---------- | ----------- | ----- |
+| Field      | Type                 | Notes                                                                                                          |
+| ---------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `<key>`    | string (1–120 chars) | Logical tool name as the model sees it (`ResolvedTool.name`). The SDK + pipeline handle internal sanitisation. |
-| `maxCalls` | integer ≥ 0 | Hard cap. `0` disables the tool entirely (the first attempt returns the synthetic body). |
+| `maxCalls` | integer ≥ 0          | Hard cap. `0` disables the tool entirely (the first attempt returns the synthetic body).                       |
 
 Budgets are **per-tool, not pooled** — `hive_search_deals: { maxCalls: 5 }`
 and `hive_search_meetings: { maxCalls: 5 }` give the agent five of each,
@@ -855,23 +999,23 @@ not five between them.
 
 Validation (server-side, `400 invalid_request` on violation):
 
-| Constraint            | Limit |
-| --------------------- | ----- |
-| Max entries           | `32`  |
-| `<key>` length        | `1..120` |
+| Constraint             | Limit                                                            |
+| ---------------------- | ---------------------------------------------------------------- |
+| Max entries            | `32`                                                             |
+| `<key>` length         | `1..120`                                                         |
 | `maxCalls` upper bound | `1000` (functionally unlimited; `maxToolTurns: 100` fires first) |
 
 **Default budgets** (applied when the field is omitted; caller-provided
 entries are layered on top so per-run overrides win):
 
-| Tool                                                                                             | Default `maxCalls` |
-| ------------------------------------------------------------------------------------------------ | ------------------ |
-| `recall` (workspace memory hybrid search)                                                        | `4` |
-| `traverse` (memory graph BFS)                                                                    | `3` |
-| `hive_consult_ontology` (per-hive ontology read; same name across all three hives)               | `4` |
-| `hive_search_deals` / `_meetings` / `_companies` / `_people` (Sales Hive general search)         | `5` |
-| `hive_search_tickets` / `_conversations` / `_accounts` (Customer Hive general search)            | `5` |
-| `hive_search_releases` / `_issues` (Product Hive general search)                                 | `5` |
+| Tool                                                                                     | Default `maxCalls` |
+| ---------------------------------------------------------------------------------------- | ------------------ |
+| `recall` (workspace memory hybrid search)                                                | `4`                |
+| `traverse` (memory graph BFS)                                                            | `3`                |
+| `hive_consult_ontology` (per-hive ontology read; same name across all three hives)       | `4`                |
+| `hive_search_deals` / `_meetings` / `_companies` / `_people` (Sales Hive general search) | `5`                |
+| `hive_search_tickets` / `_conversations` / `_accounts` (Customer Hive general search)    | `5`                |
+| `hive_search_releases` / `_issues` (Product Hive general search)                         | `5`                |
 
 Pass `"toolBudgets": {}` to start from a clean slate (no defaults applied
 on top — useful for runs that intentionally want unbounded research). When
@@ -942,23 +1086,27 @@ terminal event.
 import { fetch } from "undici";
 
 // ── 1. Resolve the Agent Card locally ───────────────────────────────────
-const cardResp = await fetch("https://hr.intranet.acme/.well-known/agent-card.json", {
-  headers: { Authorization: `Bearer ${INTRANET_TOKEN}` },
-});
-const agentCard = await cardResp.json();   // ← whole document, passed through
+const cardResp = await fetch(
+  "https://hr.intranet.acme/.well-known/agent-card.json",
+  {
+    headers: { Authorization: `Bearer ${INTRANET_TOKEN}` },
+  },
+);
+const agentCard = await cardResp.json(); // ← whole document, passed through
 
 // ── 2. Submit the spec ──────────────────────────────────────────────────
 const create = await fetch(`${MANTYX}/api/v1/workspaces/${slug}/agent-runs`, {
   method: "POST",
-  headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  },
   body: JSON.stringify({
     modelId: "openai:gpt-5.5",
     systemPrompt: "You can delegate HR questions to the Acme HR agent.",
     prompt: "How many PTO days does Alice have left this year?",
     reasoningLevel: "low",
-    tools: [
-      { kind: "a2a_local", name: "intranet_hr_agent", agentCard },
-    ],
+    tools: [{ kind: "a2a_local", name: "intranet_hr_agent", agentCard }],
   }),
 });
 const { runId, streamUrl } = await create.json();
@@ -972,14 +1120,23 @@ for await (const ev of parseSSE(stream)) {
   if (ev.type !== "local_tool_call") continue;
   if (ev.data.kind !== "a2a_local") continue;
 
-  const peer = a2aClients.get(ev.data.agentCard.url);  // ← dispatch by URL
+  const peer = a2aClients.get(ev.data.agentCard.url); // ← dispatch by URL
   const reply = await peer.send({ message: ev.data.args.message });
 
-  await fetch(`${MANTYX}/api/v1/workspaces/${slug}/agent-runs/${runId}/tool-results`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ toolUseId: ev.data.toolUseId, result: reply.text }),
-  });
+  await fetch(
+    `${MANTYX}/api/v1/workspaces/${slug}/agent-runs/${runId}/tool-results`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        toolUseId: ev.data.toolUseId,
+        result: reply.text,
+      }),
+    },
+  );
 }
 ```
 
@@ -990,13 +1147,16 @@ for await (const ev of parseSSE(stream)) {
 ```ts
 // ── 1. Connect + resolve catalog locally ────────────────────────────────
 const mcp = new McpClient(stdio("./mcp-server-filesystem"));
-const initImpl = await mcp.initialize();         // → { name, version, ... }
-const { tools } = await mcp.listTools();         // → MCP Tool[]
+const initImpl = await mcp.initialize(); // → { name, version, ... }
+const { tools } = await mcp.listTools(); // → MCP Tool[]
 
 // ── 2. Submit the spec ──────────────────────────────────────────────────
 const create = await fetch(`${MANTYX}/api/v1/workspaces/${slug}/agent-runs`, {
   method: "POST",
-  headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  },
   body: JSON.stringify({
     modelId: "openai:gpt-5.5",
     prompt: "Tell me what's at /etc/hosts.",
@@ -1005,7 +1165,7 @@ const create = await fetch(`${MANTYX}/api/v1/workspaces/${slug}/agent-runs`, {
         kind: "mcp_local",
         name: "fs",
         serverInfo: initImpl,
-        tools,                                    // ← verbatim from listTools()
+        tools, // ← verbatim from listTools()
       },
     ],
   }),
@@ -1018,7 +1178,7 @@ for await (const ev of parseSSE(streamFromUrl(streamUrl, apiKey))) {
   if (ev.data.kind !== "mcp_local") continue;
 
   const result = await mcp.callTool({
-    name: ev.data.mcpToolName,                   // identical to ev.data.name
+    name: ev.data.mcpToolName, // identical to ev.data.name
     arguments: ev.data.args,
   });
   const text = result.content
@@ -1026,11 +1186,17 @@ for await (const ev of parseSSE(streamFromUrl(streamUrl, apiKey))) {
     .map((b) => b.text)
     .join("\n");
 
-  await fetch(`${MANTYX}/api/v1/workspaces/${slug}/agent-runs/${runId}/tool-results`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ toolUseId: ev.data.toolUseId, result: text }),
-  });
+  await fetch(
+    `${MANTYX}/api/v1/workspaces/${slug}/agent-runs/${runId}/tool-results`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ toolUseId: ev.data.toolUseId, result: text }),
+    },
+  );
 }
 ```
 
@@ -1050,7 +1216,7 @@ A reference SDK should:
       JSON shape via the provider, but transient model errors can still
       produce strings that fail to parse in rare cases.
 - [ ] Accept `loopDetection` and `toolBudgets` from the caller and pass
-      them through unchanged (see §8). Both are *additive* — omitting
+      them through unchanged (see §8). Both are _additive_ — omitting
       them keeps the runtime defaults; passing `loopDetection: false` opts
       out; passing `toolBudgets: {}` clears the defaults; passing entries
       layers caller overrides on top of the defaults. Do **not** translate
@@ -1061,12 +1227,9 @@ A reference SDK should:
       synthetic tool-results / steering nudges, so the SDK should keep
       consuming the stream until the terminal event lands.
 - [ ] Maintain three local-callback registries (or one tagged-union
-      registry), keyed by `name`:
-      - generic local tools (`kind: "local"`),
-      - local A2A peers (`kind: "a2a_local"`, indexed by some Agent Card
-        field — typically `agentCard.url`),
-      - local MCP servers (`kind: "mcp_local"`, indexed by the SDK-side
-        server label that matches `local_tool_call.mcpServer`).
+      registry), keyed by `name`: - generic local tools (`kind: "local"`), - local A2A peers (`kind: "a2a_local"`, indexed by some Agent Card
+      field — typically `agentCard.url`), - local MCP servers (`kind: "mcp_local"`, indexed by the SDK-side
+      server label that matches `local_tool_call.mcpServer`).
 - [ ] For `kind: "local"`, accept developer-supplied `parameters` (Zod /
       JSON Schema) and serialize to JSON Schema before submission. When the
       caller declares an output schema, forward it as `outputSchema` (same

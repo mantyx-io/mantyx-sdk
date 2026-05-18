@@ -532,6 +532,185 @@ func TestRunAgent_AssistantMessageSurfacesTriageFields(t *testing.T) {
 	}
 }
 
+// TestRunAgent_SurfacesCostAttributionFromResult covers the
+// cost-attribution triple from `docs/agent-runs-protocol.md` §7.1: the
+// successful terminal `result` event carries `tokens` / `turns` /
+// `model`, which the SDK lifts onto `RunResult`.
+func TestRunAgent_SurfacesCostAttributionFromResult(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "result",
+				data: map[string]any{
+					"subtype": "success",
+					"text":    "Hello world",
+					"tokens": map[string]any{
+						"inputTokens":     1283,
+						"cachedTokens":    512,
+						"reasoningTokens": 96,
+						"outputTokens":    240,
+					},
+					"turns": 3,
+					"model": map[string]any{
+						"id":              "platform:demo",
+						"provider":        "openai",
+						"vendorModelId":   "gpt-test",
+						"reasoningEffort": "low",
+					},
+				},
+			},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	out, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if out.Tokens == nil {
+		t.Fatalf("expected Tokens to be populated, got nil")
+	}
+	if out.Tokens.InputTokens != 1283 || out.Tokens.CachedTokens != 512 ||
+		out.Tokens.ReasoningTokens != 96 || out.Tokens.OutputTokens != 240 {
+		t.Fatalf("unexpected token totals: %+v", out.Tokens)
+	}
+	if out.Turns != 3 {
+		t.Fatalf("expected Turns=3, got %d", out.Turns)
+	}
+	if out.Model == nil {
+		t.Fatalf("expected Model to be populated, got nil")
+	}
+	if out.Model.ID != "platform:demo" || out.Model.Provider != "openai" ||
+		out.Model.VendorModelID != "gpt-test" || out.Model.ReasoningEffort != "low" {
+		t.Fatalf("unexpected model: %+v", out.Model)
+	}
+}
+
+// TestRunAgent_LegacyServerOmitsCostAttribution verifies that
+// terminal events without the cost-attribution triple leave the
+// fields at their zero values — that's the "no usage data" sentinel
+// callers detect via `Result.Model == nil`.
+func TestRunAgent_LegacyServerOmitsCostAttribution(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	out, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if out.Tokens != nil {
+		t.Fatalf("expected Tokens=nil against legacy server, got %+v", out.Tokens)
+	}
+	if out.Turns != 0 {
+		t.Fatalf("expected Turns=0, got %d", out.Turns)
+	}
+	if out.Model != nil {
+		t.Fatalf("expected Model=nil against legacy server, got %+v", out.Model)
+	}
+}
+
+// TestRunAgent_ErrorEventCarriesCostAttribution mirrors the success
+// path for the truncation salvage: a terminal `error` event now also
+// carries `tokens` / `turns` / `model` so callers can attribute spend
+// for failed runs too. See `docs/agent-runs-protocol.md` §7.1.
+func TestRunAgent_ErrorEventCarriesCostAttribution(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "error",
+				data: map[string]any{
+					"error":        "Model output was truncated (stop_reason=max_tokens).",
+					"errorClass":   "truncation",
+					"finishReason": "max_tokens",
+					"partialText":  `{"answer":"hello`,
+					"retryable":    false,
+					"tokens": map[string]any{
+						"inputTokens":     8190,
+						"cachedTokens":    0,
+						"reasoningTokens": 0,
+						"outputTokens":    1024,
+					},
+					"turns": 1,
+					"model": map[string]any{
+						"id":            "provider:cmf",
+						"provider":      "google",
+						"vendorModelId": "gemini-2.5-pro",
+					},
+				},
+			},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	_, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var runErr *RunError
+	if !errors.As(err, &runErr) {
+		t.Fatalf("expected *RunError, got %T: %v", err, err)
+	}
+	if runErr.Tokens == nil {
+		t.Fatalf("expected RunError.Tokens to be populated, got nil")
+	}
+	if runErr.Tokens.InputTokens != 8190 || runErr.Tokens.OutputTokens != 1024 {
+		t.Fatalf("unexpected error token totals: %+v", runErr.Tokens)
+	}
+	if runErr.Turns != 1 {
+		t.Fatalf("expected RunError.Turns=1, got %d", runErr.Turns)
+	}
+	if runErr.Model == nil || runErr.Model.Provider != "google" {
+		t.Fatalf("expected RunError.Model.Provider=google, got %+v", runErr.Model)
+	}
+}
+
+// TestRunAgent_ClampsMalformedTokenBuckets verifies the SDK clamps
+// negatives / non-numbers to zero so dashboards never see garbage.
+func TestRunAgent_ClampsMalformedTokenBuckets(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "result",
+				data: map[string]any{
+					"subtype": "success",
+					"text":    "ok",
+					"tokens": map[string]any{
+						"inputTokens":     -10,
+						"cachedTokens":    "not a number",
+						"outputTokens":    12.7,
+					},
+					"turns": -1,
+					"model": map[string]any{"id": "x", "provider": "openai", "vendorModelId": "y"},
+				},
+			},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	out, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if out.Tokens == nil {
+		t.Fatalf("expected Tokens to be populated")
+	}
+	if out.Tokens.InputTokens != 0 || out.Tokens.CachedTokens != 0 ||
+		out.Tokens.ReasoningTokens != 0 || out.Tokens.OutputTokens != 12 {
+		t.Fatalf("expected clamped token totals, got %+v", out.Tokens)
+	}
+	if out.Turns != 0 {
+		t.Fatalf("expected clamped Turns=0, got %d", out.Turns)
+	}
+}
+
 func TestListModels(t *testing.T) {
 	server := newMockServer()
 	defer server.close()

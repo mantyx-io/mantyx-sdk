@@ -49,7 +49,19 @@ export type MockEvent =
       /** When set, hold the SSE stream until the SDK posts a tool result. */
       awaitToolResult?: boolean;
     }
-  | { type: "result"; subtype?: string; text?: string }
+  | {
+      type: "result";
+      subtype?: string;
+      text?: string;
+      /**
+       * Cost-attribution fields surfaced on terminal events by MANTYX
+       * ≥ 2026-09 (see `docs/agent-runs-protocol.md` §7.1). Tests pass
+       * any subset; the mock forwards them verbatim.
+       */
+      tokens?: Record<string, unknown>;
+      turns?: number;
+      model?: Record<string, unknown>;
+    }
   | {
       type: "error";
       error: string;
@@ -58,6 +70,9 @@ export type MockEvent =
       finishReason?: string | null;
       partialText?: string;
       retryable?: boolean;
+      tokens?: Record<string, unknown>;
+      turns?: number;
+      model?: Record<string, unknown>;
     }
   | { type: "cancelled"; reason?: string };
 

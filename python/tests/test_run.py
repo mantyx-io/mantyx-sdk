@@ -178,6 +178,141 @@ def test_run_agent_assistant_message_surfaces_triage_fields(
     assert msg.data["toolCalls"] == [{"id": "call_a", "name": "search", "input": {"q": "hi"}}]
 
 
+def test_run_agent_surfaces_cost_attribution_from_result(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    # Cost-attribution triple from `docs/agent-runs-protocol.md` §7.1:
+    # the successful terminal `result` event carries `tokens` / `turns`
+    # / `model`, which the SDK lifts onto `RunResult`.
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={
+                    "subtype": "success",
+                    "text": "Hello world",
+                    "tokens": {
+                        "inputTokens": 1283,
+                        "cachedTokens": 512,
+                        "reasoningTokens": 96,
+                        "outputTokens": 240,
+                    },
+                    "turns": 3,
+                    "model": {
+                        "id": "platform:demo",
+                        "provider": "openai",
+                        "vendorModelId": "gpt-test",
+                        "reasoningEffort": "low",
+                    },
+                },
+            )
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    assert result.tokens is not None
+    assert result.tokens.input_tokens == 1283
+    assert result.tokens.cached_tokens == 512
+    assert result.tokens.reasoning_tokens == 96
+    assert result.tokens.output_tokens == 240
+    assert result.turns == 3
+    assert result.model is not None
+    assert result.model.id == "platform:demo"
+    assert result.model.provider == "openai"
+    assert result.model.vendor_model_id == "gpt-test"
+    assert result.model.reasoning_effort == "low"
+
+
+def test_run_agent_legacy_server_omits_cost_attribution(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    # Older servers omit `tokens` / `turns` / `model` entirely. The SDK
+    # leaves the fields at ``None`` so callers can detect "no usage
+    # data" via `result.model is None`.
+    mock_server.script_for_next_run = RunScript(
+        events=[ScriptEvent(kind="result", data={"subtype": "success", "text": "ok"})]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    assert result.tokens is None
+    assert result.turns is None
+    assert result.model is None
+
+
+def test_run_agent_error_event_carries_cost_attribution(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    # Failed runs on MANTYX ≥ 2026-09 also carry the cost-attribution
+    # triple (the failing model call's usage is included). See §7.1.
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="error",
+                data={
+                    "error": "Model output was truncated (stop_reason=max_tokens).",
+                    "errorClass": "truncation",
+                    "finishReason": "max_tokens",
+                    "partialText": '{"answer":"hello',
+                    "retryable": False,
+                    "tokens": {
+                        "inputTokens": 8190,
+                        "cachedTokens": 0,
+                        "reasoningTokens": 0,
+                        "outputTokens": 1024,
+                    },
+                    "turns": 1,
+                    "model": {
+                        "id": "provider:cmf",
+                        "provider": "google",
+                        "vendorModelId": "gemini-2.5-pro",
+                    },
+                },
+            )
+        ]
+    )
+    with pytest.raises(MantyxRunError) as exc:
+        mantyx_client.run_agent(system_prompt="x", prompt="y")
+    err = exc.value
+    assert err.tokens is not None
+    assert err.tokens.input_tokens == 8190
+    assert err.tokens.output_tokens == 1024
+    assert err.turns == 1
+    assert err.model is not None
+    assert err.model.provider == "google"
+    assert err.model.vendor_model_id == "gemini-2.5-pro"
+
+
+def test_run_agent_clamps_malformed_token_buckets(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    # A misbehaving engine that ships negatives / NaN / strings should
+    # not poison the JSON snapshot — the SDK clamps every bucket to
+    # non-negative integers (mirroring server-side behaviour).
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={
+                    "subtype": "success",
+                    "text": "ok",
+                    "tokens": {
+                        "inputTokens": -10,
+                        "cachedTokens": "not a number",
+                        "outputTokens": 12.7,
+                    },
+                    "turns": -1,
+                    "model": {"id": "x", "provider": "openai", "vendorModelId": "y"},
+                },
+            )
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    assert result.tokens is not None
+    assert result.tokens.input_tokens == 0
+    assert result.tokens.cached_tokens == 0
+    assert result.tokens.reasoning_tokens == 0
+    assert result.tokens.output_tokens == 12
+    assert result.turns == 0
+
+
 def test_run_agent_serialises_tool_refs(
     mantyx_client: MantyxClient, mock_server: MockServer
 ) -> None:

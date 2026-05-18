@@ -52,6 +52,8 @@ export type {
   ToolBudget,
   ToolBudgets,
   RunResult,
+  RunTokenUsage,
+  RunModelInfo,
   RunEvent,
   RunEventBase,
   AssistantDeltaEvent,
@@ -110,7 +112,11 @@ export {
   MantyxToolError,
   MantyxRunError,
 } from "./errors.js";
-export type { MantyxRunErrorInit } from "./errors.js";
+export type {
+  MantyxRunErrorInit,
+  MantyxRunErrorTokens,
+  MantyxRunErrorModel,
+} from "./errors.js";
 
 export {
   MantyxOAuthClient,

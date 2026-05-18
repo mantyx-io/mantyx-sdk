@@ -118,6 +118,12 @@ func (e *ToolError) Unwrap() error { return e.Cause }
 //     never as a schema-conformant reply.
 //   - Retryable — coarse retry hint from the pipeline's classifier.
 //     Use `RunErrorRetryable(err)` to read it as a tri-state value.
+//
+// Failed runs against MANTYX ≥ 2026-09 also carry the cost-attribution
+// triple from `docs/agent-runs-protocol.md` §7.1 — `Tokens`, `Turns`,
+// and `Model` — including the failing model call's usage. `Tokens ==
+// nil` / `Model == nil` is the "no usage data" sentinel for legacy
+// runners.
 type RunError struct {
 	RunID   string
 	Code    string
@@ -138,6 +144,17 @@ type RunError struct {
 	// error classifier. nil means "the server did not say"; non-nil
 	// callers can `*r.Retryable` to read the bool.
 	Retryable *bool
+
+	// Tokens carries per-run token totals from the terminal `error`
+	// event. nil against MANTYX servers older than 2026-09. The
+	// failing model call's usage is included.
+	Tokens *RunTokenUsage
+	// Turns is the total model invocations for the run, including the
+	// failing call. 0 against legacy MANTYX servers.
+	Turns int
+	// Model identifies the resolved model that executed the run. nil
+	// against legacy MANTYX servers.
+	Model *RunModelInfo
 }
 
 func (e *RunError) Error() string {

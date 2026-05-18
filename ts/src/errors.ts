@@ -77,6 +77,32 @@ export class MantyxToolError extends MantyxError {
 }
 
 /**
+ * Per-run token totals attached to terminal `result` / `error`
+ * events. See `docs/agent-runs-protocol.md` §7.1 for the per-provider
+ * mapping and the relationship between buckets. Re-exported from
+ * `client.ts` so error consumers can pattern-match the triple without
+ * a second import.
+ */
+export interface MantyxRunErrorTokens {
+  inputTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * Resolved model that executed the run. Surfaced on terminal events
+ * by MANTYX ≥ 2026-09. See `docs/agent-runs-protocol.md` §7.1. The
+ * `provider` empty / undefined is the "no usage data" sentinel.
+ */
+export interface MantyxRunErrorModel {
+  id: string;
+  provider: string;
+  vendorModelId: string;
+  reasoningEffort?: string;
+}
+
+/**
  * Optional triage attributes the runner attaches to terminal `error`
  * events. Mirrors the wire fields described in
  * `docs/agent-runs-protocol.md` §7 ("error event payload fields") so SDK
@@ -112,6 +138,17 @@ export interface MantyxRunErrorInit {
    * Informational; the SDK still owns the actual retry decision.
    */
   retryable?: boolean;
+  /**
+   * Per-run token totals from the terminal event. Present against
+   * MANTYX ≥ 2026-09 — see {@link MantyxRunErrorTokens} and
+   * `docs/agent-runs-protocol.md` §7.1. Includes the failing model
+   * call's usage when the run errored mid-loop.
+   */
+  tokens?: MantyxRunErrorTokens;
+  /** Total model invocations for the run, including the failing call. */
+  turns?: number;
+  /** Resolved model that executed the run. See {@link MantyxRunErrorModel}. */
+  model?: MantyxRunErrorModel;
 }
 
 export class MantyxRunError extends MantyxError {
@@ -125,6 +162,12 @@ export class MantyxRunError extends MantyxError {
   readonly partialText: string | undefined;
   /** See {@link MantyxRunErrorInit.retryable}. */
   readonly retryable: boolean | undefined;
+  /** See {@link MantyxRunErrorInit.tokens}. */
+  readonly tokens: MantyxRunErrorTokens | undefined;
+  /** See {@link MantyxRunErrorInit.turns}. */
+  readonly turns: number | undefined;
+  /** See {@link MantyxRunErrorInit.model}. */
+  readonly model: MantyxRunErrorModel | undefined;
 
   constructor(
     runId: string,
@@ -140,6 +183,9 @@ export class MantyxRunError extends MantyxError {
     this.finishReason = init.finishReason;
     this.partialText = init.partialText;
     this.retryable = init.retryable;
+    this.tokens = init.tokens;
+    this.turns = init.turns;
+    this.model = init.model;
   }
 }
 

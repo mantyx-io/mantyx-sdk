@@ -28,11 +28,16 @@ from .client import (
     DEFAULT_TIMEOUT_S,
     ModelCatalog,
     RunEvent,
+    RunModelInfo,
     RunResult,
+    RunTokenUsage,
     SessionInfo,
     _describe_handler,
     _parse_model_catalog,
     _parse_required_scopes,
+    _parse_run_model,
+    _parse_run_tokens,
+    _parse_run_turns,
     _parse_session_info,
     _quote,
     _resolve_credential,
@@ -335,6 +340,13 @@ class AsyncMantyxClient:
     ) -> RunResult:
         collected: list[RunEvent] = []
         final_text = ""
+        # Cost-attribution triple (`docs/agent-runs-protocol.md` §7.1).
+        # Populated when MANTYX ≥ 2026-09 surfaces it on the terminal
+        # event; left as ``None`` against legacy runners so callers can
+        # detect "no usage data" via ``result.model is None``.
+        tokens: RunTokenUsage | None = None
+        turns: int | None = None
+        model_info: RunModelInfo | None = None
         async for ev in self._stream_events(run_id, handlers):
             collected.append(ev)
             if on_event is not None:
@@ -345,12 +357,28 @@ class AsyncMantyxClient:
                     await maybe_await(on_assistant_delta(t))
             if ev.type == "result":
                 subtype = str(ev.data.get("subtype") or "")
+                parsed_tokens = _parse_run_tokens(ev.data.get("tokens"))
+                if parsed_tokens is not None:
+                    tokens = parsed_tokens
+                parsed_turns = _parse_run_turns(ev.data.get("turns"))
+                if parsed_turns is not None:
+                    turns = parsed_turns
+                parsed_model = _parse_run_model(ev.data.get("model"))
+                if parsed_model is not None:
+                    model_info = parsed_model
                 if subtype == "success":
                     txt = ev.data.get("text")
                     final_text = txt if isinstance(txt, str) else ""
                 else:
                     msg = ev.data.get("error") or subtype or "run failed"
-                    raise MantyxRunError(run_id, subtype or "error", str(msg))
+                    raise MantyxRunError(
+                        run_id,
+                        subtype or "error",
+                        str(msg),
+                        tokens=tokens,
+                        turns=turns,
+                        model=model_info,
+                    )
             elif ev.type == "error":
                 # The wire reports both a coarse `code` (legacy alias)
                 # and a canonical `errorClass` triage category; prefer
@@ -366,6 +394,9 @@ class AsyncMantyxClient:
                 partial_text = str(partial_raw) if isinstance(partial_raw, str) else None
                 retryable_raw = ev.data.get("retryable")
                 retryable = retryable_raw if isinstance(retryable_raw, bool) else None
+                err_tokens = _parse_run_tokens(ev.data.get("tokens"))
+                err_turns = _parse_run_turns(ev.data.get("turns"))
+                err_model = _parse_run_model(ev.data.get("model"))
                 raise MantyxRunError(
                     run_id,
                     subtype,
@@ -374,10 +405,20 @@ class AsyncMantyxClient:
                     finish_reason=finish_reason,
                     partial_text=partial_text,
                     retryable=retryable,
+                    tokens=err_tokens,
+                    turns=err_turns,
+                    model=err_model,
                 )
             elif ev.type == "cancelled":
                 raise MantyxRunError(run_id, "cancelled", "Run was cancelled")
-        return RunResult(run_id=run_id, text=final_text, events=collected)
+        return RunResult(
+            run_id=run_id,
+            text=final_text,
+            events=collected,
+            tokens=tokens,
+            turns=turns,
+            model=model_info,
+        )
 
     async def _stream_events(
         self,

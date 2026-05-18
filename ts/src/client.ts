@@ -10,6 +10,7 @@ import {
   MantyxScopeError,
   MantyxToolError,
 } from "./errors.js";
+import type { MantyxRunErrorInit } from "./errors.js";
 import { callA2A, callMcpTool, closeMcpRefs, resolveLocalRefs } from "./local-resolver.js";
 import type { TokenSource } from "./oauth.js";
 import { readSseStream } from "./sse.js";
@@ -282,10 +283,104 @@ export interface ToolBudget {
  */
 export type ToolBudgets = Record<string, ToolBudget>;
 
+/**
+ * Per-run token totals attached to terminal `result` / `error` events
+ * (and to the `GET /agent-runs/:runId` snapshot) by MANTYX ≥ 2026-09.
+ *
+ * Aggregated across every model invocation for the run. See
+ * `docs/agent-runs-protocol.md` §7.1 for the per-provider mapping and
+ * the relationship between buckets (`inputTokens` / `outputTokens` are
+ * the billable totals; `cachedTokens` and `reasoningTokens` are
+ * diagnostic breakdowns _inside_ those two totals, not separate
+ * additive buckets).
+ *
+ * Older servers omit the cost-attribution triple entirely; SDK callers
+ * detect "no usage data" by checking `result.model?.provider` is empty
+ * / undefined.
+ */
+export interface RunTokenUsage {
+  /**
+   * Total billable input tokens — fresh prompt tokens plus the
+   * cached-read slice the provider still bills (at a discount) plus
+   * any cache-creation tokens plus tool-prompt tokens. Equal to the
+   * sum of every provider-reported input bucket for the run.
+   */
+  inputTokens: number;
+  /**
+   * The discounted slice of `inputTokens` that came from a prompt
+   * cache hit (Anthropic prompt caching, OpenAI cached prompt, Gemini
+   * implicit cache). `0` when the provider doesn't report cache reads
+   * or the run didn't hit cache.
+   */
+  cachedTokens: number;
+  /**
+   * Non-visible thinking tokens. **Already counted inside
+   * `outputTokens`** — surfaced separately so dashboards can break out
+   * "thinking cost" vs visible output. `0` when the model didn't
+   * reason or didn't report it.
+   */
+  reasoningTokens: number;
+  /**
+   * All tokens the model emitted for this run, visible + reasoning.
+   * Matches the provider's "completion tokens" / "output tokens"
+   * billing line.
+   */
+  outputTokens: number;
+}
+
+/**
+ * The resolved model the platform stamped onto the run, surfaced on
+ * terminal `result` / `error` events (and `GET /agent-runs/:runId`)
+ * by MANTYX ≥ 2026-09. See `docs/agent-runs-protocol.md` §7.1.
+ */
+export interface RunModelInfo {
+  /**
+   * Catalog id — the same string a caller would pass back as
+   * `modelId` to re-select this exact entry (e.g. `"platform:demo"`,
+   * `"provider:cmf…"`). Empty string against legacy fallbacks that
+   * didn't synthesise a catalog id.
+   */
+  id: string;
+  /**
+   * Lowercase provider id: `"openai"`, `"anthropic"`, `"google"`,
+   * `"azure-openai"`. Empty string against legacy runners that don't
+   * report usage data — SDK callers use that as the "no usage data"
+   * signal.
+   */
+  provider: string;
+  /**
+   * The model id the platform actually sent to the provider (e.g.
+   * `"gpt-5.4-mini"`, `"claude-opus-4-7"`, `"gemini-2.5-pro"`).
+   */
+  vendorModelId: string;
+  /**
+   * `"off" | "low" | "medium" | "high"`. Omitted when the provider
+   * doesn't expose a reasoning-level knob or the run didn't request
+   * one.
+   */
+  reasoningEffort?: string;
+}
+
 export interface RunResult {
   runId: string;
   text: string;
   events: RunEvent[];
+  /**
+   * Per-run token totals from the terminal event. Undefined against
+   * MANTYX servers older than 2026-09 (the "no usage data" signal is
+   * `result.model?.provider` being empty / undefined). See
+   * {@link RunTokenUsage} and `docs/agent-runs-protocol.md` §7.1.
+   */
+  tokens?: RunTokenUsage;
+  /**
+   * Total `engine.completeTurn(...)` invocations for the run,
+   * including the failing call when a run errored mid-loop. A
+   * single-shot run reports `1`; a tool loop is `>= 2`. Undefined
+   * against legacy MANTYX servers.
+   */
+  turns?: number;
+  /** Resolved model that executed the run. See {@link RunModelInfo}. */
+  model?: RunModelInfo;
 }
 
 export interface RunEventBase {
@@ -436,6 +531,15 @@ export interface ResultEvent extends RunEventBase {
   subtype: string;
   text?: string;
   error?: string;
+  /**
+   * Per-run token totals. Present against MANTYX ≥ 2026-09 — see
+   * {@link RunTokenUsage} and `docs/agent-runs-protocol.md` §7.1.
+   */
+  tokens?: RunTokenUsage;
+  /** Total model invocations for the run. See {@link RunResult.turns}. */
+  turns?: number;
+  /** Resolved model that executed the run. See {@link RunModelInfo}. */
+  model?: RunModelInfo;
 }
 
 export interface ErrorEvent extends RunEventBase {
@@ -475,6 +579,18 @@ export interface ErrorEvent extends RunEventBase {
    * Informational; the SDK still owns the actual retry decision.
    */
   retryable?: boolean;
+  /**
+   * Per-run token totals. Present against MANTYX ≥ 2026-09 — see
+   * {@link RunTokenUsage} and `docs/agent-runs-protocol.md` §7.1.
+   * The pipeline counts the failing model call too, so a run that
+   * threw on the first turn reports `turns: 1` with that call's
+   * tokens already aggregated.
+   */
+  tokens?: RunTokenUsage;
+  /** Total model invocations for the run, including the failing call. */
+  turns?: number;
+  /** Resolved model that executed the run. See {@link RunModelInfo}. */
+  model?: RunModelInfo;
 }
 
 export interface CancelledEvent extends RunEventBase {
@@ -691,6 +807,13 @@ export class MantyxClient {
   ): Promise<RunResult> {
     const collected: RunEvent[] = [];
     let finalText = "";
+    // Cost-attribution triple, populated from the terminal event when
+    // MANTYX ≥ 2026-09 surfaces it. Older runners omit the fields and
+    // we leave the result's `tokens` / `turns` / `model` undefined —
+    // callers detect "no usage data" via `result.model?.provider`.
+    let tokens: RunTokenUsage | undefined;
+    let turns: number | undefined;
+    let modelInfo: RunModelInfo | undefined;
     for await (const ev of this.streamRunEvents(runId, handlers, opts.signal)) {
       collected.push(ev);
       if (opts.onEvent) opts.onEvent(ev);
@@ -699,10 +822,17 @@ export class MantyxClient {
       }
       if (ev.type === "result") {
         const r = ev as ResultEvent;
+        tokens = parseRunTokens(r.tokens) ?? tokens;
+        turns = parseRunTurns(r.turns) ?? turns;
+        modelInfo = parseRunModel(r.model) ?? modelInfo;
         if (r.subtype === "success") {
           finalText = typeof r.text === "string" ? r.text : "";
         } else {
-          throw new MantyxRunError(runId, r.subtype, r.error ?? r.subtype);
+          const errInit: MantyxRunErrorInit = {};
+          if (tokens !== undefined) errInit.tokens = tokens;
+          if (turns !== undefined) errInit.turns = turns;
+          if (modelInfo !== undefined) errInit.model = modelInfo;
+          throw new MantyxRunError(runId, r.subtype, r.error ?? r.subtype, errInit);
         }
       } else if (ev.type === "error") {
         const e = ev as ErrorEvent;
@@ -711,17 +841,27 @@ export class MantyxClient {
         // when present so the SDK exposes a stable taxonomy. See
         // `docs/agent-runs-protocol.md` §7.
         const subtype = e.errorClass ?? e.code ?? "error";
-        throw new MantyxRunError(runId, subtype, e.error, {
-          ...(e.errorClass !== undefined ? { errorClass: e.errorClass } : {}),
-          ...(e.finishReason !== undefined ? { finishReason: e.finishReason } : {}),
-          ...(typeof e.partialText === "string" ? { partialText: e.partialText } : {}),
-          ...(typeof e.retryable === "boolean" ? { retryable: e.retryable } : {}),
-        });
+        const errInit: MantyxRunErrorInit = {};
+        if (e.errorClass !== undefined) errInit.errorClass = e.errorClass;
+        if (e.finishReason !== undefined) errInit.finishReason = e.finishReason;
+        if (typeof e.partialText === "string") errInit.partialText = e.partialText;
+        if (typeof e.retryable === "boolean") errInit.retryable = e.retryable;
+        const errTokens = parseRunTokens(e.tokens);
+        if (errTokens !== undefined) errInit.tokens = errTokens;
+        const errTurns = parseRunTurns(e.turns);
+        if (errTurns !== undefined) errInit.turns = errTurns;
+        const errModel = parseRunModel(e.model);
+        if (errModel !== undefined) errInit.model = errModel;
+        throw new MantyxRunError(runId, subtype, e.error, errInit);
       } else if (ev.type === "cancelled") {
         throw new MantyxRunError(runId, "cancelled", "Run was cancelled");
       }
     }
-    return { runId, text: finalText, events: collected };
+    const result: RunResult = { runId, text: finalText, events: collected };
+    if (tokens !== undefined) result.tokens = tokens;
+    if (turns !== undefined) result.turns = turns;
+    if (modelInfo !== undefined) result.model = modelInfo;
+    return result;
   }
 
   async *streamRunEvents(
@@ -1544,6 +1684,64 @@ export function parseRunOutput<T = unknown>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Defensively coerce a wire `tokens` object into {@link RunTokenUsage}.
+ *
+ * Returns `undefined` when the input is not a JSON object — that keeps
+ * the "no usage data" sentinel intact against legacy MANTYX servers
+ * that omit the field entirely. Unknown / missing buckets default to
+ * `0` (the protocol contract is that misbehaving engines clamp to
+ * non-negative integers; the SDK mirrors that here so dashboards never
+ * see `NaN`).
+ */
+function parseRunTokens(value: unknown): RunTokenUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  return {
+    inputTokens: toNonNegativeInt(v.inputTokens),
+    cachedTokens: toNonNegativeInt(v.cachedTokens),
+    reasoningTokens: toNonNegativeInt(v.reasoningTokens),
+    outputTokens: toNonNegativeInt(v.outputTokens),
+  };
+}
+
+/**
+ * Defensively coerce a wire `turns` value into an integer. Returns
+ * `undefined` when missing / unparseable — keeps the "no usage data"
+ * sentinel against legacy servers.
+ */
+function parseRunTurns(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.max(0, Math.trunc(value));
+}
+
+/**
+ * Defensively coerce a wire `model` object into {@link RunModelInfo}.
+ *
+ * Returns `undefined` when the input is not a JSON object — the
+ * "no usage data" sentinel for legacy servers. `reasoningEffort` is
+ * carried through only when the wire surfaced it (the field is
+ * optional on the protocol side).
+ */
+function parseRunModel(value: unknown): RunModelInfo | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  const out: RunModelInfo = {
+    id: typeof v.id === "string" ? v.id : "",
+    provider: typeof v.provider === "string" ? v.provider : "",
+    vendorModelId: typeof v.vendorModelId === "string" ? v.vendorModelId : "",
+  };
+  if (typeof v.reasoningEffort === "string" && v.reasoningEffort.length > 0) {
+    out.reasoningEffort = v.reasoningEffort;
+  }
+  return out;
+}
+
+function toNonNegativeInt(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.trunc(value));
 }
 
 /**

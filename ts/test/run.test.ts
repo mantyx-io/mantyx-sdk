@@ -166,6 +166,131 @@ describe("MantyxClient.runAgent", () => {
     });
   });
 
+  it("surfaces cost-attribution fields (tokens/turns/model) from the terminal result event", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "result",
+          subtype: "success",
+          text: "Hello world",
+          tokens: {
+            inputTokens: 1283,
+            cachedTokens: 512,
+            reasoningTokens: 96,
+            outputTokens: 240,
+          },
+          turns: 3,
+          model: {
+            id: "platform:demo",
+            provider: "openai",
+            vendorModelId: "gpt-test",
+            reasoningEffort: "low",
+          },
+        },
+      ],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    expect(result.tokens).toEqual({
+      inputTokens: 1283,
+      cachedTokens: 512,
+      reasoningTokens: 96,
+      outputTokens: 240,
+    });
+    expect(result.turns).toBe(3);
+    expect(result.model).toEqual({
+      id: "platform:demo",
+      provider: "openai",
+      vendorModelId: "gpt-test",
+      reasoningEffort: "low",
+    });
+  });
+
+  it("leaves tokens/turns/model undefined against legacy servers (no usage data)", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    expect(result.tokens).toBeUndefined();
+    expect(result.turns).toBeUndefined();
+    expect(result.model).toBeUndefined();
+  });
+
+  it("surfaces cost-attribution fields on terminal error events too", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "error",
+          error: "Model output was truncated (stop_reason=max_tokens).",
+          errorClass: "truncation",
+          finishReason: "max_tokens",
+          partialText: '{"answer":"hello',
+          retryable: false,
+          tokens: {
+            inputTokens: 8190,
+            cachedTokens: 0,
+            reasoningTokens: 0,
+            outputTokens: 1024,
+          },
+          turns: 1,
+          model: {
+            id: "provider:cmf",
+            provider: "google",
+            vendorModelId: "gemini-2.5-pro",
+          },
+        },
+      ],
+    };
+    const err = await client
+      .runAgent({ systemPrompt: "x", prompt: "y" })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MantyxRunError);
+    const e = err as MantyxRunError;
+    expect(e.tokens).toEqual({
+      inputTokens: 8190,
+      cachedTokens: 0,
+      reasoningTokens: 0,
+      outputTokens: 1024,
+    });
+    expect(e.turns).toBe(1);
+    expect(e.model).toEqual({
+      id: "provider:cmf",
+      provider: "google",
+      vendorModelId: "gemini-2.5-pro",
+    });
+    // The "no usage data" sentinel is an empty / undefined provider —
+    // here the wire surfaces "google" so model.provider is populated.
+    expect(e.model?.provider).toBe("google");
+  });
+
+  it("clamps malformed token buckets to non-negative integers", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "result",
+          subtype: "success",
+          text: "ok",
+          tokens: {
+            inputTokens: -10,
+            cachedTokens: Number.NaN,
+            // missing reasoningTokens entirely
+            outputTokens: 12.7,
+          },
+          turns: -1,
+          model: { id: "x", provider: "openai", vendorModelId: "y" },
+        },
+      ],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    expect(result.tokens).toEqual({
+      inputTokens: 0,
+      cachedTokens: 0,
+      reasoningTokens: 0,
+      outputTokens: 12,
+    });
+    expect(result.turns).toBe(0);
+  });
+
   it("rejects when the server returns 401", async () => {
     server.failAuth = true;
     await expect(

@@ -207,3 +207,45 @@ async def test_async_reasoning_level_forwarded(
     body = mock_server.last_run_create_body
     assert body is not None
     assert body["reasoningLevel"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_async_run_agent_surfaces_cost_attribution(
+    async_mantyx_client: AsyncMantyxClient, mock_server: MockServer
+) -> None:
+    # Mirrors `test_run_agent_surfaces_cost_attribution_from_result`
+    # against the async driver — the parsing logic is shared but the
+    # async `_drive_run` plumbs it separately. See
+    # `docs/agent-runs-protocol.md` §7.1.
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={
+                    "subtype": "success",
+                    "text": "Hello",
+                    "tokens": {
+                        "inputTokens": 1283,
+                        "cachedTokens": 512,
+                        "reasoningTokens": 96,
+                        "outputTokens": 240,
+                    },
+                    "turns": 3,
+                    "model": {
+                        "id": "platform:demo",
+                        "provider": "openai",
+                        "vendorModelId": "gpt-test",
+                        "reasoningEffort": "high",
+                    },
+                },
+            )
+        ]
+    )
+    result = await async_mantyx_client.run_agent(system_prompt="x", prompt="y")
+    assert result.tokens is not None
+    assert result.tokens.input_tokens == 1283
+    assert result.tokens.output_tokens == 240
+    assert result.turns == 3
+    assert result.model is not None
+    assert result.model.provider == "openai"
+    assert result.model.reasoning_effort == "high"

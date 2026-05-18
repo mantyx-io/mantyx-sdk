@@ -105,10 +105,72 @@ class RunEvent:
 
 
 @dataclass
+class RunTokenUsage:
+    """Per-run token totals carried on terminal ``result`` / ``error``
+    events (and the ``GET /agent-runs/:runId`` snapshot) by MANTYX
+    ≥ 2026-09. See ``docs/agent-runs-protocol.md`` §7.1 for the
+    per-provider mapping.
+
+    ``input_tokens`` / ``output_tokens`` are the billable totals;
+    ``cached_tokens`` and ``reasoning_tokens`` are diagnostic
+    breakdowns *inside* those two totals (not separate additive
+    buckets). All four are clamped to non-negative integers so a
+    misbehaving engine can never poison downstream dashboards.
+    """
+
+    input_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
+class RunModelInfo:
+    """The resolved model that executed the run. Surfaced on terminal
+    events by MANTYX ≥ 2026-09. See ``docs/agent-runs-protocol.md``
+    §7.1.
+
+    ``provider`` being empty is the "no usage data" sentinel
+    callers should match on against legacy MANTYX runners; when the
+    server omits the cost-attribution triple entirely the SDK leaves
+    :attr:`RunResult.model` at ``None`` instead.
+    """
+
+    # Catalog id — the same string a caller would pass back as
+    # ``model_id`` to re-select this exact entry. Empty against
+    # legacy fallbacks that didn't synthesise a catalog id.
+    id: str = ""
+    # Lowercase provider id: "openai" / "anthropic" / "google" /
+    # "azure-openai". Empty against legacy runners.
+    provider: str = ""
+    # Vendor model id the platform actually sent to the provider
+    # (e.g. "gpt-5.4-mini", "claude-opus-4-7").
+    vendor_model_id: str = ""
+    # "off" | "low" | "medium" | "high". None when the provider
+    # doesn't expose a reasoning-level knob or the run didn't
+    # request one.
+    reasoning_effort: str | None = None
+
+
+@dataclass
 class RunResult:
     run_id: str
     text: str
     events: list[RunEvent]
+    # Per-run token totals from the terminal event. ``None`` against
+    # MANTYX servers older than 2026-09 (the "no usage data" signal
+    # is ``result.model is None`` or ``result.model.provider == ""``).
+    # See :class:`RunTokenUsage` and
+    # ``docs/agent-runs-protocol.md`` §7.1.
+    tokens: RunTokenUsage | None = None
+    # Total ``engine.completeTurn(...)`` invocations for the run,
+    # including the failing call when a run errored mid-loop. A
+    # single-shot run reports ``1``; a tool loop is ``>= 2``.
+    # ``None`` against legacy MANTYX servers.
+    turns: int | None = None
+    # Resolved model that executed the run. ``None`` against legacy
+    # MANTYX servers.
+    model: RunModelInfo | None = None
 
 
 @dataclass
@@ -414,6 +476,14 @@ class MantyxClient:
     ) -> RunResult:
         collected: list[RunEvent] = []
         final_text = ""
+        # Cost-attribution triple from `docs/agent-runs-protocol.md`
+        # §7.1. Populated when MANTYX ≥ 2026-09 surfaces it on the
+        # terminal event; left as ``None`` against legacy runners so
+        # callers can detect "no usage data" via ``result.model is
+        # None``.
+        tokens: RunTokenUsage | None = None
+        turns: int | None = None
+        model_info: RunModelInfo | None = None
         for ev in self._stream_events(run_id, handlers):
             collected.append(ev)
             if on_event is not None:
@@ -424,12 +494,28 @@ class MantyxClient:
                     on_assistant_delta(t)
             if ev.type == "result":
                 subtype = str(ev.data.get("subtype") or "")
+                parsed_tokens = _parse_run_tokens(ev.data.get("tokens"))
+                if parsed_tokens is not None:
+                    tokens = parsed_tokens
+                parsed_turns = _parse_run_turns(ev.data.get("turns"))
+                if parsed_turns is not None:
+                    turns = parsed_turns
+                parsed_model = _parse_run_model(ev.data.get("model"))
+                if parsed_model is not None:
+                    model_info = parsed_model
                 if subtype == "success":
                     txt = ev.data.get("text")
                     final_text = txt if isinstance(txt, str) else ""
                 else:
                     msg = ev.data.get("error") or subtype or "run failed"
-                    raise MantyxRunError(run_id, subtype or "error", str(msg))
+                    raise MantyxRunError(
+                        run_id,
+                        subtype or "error",
+                        str(msg),
+                        tokens=tokens,
+                        turns=turns,
+                        model=model_info,
+                    )
             elif ev.type == "error":
                 # The wire reports both a coarse `code` (legacy alias)
                 # and a canonical `errorClass` triage category; prefer
@@ -445,6 +531,12 @@ class MantyxClient:
                 partial_text = str(partial_raw) if isinstance(partial_raw, str) else None
                 retryable_raw = ev.data.get("retryable")
                 retryable = retryable_raw if isinstance(retryable_raw, bool) else None
+                # Failed runs against MANTYX ≥ 2026-09 also carry the
+                # cost-attribution triple — the failing model call's
+                # usage is included. See §7.1.
+                err_tokens = _parse_run_tokens(ev.data.get("tokens"))
+                err_turns = _parse_run_turns(ev.data.get("turns"))
+                err_model = _parse_run_model(ev.data.get("model"))
                 raise MantyxRunError(
                     run_id,
                     subtype,
@@ -453,10 +545,20 @@ class MantyxClient:
                     finish_reason=finish_reason,
                     partial_text=partial_text,
                     retryable=retryable,
+                    tokens=err_tokens,
+                    turns=err_turns,
+                    model=err_model,
                 )
             elif ev.type == "cancelled":
                 raise MantyxRunError(run_id, "cancelled", "Run was cancelled")
-        return RunResult(run_id=run_id, text=final_text, events=collected)
+        return RunResult(
+            run_id=run_id,
+            text=final_text,
+            events=collected,
+            tokens=tokens,
+            turns=turns,
+            model=model_info,
+        )
 
     def _stream_events(
         self,
@@ -1053,6 +1155,64 @@ def _parse_session_info(body: Mapping[str, Any]) -> SessionInfo:
     )
 
 
+def _parse_run_tokens(raw: Any) -> RunTokenUsage | None:
+    """Defensively coerce a wire ``tokens`` object into
+    :class:`RunTokenUsage`.
+
+    Returns ``None`` when the value is missing or not a dict — that
+    keeps the "no usage data" sentinel intact against legacy MANTYX
+    runners that omit the field entirely. Unknown / missing buckets
+    default to ``0`` (the protocol contract is that misbehaving
+    engines clamp to non-negative integers; the SDK mirrors that
+    here so dashboards never see ``NaN`` or negatives).
+    """
+    if not isinstance(raw, dict):
+        return None
+    return RunTokenUsage(
+        input_tokens=_to_non_negative_int(raw.get("inputTokens")),
+        cached_tokens=_to_non_negative_int(raw.get("cachedTokens")),
+        reasoning_tokens=_to_non_negative_int(raw.get("reasoningTokens")),
+        output_tokens=_to_non_negative_int(raw.get("outputTokens")),
+    )
+
+
+def _parse_run_turns(raw: Any) -> int | None:
+    """Coerce a wire ``turns`` value into a non-negative int.
+
+    Returns ``None`` when the value is missing or unparseable so the
+    caller can leave :attr:`RunResult.turns` at ``None`` against
+    legacy servers.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return max(0, int(raw))
+
+
+def _parse_run_model(raw: Any) -> RunModelInfo | None:
+    """Defensively coerce a wire ``model`` object into
+    :class:`RunModelInfo`. Returns ``None`` when the input isn't a
+    dict — the "no usage data" sentinel for legacy servers.
+    """
+    if not isinstance(raw, dict):
+        return None
+    reasoning_raw = raw.get("reasoningEffort")
+    reasoning = reasoning_raw if isinstance(reasoning_raw, str) and reasoning_raw else None
+    return RunModelInfo(
+        id=str(raw.get("id") or ""),
+        provider=str(raw.get("provider") or ""),
+        vendor_model_id=str(raw.get("vendorModelId") or ""),
+        reasoning_effort=reasoning,
+    )
+
+
+def _to_non_negative_int(raw: Any) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return 0
+    if raw != raw:  # NaN
+        return 0
+    return max(0, int(raw))
+
+
 def _as_optional_float(v: Any) -> float | None:
     if isinstance(v, (int, float)):
         return float(v)
@@ -1123,7 +1283,9 @@ __all__ = [
     "ModelInfo",
     "PricingInfo",
     "RunEvent",
+    "RunModelInfo",
     "RunResult",
+    "RunTokenUsage",
     "SessionInfo",
     "parse_run_output",
 ]

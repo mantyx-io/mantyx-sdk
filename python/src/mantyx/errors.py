@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class MantyxError(Exception):
     """Base class for every error raised by the MANTYX SDK."""
@@ -136,6 +138,19 @@ class MantyxRunError(MantyxError):
       **incomplete JSON** that will fail ``json.loads`` — treat it as
       diagnostic data, never as a schema-conformant reply.
     - ``retryable`` — coarse retry hint from the pipeline's classifier.
+
+    Failed runs against MANTYX ≥ 2026-09 also carry the
+    cost-attribution triple from
+    ``docs/agent-runs-protocol.md`` §7.1:
+
+    - ``tokens`` — per-run token totals from the terminal event,
+      including the failing model call's usage (see
+      :class:`mantyx.RunTokenUsage`). ``None`` against legacy
+      runners — that's the "no usage data" sentinel.
+    - ``turns`` — total model invocations for the run, including the
+      failing call. ``None`` against legacy runners.
+    - ``model`` — resolved model that executed the run (see
+      :class:`mantyx.RunModelInfo`). ``None`` against legacy runners.
     """
 
     def __init__(
@@ -148,6 +163,9 @@ class MantyxRunError(MantyxError):
         finish_reason: str | None = None,
         partial_text: str | None = None,
         retryable: bool | None = None,
+        tokens: Any | None = None,
+        turns: int | None = None,
+        model: Any | None = None,
     ) -> None:
         super().__init__(message, code=subtype)
         self.run_id = run_id
@@ -156,6 +174,12 @@ class MantyxRunError(MantyxError):
         self.finish_reason = finish_reason
         self.partial_text = partial_text
         self.retryable = retryable
+        # Typed as Any to avoid a circular import with `client.py`;
+        # callers can still pattern-match on
+        # ``isinstance(err.tokens, RunTokenUsage)`` etc.
+        self.tokens = tokens
+        self.turns = turns
+        self.model = model
 
 
 class MantyxParseError(MantyxError):
