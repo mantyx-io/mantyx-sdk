@@ -302,8 +302,8 @@ func TestRunAgent_ToolBudgetsIsForwarded(t *testing.T) {
 		SystemPrompt: "x",
 		Prompt:       "y",
 		ToolBudgets: ToolBudgets{
-			"recall":      {MaxCalls: 4},
-			"scary_tool":  {MaxCalls: 0},
+			"recall":     {MaxCalls: 4},
+			"scary_tool": {MaxCalls: 0},
 		},
 	}); err != nil {
 		t.Fatalf("RunAgent: %v", err)
@@ -367,6 +367,74 @@ func TestRunAgent_ToolBudgetsRejectsNegativeMaxCalls(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected validation error for negative MaxCalls")
 	}
+}
+
+func TestRunAgent_SupervisorIsForwarded(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		Supervisor:   SupervisorInterval(10),
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	sv, _ := body["supervisor"].(map[string]any)
+	if sv["interval"].(float64) != 10 {
+		t.Fatalf("supervisor not forwarded: %#v", body["supervisor"])
+	}
+}
+
+func TestRunAgent_SupervisorDisabled(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		Supervisor:   SupervisorDisabled(),
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	v, ok := body["supervisor"]
+	if !ok {
+		t.Fatalf("supervisor missing")
+	}
+	if got, isBool := v.(bool); !isBool || got != false {
+		t.Fatalf("expected supervisor=false sentinel, got %#v", v)
+	}
+}
+
+func TestRunAgent_SupervisorRejectsBadInterval(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic on bad interval")
+		}
+	}()
+	_ = SupervisorInterval(101)
 }
 
 // TestRunAgent_ErrorEventCarriesTriageAttributes covers the truncation

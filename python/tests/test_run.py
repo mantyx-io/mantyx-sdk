@@ -421,6 +421,33 @@ def test_run_agent_tool_budgets_negative_max_calls(
         )
 
 
+def test_run_agent_supervisor_forwarded_and_disabled(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        supervisor={"interval": 10},
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["supervisor"] == {"interval": 10}
+
+    mantyx_client.run_agent(system_prompt="x", prompt="y", supervisor=False)
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["supervisor"] is False
+
+
+def test_run_agent_supervisor_invalid_interval(mantyx_client: MantyxClient) -> None:
+    with pytest.raises(ValueError):
+        mantyx_client.run_agent(
+            system_prompt="x",
+            prompt="y",
+            supervisor={"interval": 0},
+        )
+
+
 def test_stream_agent_yields_events(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
     mock_server.script_for_next_run = RunScript(
         events=[

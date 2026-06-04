@@ -409,4 +409,32 @@ describe("MantyxClient.runAgent", () => {
     await client.runAgent({ systemPrompt: "x", prompt: "y", toolBudgets: {} });
     expect(server.lastRunCreateBody?.toolBudgets).toEqual({});
   });
+
+  it("forwards supervisor interval and `supervisor: false` verbatim", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      supervisor: { interval: 10 },
+    });
+    expect(server.lastRunCreateBody?.supervisor).toEqual({ interval: 10 });
+
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({ systemPrompt: "x", prompt: "y", supervisor: false });
+    expect(server.lastRunCreateBody?.supervisor).toBe(false);
+  });
+
+  it("rejects supervisor with interval < 1 locally", async () => {
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        supervisor: { interval: 0 },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+  });
 });

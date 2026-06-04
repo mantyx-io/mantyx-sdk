@@ -42,6 +42,7 @@ from .tools import (
     LoopDetection,
     OutputSchema,
     ReasoningLevel,
+    Supervisor,
     ToolBudgets,
     ToolRef,
     _LocalHandlers,
@@ -49,6 +50,7 @@ from .tools import (
     normalize_loop_detection,
     normalize_output_schema,
     normalize_reasoning_level,
+    normalize_supervisor,
     normalize_tool_budgets,
     serialize_tool_refs,
 )
@@ -297,6 +299,7 @@ class MantyxClient:
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
@@ -319,6 +322,7 @@ class MantyxClient:
                 output_schema=output_schema,
                 loop_detection=loop_detection,
                 tool_budgets=tool_budgets,
+                supervisor=supervisor,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -356,6 +360,7 @@ class MantyxClient:
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> Iterator[RunEvent]:
@@ -371,6 +376,7 @@ class MantyxClient:
             output_schema=output_schema,
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
+            supervisor=supervisor,
             budgets=budgets,
             metadata=metadata,
         )
@@ -411,6 +417,7 @@ class MantyxClient:
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AgentSession:
@@ -429,6 +436,7 @@ class MantyxClient:
                 output_schema=output_schema,
                 loop_detection=loop_detection,
                 tool_budgets=tool_budgets,
+                supervisor=supervisor,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -841,6 +849,7 @@ class AgentSession:
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
@@ -851,6 +860,7 @@ class AgentSession:
             output_schema=output_schema,
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
+            supervisor=supervisor,
         )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
@@ -874,6 +884,7 @@ class AgentSession:
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
     ) -> Iterator[RunEvent]:
         body = self._build_message_body(
             prompt,
@@ -882,6 +893,7 @@ class AgentSession:
             output_schema=output_schema,
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
+            supervisor=supervisor,
         )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
@@ -900,6 +912,7 @@ class AgentSession:
         output_schema: OutputSchema | Mapping[str, Any] | None = None,
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"prompt": prompt}
         if self._tools_for_resume:
@@ -920,6 +933,10 @@ class AgentSession:
             normalized_budgets = normalize_tool_budgets(tool_budgets)
             if normalized_budgets is not None:
                 body["toolBudgets"] = normalized_budgets
+        if supervisor is not _UNSET:
+            normalized_supervisor = normalize_supervisor(supervisor)
+            if normalized_supervisor is not None:
+                body["supervisor"] = normalized_supervisor
         return body
 
     def history(self) -> list[dict[str, str]]:
@@ -1035,6 +1052,7 @@ def _serialize_agent_spec(
     output_schema: OutputSchema | Mapping[str, Any] | None,
     loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
     tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+    supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
     budgets: Mapping[str, Any] | None,
     metadata: Mapping[str, str] | None,
 ) -> dict[str, Any]:
@@ -1063,6 +1081,10 @@ def _serialize_agent_spec(
         normalized_budgets = normalize_tool_budgets(tool_budgets)
         if normalized_budgets is not None:
             body["toolBudgets"] = normalized_budgets
+    if supervisor is not _UNSET:
+        normalized_supervisor = normalize_supervisor(supervisor)
+        if normalized_supervisor is not None:
+            body["supervisor"] = normalized_supervisor
     if budgets:
         body["budgets"] = dict(budgets)
     if metadata:

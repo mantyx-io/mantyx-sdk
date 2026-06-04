@@ -206,6 +206,12 @@ type RunSpec struct {
 	// pivot or finalize" tool result. Pass an empty map to clear the
 	// runtime defaults; omit to keep them. See docs/agent-runs-protocol.md §4.7.
 	ToolBudgets ToolBudgets
+	// Supervisor configures the optional platform LLM run judge. Build with
+	// SupervisorInterval(...) or pass SupervisorDisabled() to opt out for
+	// this run. nil leaves the field unset (the runtime default applies on
+	// ephemeral API runs: enabled with interval 5). See
+	// docs/agent-runs-protocol.md §4.8.
+	Supervisor *Supervisor
 	// Metadata is a flat string→string KV carried alongside the run for
 	// observability. Visible (and filterable) in the MANTYX dashboard. Keys
 	// must match `[A-Za-z0-9._-]{1,64}`, values are strings ≤ 256 chars, and
@@ -238,6 +244,9 @@ type SessionSpec struct {
 	// ToolBudgets sets the session-wide default applied to every run
 	// created through Session.Send. See RunSpec.ToolBudgets.
 	ToolBudgets ToolBudgets
+	// Supervisor sets the session-wide default applied to every run created
+	// through Session.Send. See RunSpec.Supervisor.
+	Supervisor *Supervisor
 	// Metadata is inherited by every run created through `Session.Send`. See
 	// RunSpec.Metadata for the validation rules.
 	Metadata map[string]string
@@ -477,6 +486,70 @@ func (l *LoopDetection) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// Supervisor configures the optional platform LLM run judge. Build with
+// SupervisorInterval(n) for a custom review interval, or
+// SupervisorDisabled() to opt the run out of the judge. nil leaves the
+// field unset (the runtime default applies on ephemeral API runs).
+type Supervisor struct {
+	// Interval is the number of LLM calls between supervisor reviews.
+	// Default 5 when the supervisor is enabled and Interval is 0 (unset).
+	// Server-side upper bound: 100.
+	Interval int
+
+	disabled bool
+}
+
+// SupervisorInterval builds a Supervisor with the supplied review interval.
+// Pass 0 to leave interval unset (the server default of 5 applies). Values
+// outside [1, 100] panic.
+func SupervisorInterval(n int) *Supervisor {
+	s := &Supervisor{Interval: n}
+	if err := s.validate(); err != nil {
+		panic("mantyx.SupervisorInterval: " + err.Error())
+	}
+	return s
+}
+
+// SupervisorDisabled returns a Supervisor sentinel that disables the platform
+// run judge for the run / session it is attached to.
+func SupervisorDisabled() *Supervisor {
+	return &Supervisor{disabled: true}
+}
+
+const supervisorIntervalMax = 100
+
+func (s *Supervisor) validate() error {
+	if s == nil || s.disabled {
+		return nil
+	}
+	if s.Interval != 0 {
+		if s.Interval < 1 {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("Supervisor.Interval must be >= 1, got %d", s.Interval)}
+		}
+		if s.Interval > supervisorIntervalMax {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("Supervisor.Interval must be <= %d, got %d", supervisorIntervalMax, s.Interval)}
+		}
+	}
+	return nil
+}
+
+// MarshalJSON serialises Supervisor to its wire shape: either the literal
+// `false` (when built via SupervisorDisabled), or an object carrying any
+// explicitly-set interval.
+func (s *Supervisor) MarshalJSON() ([]byte, error) {
+	if s == nil {
+		return []byte("null"), nil
+	}
+	if s.disabled {
+		return []byte("false"), nil
+	}
+	out := map[string]any{}
+	if s.Interval != 0 {
+		out["interval"] = s.Interval
+	}
+	return json.Marshal(out)
+}
+
 // ToolBudget caps how many times one tool may execute over the run.
 type ToolBudget struct {
 	// MaxCalls is the hard cap on executed calls per run. 0 disables the
@@ -633,6 +706,9 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 	if err := spec.ToolBudgets.validate(); err != nil {
 		return RunResult{}, err
 	}
+	if err := spec.Supervisor.validate(); err != nil {
+		return RunResult{}, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return RunResult{}, err
 	}
@@ -659,6 +735,9 @@ func (c *Client) StreamAgent(ctx context.Context, spec RunSpec) (<-chan RunEvent
 		return nil, err
 	}
 	if err := spec.ToolBudgets.validate(); err != nil {
+		return nil, err
+	}
+	if err := spec.Supervisor.validate(); err != nil {
 		return nil, err
 	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
@@ -700,6 +779,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	if err := spec.ToolBudgets.validate(); err != nil {
 		return nil, err
 	}
+	if err := spec.Supervisor.validate(); err != nil {
+		return nil, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return nil, err
 	}
@@ -729,6 +811,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	}
 	if spec.ToolBudgets != nil {
 		body["toolBudgets"] = serializeToolBudgets(spec.ToolBudgets)
+	}
+	if spec.Supervisor != nil {
+		body["supervisor"] = spec.Supervisor
 	}
 	if len(spec.Metadata) > 0 {
 		body["metadata"] = spec.Metadata
@@ -1319,6 +1404,9 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 	}
 	if spec.ToolBudgets != nil {
 		body["toolBudgets"] = serializeToolBudgets(spec.ToolBudgets)
+	}
+	if spec.Supervisor != nil {
+		body["supervisor"] = spec.Supervisor
 	}
 	if spec.Prompt != "" {
 		body["prompt"] = spec.Prompt

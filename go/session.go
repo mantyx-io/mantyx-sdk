@@ -26,6 +26,7 @@ type sendOptions struct {
 	OutputSchema     *OutputSchema
 	LoopDetection    *LoopDetection
 	ToolBudgets      ToolBudgets
+	Supervisor       *Supervisor
 }
 
 // WithAssistantDelta registers a callback that receives streaming assistant text.
@@ -78,6 +79,15 @@ func WithToolBudgets(b ToolBudgets) SendOption {
 	return func(o *sendOptions) { o.ToolBudgets = b }
 }
 
+// WithSupervisor overrides the session's stored Supervisor for this single
+// run. Build the value with SupervisorInterval(...) or pass
+// SupervisorDisabled() to opt this turn out of the platform judge. The
+// override applies to that one run only and does not mutate the session's
+// stored value. See `docs/agent-runs-protocol.md` §4.8.
+func WithSupervisor(s *Supervisor) SendOption {
+	return func(o *sendOptions) { o.Supervisor = s }
+}
+
 // Send sends a user turn and waits for the agent's reply.
 func (s *Session) Send(ctx context.Context, prompt string, opts ...SendOption) (RunResult, error) {
 	o := sendOptions{}
@@ -91,6 +101,9 @@ func (s *Session) Send(ctx context.Context, prompt string, opts ...SendOption) (
 		return RunResult{}, err
 	}
 	if err := o.ToolBudgets.validate(); err != nil {
+		return RunResult{}, err
+	}
+	if err := o.Supervisor.validate(); err != nil {
 		return RunResult{}, err
 	}
 	body := s.buildMessageBody(prompt, o)
@@ -114,6 +127,9 @@ func (s *Session) Stream(ctx context.Context, prompt string, opts ...SendOption)
 		return nil, err
 	}
 	if err := o.ToolBudgets.validate(); err != nil {
+		return nil, err
+	}
+	if err := o.Supervisor.validate(); err != nil {
 		return nil, err
 	}
 	body := s.buildMessageBody(prompt, o)
@@ -153,6 +169,9 @@ func (s *Session) buildMessageBody(prompt string, o sendOptions) map[string]any 
 	}
 	if o.ToolBudgets != nil {
 		body["toolBudgets"] = serializeToolBudgets(o.ToolBudgets)
+	}
+	if o.Supervisor != nil {
+		body["supervisor"] = o.Supervisor
 	}
 	return body
 }

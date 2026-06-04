@@ -9,8 +9,9 @@ Long-running agent loops occasionally get stuck — the model keeps re-issuing t
 
 - **Loop detection** — fingerprints every assistant turn that emits tool calls, soft-nudges the model to pivot once it repeats itself, and forces a clean tools-disabled finalise turn if it keeps looping.
 - **Tool budgets** — per-tool call caps enforced over the lifetime of the run; calls past the cap are intercepted before execution and replaced with a synthetic "budget exceeded — pivot or finalize" tool result.
+- **Supervisor** — an optional platform LLM judge that periodically reviews the transcript and may inject a steering message or force a tools-disabled finalise turn.
 
-Both guards have **runtime defaults** that always apply (so SDK-driven runs and platform-driven runs behave identically). You only ever need to touch them when you want to tune the thresholds, opt out for a specific run, or attach a budget to a custom tool.
+Both loop detection and tool budgets have **runtime defaults** that always apply (so SDK-driven runs and platform-driven runs behave identically). The supervisor is **enabled by default on ephemeral API runs**; pass `supervisor: false` to opt out. You only ever need to touch these when you want to tune thresholds, attach a budget to a custom tool, or change supervisor behaviour.
 
 ## Loop detection
 
@@ -177,14 +178,52 @@ client.RunAgent(ctx, mantyx.RunSpec{
 })
 ```
 
+## Supervisor
+
+The optional **run supervisor** is a platform LLM judge that periodically reviews the agent's transcript (reasoning, tool calls, tool results, visible text) and may steer the run:
+
+| Verdict | What happens |
+| ------- | ------------ |
+| `on_track` | No-op — the run continues. |
+| `redirect` | A steering user message is injected; tools stay available on the next turn. |
+| `finalize` | The next turn is forced tools-disabled so the run lands a clean final answer. |
+
+Reviews fire every **`interval` LLM calls** (default **5** when enabled). Pass `supervisor: false` to disable the platform judge for a run.
+
+```ts
+await client.runAgent({
+  systemPrompt: "...",
+  prompt: "...",
+  supervisor: { interval: 10 },   // review every 10 model invocations
+});
+
+// opt out for this run:
+await client.runAgent({ systemPrompt: "...", prompt: "...", supervisor: false });
+```
+
+```python
+client.run_agent(system_prompt="...", prompt="...", supervisor={"interval": 10})
+client.run_agent(system_prompt="...", prompt="...", supervisor=False)
+```
+
+```go
+client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt: "...",
+    Prompt:       "...",
+    Supervisor:   mantyx.SupervisorInterval(10),
+})
+// opt out:
+client.RunAgent(ctx, mantyx.RunSpec{..., Supervisor: mantyx.SupervisorDisabled()})
+```
+
 ## Defaults and inheritance
 
-For session-scoped runs the inheritance rules are the same for both fields:
+For session-scoped runs the inheritance rules are the same for all three fields:
 
-- `client.createSession({ loopDetection, toolBudgets })` (TS) / `client.create_session(loop_detection=..., tool_budgets=...)` (Python) / `mantyx.SessionSpec{LoopDetection: ..., ToolBudgets: ...}` (Go) — sets the session-default applied to every subsequent message run.
-- `session.send(prompt, { loopDetection, toolBudgets })` (TS) / `session.send(prompt, loop_detection=..., tool_budgets=...)` (Python) / `session.Send(ctx, prompt, mantyx.WithLoopDetection(...), mantyx.WithToolBudgets(...))` (Go) — optional per-message override; applies to that one run only and does not mutate the session's stored value.
+- `client.createSession({ loopDetection, toolBudgets, supervisor })` (TS) / `client.create_session(loop_detection=..., tool_budgets=..., supervisor=...)` (Python) / `mantyx.SessionSpec{LoopDetection: ..., ToolBudgets: ..., Supervisor: ...}` (Go) — sets the session-default applied to every subsequent message run.
+- `session.send(prompt, { loopDetection, toolBudgets, supervisor })` (TS) / `session.send(prompt, loop_detection=..., tool_budgets=..., supervisor=...)` (Python) / `session.Send(ctx, prompt, mantyx.WithLoopDetection(...), mantyx.WithToolBudgets(...), mantyx.WithSupervisor(...))` (Go) — optional per-message override; applies to that one run only and does not mutate the session's stored value.
 
-Both fields are *additive*: omitting them keeps MANTYX's runtime defaults; passing the disable sentinel opts out; passing entries layers caller overrides on top of the defaults.
+All three fields are *additive*: omitting them keeps MANTYX's runtime defaults; passing the disable sentinel (`loopDetection: false` or `supervisor: false`) opts out; passing entries layers caller overrides on top of the defaults.
 
 ## Observability events
 
@@ -212,9 +251,21 @@ Every intervention emits a dedicated SSE event so the SDK can render status note
     "callIndex": 5                     // which call (1-indexed) tripped the cap
   }
 }
+
+// run-supervisor review (fired on every check — on_track included)
+{
+  "seq": 11,
+  "type": "supervisor",
+  "data": {
+    "action": "redirect",              // on_track | redirect | finalize
+    "reason": "Stuck re-querying.",
+    "redirect": "Answer from the data you already have.",  // present when action=redirect
+    "llmCalls": 10
+  }
+}
 ```
 
-A single run may emit any number of these events: zero (well-behaved agents), one or more `tool_budget_exceeded` events as the model keeps reaching for capped tools, or a `loop_detected` (`hardCutoff: false`) followed by a second `loop_detected` (`hardCutoff: true`) if the model keeps looping past the soft nudge.
+A single run may emit any number of these events: zero (well-behaved agents), one or more `tool_budget_exceeded` events as the model keeps reaching for capped tools, a `loop_detected` (`hardCutoff: false`) followed by a second `loop_detected` (`hardCutoff: true`) if the model keeps looping past the soft nudge, or periodic `supervisor` events as the judge reviews the transcript.
 
 ```ts
 await client.runAgent({
@@ -225,6 +276,8 @@ await client.runAgent({
       console.warn(`looping on ${ev.tools.join(", ")} (×${ev.consecutiveCount})`);
     } else if (ev.type === "tool_budget_exceeded") {
       console.warn(`tool ${ev.tool} hit cap ${ev.maxCalls} on call #${ev.callIndex}`);
+    } else if (ev.type === "supervisor") {
+      console.warn(`supervisor ${ev.action}: ${ev.reason}`);
     }
   },
 });
@@ -239,11 +292,12 @@ await client.runAgent({
 | `toolBudgets` max entries                                    | `32` |
 | `toolBudgets[<name>]` key length                             | `1..120` chars |
 | `toolBudgets[<name>].maxCalls`                               | `0 ≤ n ≤ 1000` (functionally unlimited; `maxToolTurns: 100` fires first) |
+| `supervisor.interval`                                        | `1 ≤ n ≤ 100` (default **5** when enabled and omitted) |
 
 The reference SDKs mirror these checks locally so callers see an early typed error rather than a server round-trip.
 
 ## See also
 
-- [Streaming](/docs/streaming/) — the full SSE event vocabulary, including the `loop_detected` and `tool_budget_exceeded` observability events.
+- [Streaming](/docs/streaming/) — the full SSE event vocabulary, including the `loop_detected`, `tool_budget_exceeded`, and `supervisor` observability events.
 - [Wire protocol §8](/docs/wire-protocol/#8-run-guards-loopdetection-toolbudgets) — canonical spec for the wire shapes (with subsections 8.1 `loopDetection` and 8.2 `toolBudgets`).
 - [Agent-runs protocol §4.6](/docs/protocol/#46-loopdetection-steering-nudge--hard-cutoff) and [§4.7](/docs/protocol/#47-toolbudgets-per-tool-call-caps) — server-side validation contract and inheritance rules for sessions.

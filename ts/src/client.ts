@@ -198,6 +198,22 @@ export interface AgentSpecBase {
    */
   toolBudgets?: ToolBudgets;
   /**
+   * Run-supervisor (platform LLM judge). Periodically reviews the agent's
+   * transcript and may steer the run (`on_track`, `redirect`, `finalize`).
+   *
+   * Pass an object to override the review interval, or `false` to explicitly
+   * disable the platform judge for this run / session. When omitted on
+   * ephemeral API runs, MANTYX enables the supervisor (default interval `5`).
+   * SDK-only runs (`runAgent` without the HTTP API) keep the supervisor off
+   * unless you pass a value here. See `docs/agent-runs-protocol.md` §4.8.
+   *
+   * Each review emits an observability-only `supervisor` SSE event — including
+   * `on_track` checks — so the SDK can render supervisor activity. When
+   * `action` is `redirect` or `finalize`, the pipeline has already applied
+   * the verdict by the time the event arrives.
+   */
+  supervisor?: Supervisor | false;
+  /**
    * Flat string→string KV carried alongside the run / session for
    * observability. Use it to tag runs with your own application identifiers
    * (customer id, environment, workflow name, …) — the values are visible in
@@ -282,6 +298,22 @@ export interface ToolBudget {
  * entirely to keep the defaults.
  */
 export type ToolBudgets = Record<string, ToolBudget>;
+
+/**
+ * Run-supervisor configuration. See {@link AgentSpecBase.supervisor} for the
+ * full semantics. Pass `false` (instead of an object) to disable the platform
+ * judge for the run / session.
+ *
+ * `interval` is optional; when omitted the MANTYX runtime default is **5**
+ * LLM calls between reviews. Server-side upper bound: `100`.
+ */
+export interface Supervisor {
+  /** LLM calls (`completeTurn` invocations) between supervisor reviews. */
+  interval?: number;
+}
+
+/** Verdict from a run-supervisor review. */
+export type SupervisorAction = "on_track" | "redirect" | "finalize";
 
 /**
  * Per-run token totals attached to terminal `result` / `error` events
@@ -526,6 +558,31 @@ export interface ToolBudgetExceededEvent extends RunEventBase {
   callIndex: number;
 }
 
+/**
+ * Observability event fired on every run-supervisor review — including
+ * `on_track` checks. When `action` is `redirect` or `finalize`, the pipeline
+ * has already injected the steering message or forced a tools-disabled turn
+ * by the time this event arrives; the SDK should render a status note and
+ * keep consuming the stream.
+ */
+export interface SupervisorEvent extends RunEventBase {
+  type: "supervisor";
+  /** One of `"on_track"`, `"redirect"`, `"finalize"`. */
+  action: SupervisorAction;
+  /** One- or two-sentence explanation from the judge. */
+  reason: string;
+  /**
+   * Present when `action === "redirect"`: the steering user message injected
+   * into the conversation. Omitted for `on_track` / `finalize`.
+   */
+  redirect?: string;
+  /**
+   * Number of LLM calls completed when this review fired. Matches the
+   * pipeline's `modelInvocations` counter at the check boundary.
+   */
+  llmCalls: number;
+}
+
 export interface ResultEvent extends RunEventBase {
   type: "result";
   subtype: string;
@@ -607,6 +664,7 @@ export type RunEvent =
   | LocalToolResultInEvent
   | LoopDetectedEvent
   | ToolBudgetExceededEvent
+  | SupervisorEvent
   | ResultEvent
   | ErrorEvent
   | CancelledEvent
@@ -1214,6 +1272,12 @@ export class AgentSession {
        * and does not mutate the session's stored value.
        */
       toolBudgets?: ToolBudgets;
+      /**
+       * Per-message override for `supervisor`. Applies only to this run
+       * and does not mutate the session's stored value. Pass `false` to
+       * disable the platform judge for this single turn.
+       */
+      supervisor?: Supervisor | false;
     } = {},
   ): Promise<RunResult> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -1236,6 +1300,7 @@ export class AgentSession {
       outputSchema?: OutputSchema;
       loopDetection?: LoopDetection | false;
       toolBudgets?: ToolBudgets;
+      supervisor?: Supervisor | false;
     } = {},
   ): AsyncGenerator<RunEvent, void, void> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -1254,6 +1319,7 @@ export class AgentSession {
       outputSchema?: OutputSchema;
       loopDetection?: LoopDetection | false;
       toolBudgets?: ToolBudgets;
+      supervisor?: Supervisor | false;
     },
   ): Record<string, unknown> {
     const body: Record<string, unknown> = { prompt };
@@ -1270,6 +1336,9 @@ export class AgentSession {
     }
     if (opts.toolBudgets !== undefined) {
       body.toolBudgets = normalizeToolBudgets(opts.toolBudgets);
+    }
+    if (opts.supervisor !== undefined) {
+      body.supervisor = normalizeSupervisor(opts.supervisor);
     }
     return body;
   }
@@ -1320,6 +1389,9 @@ function serializeAgentSpec(
   }
   if (spec.toolBudgets !== undefined) {
     body.toolBudgets = normalizeToolBudgets(spec.toolBudgets);
+  }
+  if (spec.supervisor !== undefined) {
+    body.supervisor = normalizeSupervisor(spec.supervisor);
   }
   if (spec.budgets) body.budgets = spec.budgets;
   if (spec.metadata && Object.keys(spec.metadata).length > 0) body.metadata = spec.metadata;
@@ -1570,6 +1642,26 @@ function assertThreshold(label: string, value: number, min: number): number {
 const TOOL_BUDGETS_MAX_ENTRIES = 32;
 const TOOL_BUDGET_MAX_NAME_LEN = 120;
 const TOOL_BUDGET_MAX_CALLS = 1000;
+const SUPERVISOR_INTERVAL_MAX = 100;
+
+/**
+ * Validate a {@link Supervisor} (or `false`) value and return the wire-shaped
+ * value. Mirrors the server-side `400 invalid_request` checks (`interval` ≥
+ * 1 and ≤ 100) so callers see an early local error.
+ */
+function normalizeSupervisor(value: Supervisor | false): false | Record<string, unknown> {
+  if (value === false) return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MantyxError(
+      `supervisor must be an object or the literal \`false\`, got ${JSON.stringify(value)}`,
+    );
+  }
+  const out: Record<string, unknown> = {};
+  if (value.interval !== undefined) {
+    out.interval = assertThreshold("supervisor.interval", value.interval, 1);
+  }
+  return out;
+}
 
 /**
  * Validate a {@link ToolBudgets} value and return the wire-shaped object.

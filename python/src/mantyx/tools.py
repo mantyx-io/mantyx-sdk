@@ -106,6 +106,19 @@ class ToolBudget(TypedDict):
 ToolBudgets = Mapping[str, ToolBudget]
 
 
+class Supervisor(TypedDict, total=False):
+    """Run-supervisor configuration for the platform LLM judge.
+
+    ``interval`` is optional; when omitted the MANTYX runtime default is
+    ``5`` LLM calls between reviews. Pass ``False`` instead of a mapping
+    to disable the platform judge for the run / session entirely.
+
+    See ``docs/agent-runs-protocol.md`` §4.8.
+    """
+
+    interval: int
+
+
 _LOCAL_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
 _PLUGIN_TOOL_NAME_RE = re.compile(r"^@[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$")
 
@@ -827,6 +840,48 @@ def normalize_tool_budgets(
     return out
 
 
+_SUPERVISOR_INTERVAL_MAX = 100
+
+
+def normalize_supervisor(
+    value: Supervisor | Mapping[str, Any] | bool | None,
+) -> bool | dict[str, Any] | None:
+    """Validate a :class:`Supervisor` (or ``False``) value and return the
+    wire-shaped dict (or ``False``).
+
+    Mirrors the server-side ``400 invalid_request`` checks (``interval`` ≥
+    1 and ≤ 100) so callers get an early local error instead of a
+    round-trip rejection.
+    """
+    if value is None:
+        return None
+    if value is False:
+        return False
+    if value is True:
+        raise ValueError(
+            "supervisor must be a mapping or the literal False; True is not a valid value"
+        )
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "supervisor must be a mapping of shape {'interval'?: int} or the literal False; "
+            f"got {type(value).__name__}"
+        )
+    out: dict[str, Any] = {}
+    if "interval" in value and value["interval"] is not None:
+        interval_raw = value["interval"]
+        if not isinstance(interval_raw, int) or isinstance(interval_raw, bool):
+            raise ValueError(f"supervisor.interval must be an integer; got {interval_raw!r}")
+        if interval_raw < 1:
+            raise ValueError(f"supervisor.interval must be >= 1; got {interval_raw}")
+        if interval_raw > _SUPERVISOR_INTERVAL_MAX:
+            raise ValueError(
+                f"supervisor.interval must be <= {_SUPERVISOR_INTERVAL_MAX} "
+                f"(server-enforced); got {interval_raw}"
+            )
+        out["interval"] = interval_raw
+    return out
+
+
 def normalize_output_schema(
     value: OutputSchema | Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -884,6 +939,7 @@ __all__ = [
     "MantyxToolRef",
     "OutputSchema",
     "ReasoningLevel",
+    "Supervisor",
     "ToolBudget",
     "ToolBudgets",
     "ToolName",
@@ -904,6 +960,7 @@ __all__ = [
     "normalize_loop_detection",
     "normalize_output_schema",
     "normalize_reasoning_level",
+    "normalize_supervisor",
     "normalize_tool_budgets",
     "serialize_tool_refs",
 ]

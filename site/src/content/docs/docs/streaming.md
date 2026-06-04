@@ -87,11 +87,12 @@ for ev := range ch {
 | `local_tool_result_in` | Echo of the SDK's result | `{ toolUseId, output }` |
 | `loop_detected` | The [loop-detection guard](/docs/run-guards/#loop-detection) intervened | `{ consecutiveCount, hardCutoff, tools }` |
 | `tool_budget_exceeded` | A tool call hit its [`toolBudgets`](/docs/run-guards/#tool-budgets) cap | `{ tool, maxCalls, callIndex }` |
+| `supervisor` | The [run supervisor](/docs/run-guards/#supervisor) reviewed the transcript | `{ action, reason, redirect?, llmCalls }` |
 | `result` | Terminal | `{ subtype, text?, error? }` |
 | `cancelled` | Terminal (after `cancelRun`) | `{}` |
 
 The `local_tool_call` payload carries a `kind` discriminator (`"local"` when omitted, `"a2a_local"`, or `"mcp_local"`) plus extra metadata for the specialised kinds. The SDKs route to the right handler automatically; you only need to care about this if you're implementing a third-party client. The full event vocabulary is documented in [Wire protocol §7](/docs/protocol/).
 
-`loop_detected` and `tool_budget_exceeded` are observability-only — the synthetic skip / steering nudge / "budget exceeded" tool result already ride the normal `tool_result` and `assistant_delta` channels, so the run keeps progressing without any SDK action. Surface them as status banners or telemetry; see [Run guards](/docs/run-guards/) for tuning the thresholds and budgets.
+`loop_detected`, `tool_budget_exceeded`, and `supervisor` are observability-only — the synthetic skip / steering nudge / "budget exceeded" tool result (and supervisor verdicts when `action` is `redirect` or `finalize`) already ride the normal channels, so the run keeps progressing without any SDK action. Surface them as status banners or telemetry; see [Run guards](/docs/run-guards/) for tuning the thresholds, budgets, and supervisor interval.
 
 The SDKs all reconnect automatically via `Last-Event-ID` + `?lastSeq=` if the SSE stream drops.

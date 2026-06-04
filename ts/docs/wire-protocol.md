@@ -132,6 +132,10 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
     "recall": { "maxCalls": 4 },
     "hive_consult_ontology": { "maxCalls": 4 },
   },
+  "supervisor": {
+    // optional; see §8.4 — platform LLM judge on ephemeral runs
+    "interval": 5,
+  },
   "metadata": { "customer": "acme" }, // optional, free-form k/v
 }
 ```
@@ -140,9 +144,9 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
 
 Same body shape, posted to `POST /agent-sessions/:id/messages`. The session
 keeps the conversation history; per-message `tools`, `reasoningLevel`,
-`outputSchema`, `loopDetection`, and `toolBudgets` _replace_ the session's
-defaults for that single run only — the next run falls back to whatever
-the session was created with.
+`outputSchema`, `loopDetection`, `toolBudgets`, and `supervisor` _replace_
+the session's defaults for that single run only — the next run falls back to
+whatever the session was created with.
 
 ---
 
@@ -391,6 +395,7 @@ The vocabulary (`EphemeralEventType` in `bus.ts`):
 | `local_tool_result_in` | M → SDK   | Per client-resolved tool call                    | Informational mirror of the tool-result the SDK just posted, persisted for observability. Re-emitted to late subscribers so they can replay the conversation.                                                                               |
 | `loop_detected`        | M → SDK   | 0–2× per run (soft nudge + optional hard cutoff) | Observability for the loop-detection guard (see §8). The server already substituted the synthetic skip + steering nudge — SDK clients render a status note (`looping — nudged` / `looping — gave up`) and otherwise leave the run alone.    |
 | `tool_budget_exceeded` | M → SDK   | Per intercepted tool call                        | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner. |
+| `supervisor`           | M → SDK   | 0–N× per run (every `interval` LLM calls)        | Run-supervisor check (see §4.7 / §8.4). Fired on **every** review — including `on_track` — so SDK clients can render supervisor activity. When the judge steers the run (`redirect` / `finalize`), the pipeline has already injected the steering message or forced a tools-disabled finalize turn. |
 | `assistant_message`    | M → SDK   | 1× per turn                                      | Final assistant message for the turn (concatenated, persistence-ready).                                                                                                                                                                     |
 | `result`               | M → SDK   | 1× terminal                                      | Successful completion. Carries the final assistant text and run summary.                                                                                                                                                                    |
 | `error`                | M → SDK   | 1× terminal                                      | Failure. Carries `error` (message), `code` / `errorClass` (category), `finishReason`, and an optional `partialText` salvage payload. See §4.7.                                                                                              |
@@ -640,7 +645,45 @@ re-parsing tool-result bodies.
 
 See §8 for the wire-spec field that defines budgets.
 
-### 4.7 Terminal events
+### 4.7 `supervisor`
+
+```jsonc
+// on_track — the judge reviewed the run and decided not to intervene
+{ "seq": 15, "type": "supervisor",
+  "data": { "action": "on_track", "reason": "Agent is gathering context via search before answering.", "llmCalls": 5 } }
+
+// redirect — a steering user message was injected; the agent keeps its tools
+{ "seq": 20, "type": "supervisor",
+  "data": { "action": "redirect", "reason": "Repeating the same search with identical args.", "redirect": "Stop re-querying; synthesize an answer from the results you already have.", "llmCalls": 10 } }
+
+// finalize — the run was forced to wrap up on a tools-disabled turn
+{ "seq": 25, "type": "supervisor",
+  "data": { "action": "finalize", "reason": "Enough evidence to answer; further tool use is unlikely to help.", "llmCalls": 15 } }
+```
+
+| Field      | Type    | Notes                                                                                                                                                                                                                         |
+| ---------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`   | string  | One of `"on_track"`, `"redirect"`, `"finalize"`.                                                                                                                                                                              |
+| `reason`   | string  | One- or two-sentence explanation from the judge.                                                                                                                                                                              |
+| `redirect` | string  | Present when `action === "redirect"`: the steering message injected into the conversation (same text the agent sees as a user message). Omitted for `on_track` / `finalize`.                                                 |
+| `llmCalls` | integer | Number of LLM calls (`completeTurn` invocations) completed when this review fired. Matches the pipeline's `modelInvocations` counter at the check boundary.                                                                   |
+
+Observability for the run-supervisor guard (see §8.4). The event fires on
+**every** check, not only when the judge intervenes — `on_track` reviews are
+included so SDK clients can show "supervisor reviewed" activity without
+inferring it from missing events.
+
+When `action` is `redirect` or `finalize`, the pipeline has already applied
+the verdict by the time this event arrives: a steering user message was
+appended (`redirect`) or the next turn was forced tools-disabled
+(`finalize`). SDK clients should render a status note and **not** try to
+steer the run themselves.
+
+Pass `"supervisor": false` in the spec (§8.4) to disable the platform judge
+for a run. Omission keeps the runtime default (supervisor **enabled** on
+ephemeral runs).
+
+### 4.8 Terminal events
 
 ```jsonc
 // Every terminal `result` and `error` event also carries `tokens`, `turns`,
@@ -692,7 +735,7 @@ SDK can re-fetch via `GET /agent-runs/:runId` will have:
 | `error`         | Same string as `data.error`.                                                                                             |
 | `failureReason` | `{ "errorClass": "truncation", "finishReason": "max_tokens" }` (JSON object, future-proof for additional triage fields). |
 
-### 4.7.1 Cost-attribution fields (`tokens`, `turns`, `model`)
+### 4.8.1 Cost-attribution fields (`tokens`, `turns`, `model`)
 
 Every terminal `result` and `error` event carries three additional
 fields so callers can drive cost dashboards, per-turn budgets, and
@@ -1030,20 +1073,67 @@ banners without re-parsing tool-result bodies:
 - `loop_detected` — fired on the soft nudge and again on the hard cutoff
   if reached. See §4.5.
 - `tool_budget_exceeded` — fired each time a call is intercepted. See §4.6.
+- `supervisor` — fired on every run-supervisor review (`on_track`,
+  `redirect`, or `finalize`). See §4.7.
 
-Both events are observability-only: the server has already substituted
-the synthetic tool-result / steering nudge by the time the SDK sees the
-event. The run continues to its terminal `result` / `error` / `cancelled`
-as usual.
+Both guard events (`loop_detected`, `tool_budget_exceeded`) are
+observability-only: the server has already substituted the synthetic
+tool-result / steering nudge by the time the SDK sees the event. The
+`supervisor` event is also observability-only when `action` is
+`redirect` / `finalize` — the pipeline already applied the verdict. The
+run continues to its terminal `result` / `error` / `cancelled` as usual.
 
-### 8.4 Session inheritance
+### 8.4 `supervisor` (run judge)
 
-Like `reasoningLevel` and `outputSchema`, both fields support
+An optional LLM **run supervisor** periodically reviews the agent's
+transcript (reasoning, tool calls, tool results, visible text) and may
+steer the run:
+
+| Verdict     | Server action                                                                                                                                      |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `on_track`  | No-op — the run continues unchanged.                                                                                                               |
+| `redirect`  | A steering **user message** is injected; tools stay available on the next turn.                                                                    |
+| `finalize`  | The next turn is forced **tools-disabled** so the run lands a clean final answer (optionally prefaced by the supervisor's message).                |
+
+Reviews fire every **`interval` LLM calls** (`completeTurn` invocations),
+measured at the bottom of tool-emitting rounds. Default interval is **5**
+when the field is omitted.
+
+```jsonc
+"supervisor": {
+  "interval": 5     // optional — LLM calls between reviews; default 5
+}
+
+// or:
+"supervisor": false   // explicitly disable the platform judge for this run
+```
+
+| Field      | Type            | Notes                                                                                                                              |
+| ---------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `interval` | integer ≥ 1     | Optional. Default **5** when omitted. Capped at **100** server-side.                                                                |
+| (literal `false`) | `false`  | Disables the run supervisor for this run. Loop detection and tool budgets still apply.                                             |
+
+**Defaults.** When `supervisor` is **omitted**, MANTYX enables the platform
+LLM judge on ephemeral runs (web chat enables it separately via the chat
+runner). Pass `"supervisor": false` to opt out.
+
+**SDK-only runs.** When a caller uses `@mantyx/ts-sdk` directly (not via
+`POST /agent-runs`), the supervisor is **off unless explicitly configured**:
+pass a `RunAgentSupervisor` object with a `review` callback to enable it, or
+pass `supervisor: false` (or omit the field) to keep it disabled. The wire
+field above controls the **platform-hosted** judge on ephemeral API runs only.
+
+Each review emits a SSE `supervisor` event (§4.7). Supervisor LLM usage is
+recorded under the `supervisor` usage surface for cost attribution.
+
+### 8.5 Session inheritance
+
+Like `reasoningLevel` and `outputSchema`, the run-guard fields support
 session-default + per-message override:
 
-- `POST /agent-sessions { loopDetection, toolBudgets }` — sets the
+- `POST /agent-sessions { loopDetection, toolBudgets, supervisor }` — sets the
   session-default applied to every subsequent message run.
-- `POST /agent-sessions/:id/messages { loopDetection, toolBudgets }` —
+- `POST /agent-sessions/:id/messages { loopDetection, toolBudgets, supervisor }` —
   optional per-message override. Applies to that one run only and does
   not mutate the session's stored value.
 
@@ -1215,17 +1305,17 @@ A reference SDK should:
       source-of-truth schema (Zod / Pydantic / etc.) — the server enforces
       JSON shape via the provider, but transient model errors can still
       produce strings that fail to parse in rare cases.
-- [ ] Accept `loopDetection` and `toolBudgets` from the caller and pass
-      them through unchanged (see §8). Both are _additive_ — omitting
-      them keeps the runtime defaults; passing `loopDetection: false` opts
-      out; passing `toolBudgets: {}` clears the defaults; passing entries
-      layers caller overrides on top of the defaults. Do **not** translate
-      to vendor-specific knobs.
-- [ ] Treat `loop_detected` and `tool_budget_exceeded` SSE events as
-      observability-only (see §4.5 / §4.6). Surface them as status notes
-      / log lines / telemetry — the server already substituted the
-      synthetic tool-results / steering nudges, so the SDK should keep
-      consuming the stream until the terminal event lands.
+- [ ] Accept `loopDetection`, `toolBudgets`, and `supervisor` from the caller
+      and pass them through unchanged (see §8). All three are _additive_ —
+      omitting them keeps the runtime defaults; passing `loopDetection: false`
+      or `supervisor: false` opts out; passing `toolBudgets: {}` clears the
+      defaults; passing entries layers caller overrides on top of the defaults.
+      Do **not** translate to vendor-specific knobs.
+- [ ] Treat `loop_detected`, `tool_budget_exceeded`, and `supervisor` SSE
+      events as observability-only (see §4.5 / §4.6 / §4.7). Surface them as
+      status notes / log lines / telemetry — the server already substituted
+      synthetic tool-results / steering nudges / supervisor verdicts, so the
+      SDK should keep consuming the stream until the terminal event lands.
 - [ ] Maintain three local-callback registries (or one tagged-union
       registry), keyed by `name`: - generic local tools (`kind: "local"`), - local A2A peers (`kind: "a2a_local"`, indexed by some Agent Card
       field — typically `agentCard.url`), - local MCP servers (`kind: "mcp_local"`, indexed by the SDK-side

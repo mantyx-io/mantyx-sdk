@@ -361,8 +361,12 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
     "hive_consult_ontology": { "maxCalls": 4 },
     "scary_tool": { "maxCalls": 0 },
   },
+  "supervisor": {
+    // optional, see §4.8 — platform LLM judge; pass false to disable
+    "interval": 5,
+  },
   "metadata": {
-    // optional, see §4.8
+    // optional, see §4.9
     "customer": "acme",
     "env": "prod",
   },
@@ -844,7 +848,64 @@ during normal multi-entity reads. The loop-detection guard catches the
 pathological "same `(name, args)` batch over and over" case for that
 family without needing per-tool caps.
 
-### 4.8 `metadata` (developer-supplied KV for filtering)
+### 4.8 `supervisor` (run judge)
+
+`supervisor` controls the optional **run supervisor** — an LLM judge that
+periodically reviews the agent's transcript (reasoning, tool calls, tool
+results, visible text) and may steer the run:
+
+- **`on_track`** — no-op; the run continues.
+- **`redirect`** — a steering user message is injected; tools stay available.
+- **`finalize`** — the next turn is forced tools-disabled so the run lands a
+  clean final answer.
+
+Reviews fire every **`interval` LLM calls** (`completeTurn` invocations) at
+the bottom of tool-emitting rounds. Default interval is **5** when enabled.
+
+```jsonc
+"supervisor": {
+  "interval": 5     // optional — LLM calls between reviews; default 5
+}
+
+// or:
+"supervisor": false   // explicitly disable the platform judge for this run
+```
+
+| Field             | Type            | Required | Notes                                                                                                                        |
+| ----------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `interval`        | integer ≥ 1     | no       | Defaults to **5** when the supervisor is enabled and `interval` is omitted. Capped at **100** server-side.                   |
+| (literal `false`) | `false`         | no       | Disables the run supervisor for this run. `loopDetection` and `toolBudgets` still apply.                                       |
+
+**Defaults.** When `supervisor` is **omitted**, MANTYX enables the platform
+LLM judge on ephemeral runs. Pass `"supervisor": false` to opt out.
+
+**SDK-only usage.** When calling `@mantyx/ts-sdk` directly (not via
+`POST /agent-runs`), the supervisor is **off unless explicitly configured**:
+pass `supervisor: { review, interval? }` on `RunAgentOptions` to enable a
+caller-supplied judge, or pass `supervisor: false` (or omit the field) to
+keep it disabled. The wire field above controls the **platform-hosted** judge
+on API/ephemeral runs only.
+
+Validation (server-side, `400 invalid_request` on violation):
+
+| Constraint        | Limit |
+| ----------------- | ----- |
+| `interval` upper bound | `100` |
+
+**Inheritance for sessions.**
+
+- `POST /agent-sessions { supervisor }` — sets the session-default, applied
+  to every subsequent message run.
+- `POST /agent-sessions/:id/messages { supervisor }` — optional per-message
+  override; applies to that one run only and does not mutate the session's
+  stored value.
+
+**Observability.** Each review emits a SSE `supervisor` event (see §7) —
+including `on_track` checks — so SDK clients can render supervisor activity.
+When `action` is `redirect` or `finalize`, the pipeline has already applied
+the verdict by the time the event arrives.
+
+### 4.9 `metadata` (developer-supplied KV for filtering)
 
 `metadata` is a flat string→string KV that is **persisted alongside the run /
 session** and surfaced in the MANTYX dashboard. Use it to tag runs with your
@@ -962,9 +1023,6 @@ data: <utf-8 JSON>
 `<type>` and `<data>` shapes:
 
 ```jsonc
-// running message
-{ "seq": 1, "type": "started", "data": {} }
-
 // streamed assistant tokens (zero or more per turn)
 { "seq": 2, "type": "assistant_delta", "data": { "text": "Hello" } }
 
@@ -1000,6 +1058,11 @@ data: <utf-8 JSON>
 // "budget exceeded — pivot or finalize" body on the normal tool_result channel; this event
 // is observability so SDK clients can render "memory budget exhausted" status notes.
 { "seq": 7, "type": "tool_budget_exceeded", "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 } }
+
+// run-supervisor check (see §4.8). Fired on every review — on_track included.
+{ "seq": 7, "type": "supervisor", "data": { "action": "on_track", "reason": "Agent is making progress.", "llmCalls": 5 } }
+{ "seq": 8, "type": "supervisor", "data": { "action": "redirect", "reason": "Stuck re-querying.", "redirect": "Answer from the data you already have.", "llmCalls": 10 } }
+{ "seq": 9, "type": "supervisor", "data": { "action": "finalize", "reason": "Enough to answer.", "llmCalls": 15 } }
 
 // terminal event
 // Every terminal `result` event also carries `tokens`, `turns`, and `model`
@@ -1241,18 +1304,18 @@ A reference SDK should:
    - Treat `thinking_delta` events as opt-in callback fodder; many UIs hide
      them by default. Their presence depends on `reasoningLevel > 0` and
      on the active model exposing thought parts.
-   - Accept `loopDetection` and `toolBudgets` from the caller and pass
-     them through unchanged (see §4.6 / §4.7). Both fields are _additive_:
-     omitting them keeps MANTYX's runtime defaults; passing
-     `loopDetection: false` opts out; passing `toolBudgets: {}` clears the
-     defaults; passing entries layers caller overrides on top of the
-     defaults.
-   - Treat `loop_detected` and `tool_budget_exceeded` SSE events as
-     observability-only — the server already substituted the synthetic
-     tool-results / steering nudges, so the SDK's job is just to surface
-     the event to the caller (status banner, log line, telemetry). Do
-     **not** abort the run on these events; the run continues through
-     `result` / `error` / `cancelled` as usual.
+   - Accept `loopDetection`, `toolBudgets`, and `supervisor` from the caller
+     and pass them through unchanged (see §4.6 / §4.7 / §4.8). All three are
+     _additive_: omitting them keeps MANTYX's runtime defaults; passing
+     `loopDetection: false` or `supervisor: false` opts out; passing
+     `toolBudgets: {}` clears the defaults; passing entries layers caller
+     overrides on top of the defaults.
+   - Treat `loop_detected`, `tool_budget_exceeded`, and `supervisor` SSE
+     events as observability-only — the server already substituted synthetic
+     tool-results / steering nudges / supervisor verdicts where applicable, so
+     the SDK's job is just to surface the event to the caller (status banner,
+     log line, telemetry). Do **not** abort the run on these events; the run
+     continues through `result` / `error` / `cancelled` as usual.
    - On terminal `result`, resolve the call. On `error` subtype, throw.
 4. Re-emit assistant deltas/events as a stream/iterator for callers who care
    about live output.
