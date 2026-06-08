@@ -480,6 +480,32 @@ Limits enforced server-side: max 16 entries; keys match `[A-Za-z0-9._-]{1,64}`;
 values are strings ≤ 256 chars; serialized JSON ≤ 4 KB. Bigger payloads return
 `400 invalid_request`.
 
+### Finding and restoring past sessions
+
+Use the metadata you attached at create time to find earlier sessions, then
+replay their conversation into a UI through the same handler you use for the
+live stream.
+
+```ts
+// Find sessions by your own identifiers (AND-combined server-side)
+const { sessions, total } = await client.listSessions({
+  metadata: { customer: "acme" },
+  status: "active", // optional: "active" | "ended"
+  limit: 50, // optional pagination
+  offset: 0,
+});
+// Each row: { sessionId, creationDate, lastInteractionDate, summary, metadata, status }
+
+// Replay a session as realtime-style frames so a UI can rebuild the thread.
+// Returns `user_message` / `assistant_message` frames (wire protocol §6.2).
+const events = await client.getSessionEvents(sessions[0].sessionId);
+
+// Or fetch only the most recent turns:
+const recent = await client.getSessionEvents(sessions[0].sessionId, {
+  lastMessages: 10,
+});
+```
+
 Resuming a session from a different process re-binds your local tool
 handlers; pass them in via `resumeSession`:
 
@@ -519,6 +545,8 @@ interface MantyxClientOptions {
 | `streamAgent(spec)`                           | `AsyncIterable<RunEvent>`            |
 | `createSession(spec)`                         | `Promise<AgentSession>`              |
 | `resumeSession(sessionId, { tools? })`        | `Promise<AgentSession>`              |
+| `listSessions({ metadata?, status?, limit?, offset? })` | `Promise<SessionListResult>`         |
+| `getSessionEvents(sessionId, { full?, lastMessages? })` | `Promise<RunEvent[]>`                |
 | `endSession(sessionId)`                       | `Promise<void>`                      |
 | `cancelRun(runId)`                            | `Promise<void>`                      |
 

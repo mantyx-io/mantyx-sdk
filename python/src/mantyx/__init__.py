@@ -43,6 +43,8 @@ from .client import (
     RunResult,
     RunTokenUsage,
     SessionInfo,
+    SessionListResult,
+    SessionSummary,
     parse_run_output,
 )
 from .errors import (
@@ -133,6 +135,8 @@ __all__ = [
     "RunResult",
     "RunTokenUsage",
     "SessionInfo",
+    "SessionListResult",
+    "SessionSummary",
     "Supervisor",
     "TokenRequestReason",
     "TokenSource",

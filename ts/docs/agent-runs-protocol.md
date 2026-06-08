@@ -932,9 +932,11 @@ For session-scoped runs the inheritance rules are:
   metadata do not retroactively rewrite past runs.
 
 Metadata is returned on every read: `GET /agent-runs/:id`,
-`GET /agent-sessions/:id`, and the admin list/detail endpoints. Filtering on
-the admin list endpoints uses repeated `?metadata=key:value` query params,
-AND-combined; see `docs/agent-runs.md` §"Web UI" for details.
+`GET /agent-sessions/:id`, the public session list (`GET /agent-sessions`,
+see §6.1), and the admin list/detail endpoints. Filtering uses repeated
+`?metadata=key:value` query params, AND-combined — supported on both the
+public `GET /agent-sessions` endpoint and the admin list endpoints; see
+`docs/agent-runs.md` §"Web UI" for the admin surface.
 
 ## 5. One-shot runs
 
@@ -966,7 +968,9 @@ runs or attributing spend after the SSE stream was already consumed.
 
 ```
 POST   /api/v1/workspaces/{slug}/agent-sessions
+GET    /api/v1/workspaces/{slug}/agent-sessions
 GET    /api/v1/workspaces/{slug}/agent-sessions/{sessionId}
+GET    /api/v1/workspaces/{slug}/agent-sessions/{sessionId}/events
 POST   /api/v1/workspaces/{slug}/agent-sessions/{sessionId}/messages
 DELETE /api/v1/workspaces/{slug}/agent-sessions/{sessionId}
 ```
@@ -978,6 +982,87 @@ Returns:
 ```json
 { "sessionId": "ses_abc" }
 ```
+
+### 6.1 Listing sessions (`GET /agent-sessions`)
+
+Lists the workspace's sessions, most-recently-used first. Supports paging
+and metadata filtering so callers can find earlier sessions by the
+application identifiers they attached at create time (see §4.9).
+
+| Query param | Notes                                                                                       |
+| ----------- | ------------------------------------------------------------------------------------------- |
+| `metadata`  | Repeatable `key:value` filter; AND-combined. Malformed entries return `400 invalid_request`. |
+| `status`    | Optional exact match (`active` / `ended`).                                                   |
+| `limit`     | Default `50`, max `200`.                                                                     |
+| `offset`    | Default `0`.                                                                                 |
+
+```http
+GET /api/v1/workspaces/acme/agent-sessions?metadata=customer:acme&metadata=env:prod&limit=20
+```
+
+```jsonc
+{
+  "total": 1,
+  "limit": 20,
+  "offset": 0,
+  "sessions": [
+    {
+      "sessionId": "ses_abc",
+      "creationDate": "2026-06-08T17:00:00.000Z",   // ISO 8601 — when created
+      "lastInteractionDate": "2026-06-08T17:42:10.000Z", // ISO 8601 — last message run
+      "summary": "How do I reset my password?",     // derived from the first user prompt
+      "metadata": { "customer": "acme", "env": "prod" },
+      "status": "active"
+    }
+  ]
+}
+```
+
+`summary` is a best-effort label derived from the conversation's first user
+prompt (sessions have no title); when the opener is very short the following
+messages are appended until it is informative.
+
+### 6.2 Replaying a session as events (`GET /agent-sessions/{sessionId}/events`)
+
+Returns the session's stored conversation as realtime-style event frames so a
+UI can restore the thread through the same handler it uses for the live SSE
+stream (§7). Unknown session ids return `404 not_found`.
+
+| Query param    | Notes                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| `full`         | `1` / `true` returns every message (the default when no paging param is given).                |
+| `lastMessages` | Return only the last `N` messages. Ignored when `full` is set.                                 |
+
+```http
+GET /api/v1/workspaces/acme/agent-sessions/ses_abc/events?lastMessages=2
+```
+
+```jsonc
+{
+  "sessionId": "ses_abc",
+  "total": 4,                 // total messages in the session (not the page size)
+  "events": [
+    { "seq": 3, "type": "user_message",      "text": "three" },
+    { "seq": 4, "type": "assistant_message", "text": "four" }
+  ]
+}
+```
+
+Frames use the flattened wire shape clients already consume from SSE
+(`{ seq, type, ...payload }`). `seq` is the message's position in the full
+conversation (stable across paging). Reconstructed turns map as:
+
+| Stored role | Frame `type`        |
+| ----------- | ------------------- |
+| `user`      | `user_message`      |
+| `assistant` | `assistant_message` |
+| other       | `message` (carries a `role` field) |
+
+`user_message` is a **replay/restore-only** frame — the live SSE stream never
+emits it (the client already knows the prompt it sent), but history
+restoration needs it to rebuild the user side of the conversation. This first
+cut reconstructs from the durable transcript (`role`/`content` only); tool
+calls are not replayed here.
 
 `POST /agent-sessions/{id}/messages` queues a new run scoped to the session
 and returns `{ runId, streamUrl }` just like a one-shot run. Body:

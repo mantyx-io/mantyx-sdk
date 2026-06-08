@@ -32,13 +32,16 @@ from .client import (
     RunResult,
     RunTokenUsage,
     SessionInfo,
+    SessionListResult,
     _describe_handler,
     _parse_model_catalog,
     _parse_required_scopes,
     _parse_run_model,
     _parse_run_tokens,
     _parse_run_turns,
+    _parse_session_events,
     _parse_session_info,
+    _parse_session_list,
     _quote,
     _resolve_credential,
     _serialize_agent_spec,
@@ -336,6 +339,59 @@ class AsyncMantyxClient:
         body = await self._request("GET", f"/agent-sessions/{_quote(session_id)}") or {}
         return _parse_session_info(body)
 
+    async def list_sessions(
+        self,
+        *,
+        metadata: Mapping[str, str] | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> SessionListResult:
+        """List the workspace's sessions, most-recently-used first.
+
+        Filter by the ``metadata`` you attached at create time to find earlier
+        sessions by your own identifiers (customer id, environment, …).
+        Multiple metadata entries are AND-combined server-side.
+        """
+        params: dict[str, Any] = {}
+        if metadata:
+            params["metadata"] = [f"{k}:{v}" for k, v in metadata.items()]
+        if status:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        body = await self._request("GET", "/agent-sessions", params=params) or {}
+        return _parse_session_list(body)
+
+    async def get_session_events(
+        self,
+        session_id: str,
+        *,
+        full: bool = False,
+        last_messages: int | None = None,
+    ) -> list[RunEvent]:
+        """Fetch a session's conversation as realtime-style event frames.
+
+        Returns ``user_message`` / ``assistant_message`` frames (see the wire
+        protocol §6.2) so a UI can restore the thread through the same handler
+        it uses for the live stream. Pass ``last_messages`` to fetch only the
+        most recent turns, or ``full=True`` for the entire history (default).
+        """
+        params: dict[str, Any] = {}
+        if full:
+            params["full"] = "1"
+        elif last_messages is not None:
+            params["lastMessages"] = last_messages
+        body = (
+            await self._request(
+                "GET", f"/agent-sessions/{_quote(session_id)}/events", params=params
+            )
+            or {}
+        )
+        return _parse_session_events(body)
+
     # ------------------------------------------------------------ Internals
 
     async def _drive_run(
@@ -610,8 +666,10 @@ class AsyncMantyxClient:
         method: str,
         path: str,
         body: Mapping[str, Any] | None = None,
+        *,
+        params: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        return await self._request_with_retry(method, path, body, reason="initial")
+        return await self._request_with_retry(method, path, body, reason="initial", params=params)
 
     async def _request_with_retry(
         self,
@@ -619,11 +677,14 @@ class AsyncMantyxClient:
         path: str,
         body: Mapping[str, Any] | None,
         reason: str,
+        params: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         url = self._absolute_url(path)
         headers = await self._auth_headers(reason)
         headers["Accept"] = "application/json"
         request_kwargs: dict[str, Any] = {"method": method, "url": url, "headers": headers}
+        if params:
+            request_kwargs["params"] = params
         if body is not None:
             request_kwargs["json"] = body
             headers["Content-Type"] = "application/json"
@@ -632,7 +693,9 @@ class AsyncMantyxClient:
         except httpx.HTTPError as exc:
             raise MantyxNetworkError(str(exc), cause=exc) from exc
         if resp.status_code == 401 and self.token_source is not None and reason == "initial":
-            return await self._request_with_retry(method, path, body, reason="unauthorized")
+            return await self._request_with_retry(
+                method, path, body, reason="unauthorized", params=params
+            )
         if resp.status_code >= 400:
             await self._raise_for_status(resp)
         text = resp.text
@@ -805,6 +868,12 @@ class AsyncAgentSession:
 
     async def info(self) -> SessionInfo:
         return await self.client.get_session_info(self.id)
+
+    async def events(
+        self, *, full: bool = False, last_messages: int | None = None
+    ) -> list[RunEvent]:
+        """Replay this session's conversation as realtime-style event frames."""
+        return await self.client.get_session_events(self.id, full=full, last_messages=last_messages)
 
     async def end(self) -> None:
         try:

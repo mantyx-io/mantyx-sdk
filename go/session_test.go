@@ -83,6 +83,120 @@ func TestSession_MetadataForwarded(t *testing.T) {
 	}
 }
 
+func TestListSessions_FiltersByMetadata(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	ctx := context.Background()
+
+	if _, err := client.CreateSession(ctx, SessionSpec{
+		SystemPrompt: "x",
+		Metadata:     map[string]string{"customer": "acme", "env": "prod"},
+	}); err != nil {
+		t.Fatalf("CreateSession #1: %v", err)
+	}
+	if _, err := client.CreateSession(ctx, SessionSpec{
+		SystemPrompt: "x",
+		Metadata:     map[string]string{"customer": "globex", "env": "prod"},
+	}); err != nil {
+		t.Fatalf("CreateSession #2: %v", err)
+	}
+
+	all, err := client.ListSessions(ctx, ListSessionsOptions{})
+	if err != nil {
+		t.Fatalf("ListSessions all: %v", err)
+	}
+	if all.Total != 2 {
+		t.Fatalf("expected 2 sessions, got %d", all.Total)
+	}
+
+	filtered, err := client.ListSessions(ctx, ListSessionsOptions{
+		Metadata: map[string]string{"customer": "acme"},
+	})
+	if err != nil {
+		t.Fatalf("ListSessions filtered: %v", err)
+	}
+	if filtered.Total != 1 {
+		t.Fatalf("expected 1 filtered session, got %d", filtered.Total)
+	}
+	if filtered.Sessions[0].Metadata["customer"] != "acme" {
+		t.Fatalf("unexpected metadata: %#v", filtered.Sessions[0].Metadata)
+	}
+	if filtered.Sessions[0].Status != "active" {
+		t.Fatalf("unexpected status: %q", filtered.Sessions[0].Status)
+	}
+
+	none, err := client.ListSessions(ctx, ListSessionsOptions{
+		Metadata: map[string]string{"customer": "acme", "env": "staging"},
+	})
+	if err != nil {
+		t.Fatalf("ListSessions none: %v", err)
+	}
+	if none.Total != 0 {
+		t.Fatalf("expected 0 sessions, got %d", none.Total)
+	}
+}
+
+func TestGetSessionEvents_ReplaysFrames(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	ctx := context.Background()
+
+	session, err := client.CreateSession(ctx, SessionSpec{SystemPrompt: "x"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := session.Send(ctx, "one"); err != nil {
+		t.Fatalf("Send #1: %v", err)
+	}
+	if _, err := session.Send(ctx, "three"); err != nil {
+		t.Fatalf("Send #2: %v", err)
+	}
+
+	full, err := client.GetSessionEvents(ctx, session.ID, GetSessionEventsOptions{})
+	if err != nil {
+		t.Fatalf("GetSessionEvents full: %v", err)
+	}
+	want := []struct {
+		seq     int
+		evType  string
+		text    string
+	}{
+		{1, "user_message", "one"},
+		{2, "assistant_message", "echo:one"},
+		{3, "user_message", "three"},
+		{4, "assistant_message", "echo:three"},
+	}
+	if len(full) != len(want) {
+		t.Fatalf("expected %d events, got %d (%#v)", len(want), len(full), full)
+	}
+	for i, w := range want {
+		if full[i].Seq != w.seq || full[i].Type != w.evType {
+			t.Fatalf("event %d: got {seq:%d type:%q}, want {seq:%d type:%q}", i, full[i].Seq, full[i].Type, w.seq, w.evType)
+		}
+		if txt, _ := full[i].Data["text"].(string); txt != w.text {
+			t.Fatalf("event %d text: got %q, want %q", i, txt, w.text)
+		}
+	}
+
+	lastTwo, err := session.Events(ctx, GetSessionEventsOptions{LastMessages: 2})
+	if err != nil {
+		t.Fatalf("Events lastMessages: %v", err)
+	}
+	if len(lastTwo) != 2 || lastTwo[0].Seq != 3 || lastTwo[1].Seq != 4 {
+		t.Fatalf("unexpected lastMessages slice: %#v", lastTwo)
+	}
+}
+
 func TestSession_RunGuardsOnCreateAndPerMessage(t *testing.T) {
 	server := newMockServer()
 	defer server.close()

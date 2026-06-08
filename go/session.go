@@ -185,6 +185,16 @@ func (s *Session) History(ctx context.Context) ([]Message, error) {
 	return info.Messages, nil
 }
 
+// Info returns a snapshot of the session row.
+func (s *Session) Info(ctx context.Context) (SessionInfo, error) {
+	return s.client.GetSessionInfo(ctx, s.ID)
+}
+
+// Events replays this session's conversation as realtime-style event frames.
+func (s *Session) Events(ctx context.Context, opts GetSessionEventsOptions) ([]RunEvent, error) {
+	return s.client.GetSessionEvents(ctx, s.ID, opts)
+}
+
 // End marks the session terminal and closes any MCP transports the SDK
 // opened on the session's behalf.
 func (s *Session) End(ctx context.Context) error {

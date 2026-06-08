@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -132,13 +134,13 @@ type ModelCatalog struct {
 
 // ModelInfo describes one selectable model.
 type ModelInfo struct {
-	ID                  string         `json:"id"`
-	Label               string         `json:"label"`
-	Provider            string         `json:"provider"`
-	VendorModelID       string         `json:"vendorModelId"`
-	Source              string         `json:"source"`
-	ContextWindowTokens int            `json:"contextWindowTokens"`
-	Pricing             *PricingInfo   `json:"pricing"`
+	ID                  string       `json:"id"`
+	Label               string       `json:"label"`
+	Provider            string       `json:"provider"`
+	VendorModelID       string       `json:"vendorModelId"`
+	Source              string       `json:"source"`
+	ContextWindowTokens int          `json:"contextWindowTokens"`
+	Pricing             *PricingInfo `json:"pricing"`
 }
 
 // PricingInfo is best-effort and may be nil.
@@ -672,23 +674,70 @@ type RunResult struct {
 
 // RunEvent is one durable run event. Specific payload fields vary by Type.
 type RunEvent struct {
-	Seq  int                    `json:"seq"`
-	Type string                 `json:"type"`
-	Data map[string]any         `json:"-"`
+	Seq  int            `json:"seq"`
+	Type string         `json:"type"`
+	Data map[string]any `json:"-"`
 }
 
 // SessionInfo is the snapshot of a session row.
 type SessionInfo struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	Status     string            `json:"status"`
-	CreatedAt  string            `json:"createdAt"`
-	LastUsedAt string            `json:"lastUsedAt"`
-	EndedAt    string            `json:"endedAt"`
-	AgentSpec  map[string]any    `json:"agentSpec"`
-	Messages   []Message         `json:"messages"`
+	ID         string         `json:"id"`
+	Name       string         `json:"name"`
+	Status     string         `json:"status"`
+	CreatedAt  string         `json:"createdAt"`
+	LastUsedAt string         `json:"lastUsedAt"`
+	EndedAt    string         `json:"endedAt"`
+	AgentSpec  map[string]any `json:"agentSpec"`
+	Messages   []Message      `json:"messages"`
 	// Metadata that was attached to the session at create time.
 	Metadata map[string]string `json:"metadata"`
+}
+
+// SessionSummary is one row from ListSessions.
+type SessionSummary struct {
+	SessionID string `json:"sessionId"`
+	// CreationDate is an ISO 8601 timestamp.
+	CreationDate string `json:"creationDate"`
+	// LastInteractionDate is an ISO 8601 timestamp of the most recent run.
+	LastInteractionDate string `json:"lastInteractionDate"`
+	// Summary is a best-effort label derived from the first user prompt
+	// (sessions have no title).
+	Summary  string            `json:"summary"`
+	Metadata map[string]string `json:"metadata"`
+	Status   string            `json:"status"`
+}
+
+// SessionListResult is the paginated response from ListSessions.
+type SessionListResult struct {
+	Total    int              `json:"total"`
+	Limit    int              `json:"limit"`
+	Offset   int              `json:"offset"`
+	Sessions []SessionSummary `json:"sessions"`
+}
+
+// ListSessionsOptions filters and paginates a ListSessions call. The zero
+// value lists every session in the workspace.
+type ListSessionsOptions struct {
+	// Metadata filters to sessions whose stored metadata contains every
+	// supplied key/value pair (AND-combined server-side). Use the same
+	// identifiers you attached at create time.
+	Metadata map[string]string
+	// Status optionally filters by lifecycle ("active" | "ended").
+	Status string
+	// Limit caps the page size (server default 50, max 200). 0 leaves it unset.
+	Limit int
+	// Offset skips the first N rows for pagination. 0 leaves it unset.
+	Offset int
+}
+
+// GetSessionEventsOptions controls how much of a session's conversation
+// GetSessionEvents returns. The zero value returns the full history.
+type GetSessionEventsOptions struct {
+	// Full returns every message frame (the default behaviour).
+	Full bool
+	// LastMessages, when > 0 and Full is false, returns only the most recent
+	// N message frames.
+	LastMessages int
 }
 
 // ----- One-shot run ---------------------------------------------------------
@@ -863,6 +912,79 @@ func (c *Client) GetSessionInfo(ctx context.Context, id string) (SessionInfo, er
 	var out SessionInfo
 	err := c.do(ctx, "GET", "/agent-sessions/"+pathEscape(id), nil, &out)
 	return out, err
+}
+
+// ListSessions returns the workspace's sessions, most-recently-used first.
+// Filter by the metadata you attached at create time to find earlier sessions
+// by your own identifiers (customer id, environment, …). Multiple metadata
+// entries are AND-combined server-side.
+func (c *Client) ListSessions(ctx context.Context, opts ListSessionsOptions) (SessionListResult, error) {
+	q := url.Values{}
+	for k, v := range opts.Metadata {
+		q.Add("metadata", k+":"+v)
+	}
+	if opts.Status != "" {
+		q.Set("status", opts.Status)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Offset > 0 {
+		q.Set("offset", strconv.Itoa(opts.Offset))
+	}
+	path := "/agent-sessions"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var out SessionListResult
+	err := c.do(ctx, "GET", path, nil, &out)
+	return out, err
+}
+
+// GetSessionEvents fetches a session's conversation as realtime-style event
+// frames so a UI can restore the thread through the same handler it uses for
+// the live stream. Returns `user_message` / `assistant_message` frames (see
+// the wire protocol §6.2). Pass opts.LastMessages to fetch only the most
+// recent turns, or opts.Full for the entire history (the default).
+func (c *Client) GetSessionEvents(ctx context.Context, id string, opts GetSessionEventsOptions) ([]RunEvent, error) {
+	q := url.Values{}
+	if opts.Full {
+		q.Set("full", "1")
+	} else if opts.LastMessages > 0 {
+		q.Set("lastMessages", strconv.Itoa(opts.LastMessages))
+	}
+	path := "/agent-sessions/" + pathEscape(id) + "/events"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var resp struct {
+		SessionID string           `json:"sessionId"`
+		Total     int              `json:"total"`
+		Events    []map[string]any `json:"events"`
+	}
+	if err := c.do(ctx, "GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	events := make([]RunEvent, 0, len(resp.Events))
+	for i, frame := range resp.Events {
+		seq := i + 1
+		if v, ok := frame["seq"].(float64); ok {
+			seq = int(v)
+		}
+		evType, _ := frame["type"].(string)
+		if evType == "" {
+			evType = "message"
+		}
+		data := make(map[string]any, len(frame))
+		for k, v := range frame {
+			if k == "seq" || k == "type" {
+				continue
+			}
+			data[k] = v
+		}
+		events = append(events, RunEvent{Seq: seq, Type: evType, Data: data})
+	}
+	return events, nil
 }
 
 // ----- Run driver -----------------------------------------------------------

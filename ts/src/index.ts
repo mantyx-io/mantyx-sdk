@@ -61,6 +61,7 @@ export type {
   AssistantDeltaEvent,
   ThinkingDeltaEvent,
   AssistantMessageEvent,
+  UserMessageEvent,
   ServerToolResultEvent,
   LocalToolCallEvent,
   LocalToolResultInEvent,
@@ -71,6 +72,8 @@ export type {
   ErrorEvent,
   CancelledEvent,
   SessionInfo,
+  SessionSummary,
+  SessionListResult,
   LocalHandlers,
 } from "./client.js";
 
