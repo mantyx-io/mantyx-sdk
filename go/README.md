@@ -536,6 +536,36 @@ Limits enforced server-side: max 16 entries; keys match `[A-Za-z0-9._-]{1,64}`;
 values are strings ≤ 256 chars; serialized JSON ≤ 4 KB. Bigger payloads return
 `400 invalid_request`.
 
+### Finding and restoring past sessions
+
+Use the metadata you attached at create time to find earlier sessions, then
+replay their conversation into a UI through the same handler you use for the
+live stream.
+
+```go
+// Find sessions by your own identifiers (AND-combined server-side)
+result, err := client.ListSessions(ctx, mantyx.ListSessionsOptions{
+    Metadata: map[string]string{"customer": "acme"},
+    Status:   "active", // optional: "active" | "ended"
+    Limit:    50,        // optional pagination
+})
+for _, s := range result.Sessions {
+    // s.SessionID, s.CreationDate, s.LastInteractionDate, s.Summary, s.Metadata, s.Status
+    fmt.Println(s.SessionID, s.Summary)
+}
+
+// Replay a session as realtime-style frames so a UI can rebuild the thread.
+// Returns `user_message` / `assistant_message` frames (wire protocol §6.2).
+events, err := client.GetSessionEvents(ctx, result.Sessions[0].SessionID, mantyx.GetSessionEventsOptions{})
+
+// Or fetch only the most recent turns:
+recent, err := client.GetSessionEvents(ctx, result.Sessions[0].SessionID, mantyx.GetSessionEventsOptions{
+    LastMessages: 10,
+})
+```
+
+An existing `*Session` also exposes `session.Events(ctx, opts)`.
+
 Resuming a session from a different process re-binds your local tool
 handlers via `ResumeSession`:
 
@@ -573,9 +603,12 @@ func NewClient(opts Options) *Client
 | `(*Client).StreamAgent(ctx, RunSpec)`                             | `(<-chan RunEvent, error)`       |
 | `(*Client).CreateSession(ctx, SessionSpec)`                       | `(*Session, error)`              |
 | `(*Client).ResumeSession(ctx, id, tools)`                         | `(*Session, error)`              |
+| `(*Client).ListSessions(ctx, ListSessionsOptions)`                | `(SessionListResult, error)`     |
+| `(*Client).GetSessionEvents(ctx, id, GetSessionEventsOptions)`    | `([]RunEvent, error)`            |
 | `(*Session).Send(ctx, prompt, ...SendOption)`                     | `(*RunResult, error)`            |
 | `(*Session).Stream(ctx, prompt)`                                  | `(<-chan RunEvent, error)`       |
 | `(*Session).History(ctx)`                                         | `([]Message, error)`             |
+| `(*Session).Events(ctx, GetSessionEventsOptions)`                 | `([]RunEvent, error)`            |
 | `(*Session).End(ctx)`                                             | `error`                          |
 | `(*Client).CancelRun(ctx, runID)`                                 | `error`                          |
 

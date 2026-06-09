@@ -62,4 +62,62 @@ describe("AgentSession", () => {
     await session.send("hello", { metadata: { trace_id: "trace_123" } });
     expect(server.lastSessionMessageBody?.metadata).toEqual({ trace_id: "trace_123" });
   });
+
+  it("lists sessions and filters by metadata", async () => {
+    await client.createSession({
+      systemPrompt: "x",
+      metadata: { customer: "acme", env: "prod" },
+    });
+    await client.createSession({
+      systemPrompt: "x",
+      metadata: { customer: "globex", env: "prod" },
+    });
+
+    const all = await client.listSessions();
+    expect(all.total).toBe(2);
+
+    const filtered = await client.listSessions({
+      metadata: { customer: "acme" },
+    });
+    expect(filtered.total).toBe(1);
+    expect(filtered.sessions[0]?.metadata).toEqual({
+      customer: "acme",
+      env: "prod",
+    });
+    expect(filtered.sessions[0]?.status).toBe("active");
+    expect(typeof filtered.sessions[0]?.creationDate).toBe("string");
+
+    const none = await client.listSessions({
+      metadata: { customer: "acme", env: "staging" },
+    });
+    expect(none.total).toBe(0);
+  });
+
+  it("replays a session as realtime-style event frames", async () => {
+    const session = await client.createSession({ systemPrompt: "x" });
+    server.scriptForNextSessionRun = {
+      events: [{ type: "result", subtype: "success", text: "two" }],
+    };
+    await session.send("one");
+    server.scriptForNextSessionRun = {
+      events: [{ type: "result", subtype: "success", text: "four" }],
+    };
+    await session.send("three");
+
+    const full = await client.getSessionEvents(session.id);
+    expect(full).toEqual([
+      { seq: 1, type: "user_message", text: "one" },
+      { seq: 2, type: "assistant_message", text: "two" },
+      { seq: 3, type: "user_message", text: "three" },
+      { seq: 4, type: "assistant_message", text: "four" },
+    ]);
+
+    const lastTwo = await client.getSessionEvents(session.id, {
+      lastMessages: 2,
+    });
+    expect(lastTwo).toEqual([
+      { seq: 3, type: "user_message", text: "three" },
+      { seq: 4, type: "assistant_message", text: "four" },
+    ]);
+  });
 });

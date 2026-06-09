@@ -250,6 +250,32 @@ session.send("trace this turn", metadata={"trace_id": "trace_abc"})
 
 Limits enforced server-side: max 16 entries; keys match `[A-Za-z0-9._-]{1,64}`; values are strings ≤ 256 chars; serialised JSON ≤ 4 KB. Bigger payloads return `400 invalid_request`.
 
+### Finding and restoring past sessions
+
+Use the metadata you attached at create time to find earlier sessions, then replay their conversation into a UI through the same handler you use for the live stream.
+
+```python
+# Find sessions by your own identifiers (AND-combined server-side)
+result = client.list_sessions(
+    metadata={"customer": "acme"},
+    status="active",  # optional: "active" | "ended"
+    limit=50,          # optional pagination
+    offset=0,
+)
+for s in result.sessions:
+    # s.session_id, s.creation_date, s.last_interaction_date, s.summary, s.metadata, s.status
+    print(s.session_id, s.summary)
+
+# Replay a session as realtime-style frames so a UI can rebuild the thread.
+# Returns `user_message` / `assistant_message` frames (wire protocol §6.2).
+events = client.get_session_events(result.sessions[0].session_id)
+
+# Or fetch only the most recent turns:
+recent = client.get_session_events(result.sessions[0].session_id, last_messages=10)
+```
+
+`AsyncMantyxClient` exposes `await client.list_sessions(...)` and `await client.get_session_events(...)`; an `AgentSession` also offers `session.events(...)`.
+
 ## API reference
 
 ### `MantyxClient(...)` / `AsyncMantyxClient(...)`
@@ -279,6 +305,8 @@ class MantyxClient:
 | `stream_agent(...)`                             | `Iterator[RunEvent]`                 |
 | `create_session(...)`                           | `AgentSession`                       |
 | `resume_session(session_id, *, tools=None)`     | `AgentSession`                       |
+| `list_sessions(*, metadata=None, status=None, limit=None, offset=None)` | `SessionListResult`                  |
+| `get_session_events(session_id, *, full=False, last_messages=None)` | `list[RunEvent]`                     |
 | `end_session(session_id)`                       | `None`                               |
 | `cancel_run(run_id)`                            | `None`                               |
 

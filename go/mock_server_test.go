@@ -19,14 +19,14 @@ import (
 type mockServer struct {
 	srv *httptest.Server
 
-	mu                     sync.Mutex
-	scriptForNextRun       *runScript
-	failAuth               bool
+	mu               sync.Mutex
+	scriptForNextRun *runScript
+	failAuth         bool
 	// failScope, when non-nil, makes every route return 403
 	// `insufficient_scope` with the configured `required` payload.
 	// One element → string body; >1 elements → array body. Matches the
 	// server's serialisation. See docs/agent-runs-protocol.md §2.3.
-	failScope              []string
+	failScope []string
 	// failAuthCount, when > 0, makes the next N API requests return
 	// 401; subsequent requests fall through to normal handling. Used
 	// to exercise the SDK's "refresh + retry once on 401" flow.
@@ -39,28 +39,28 @@ type mockServer struct {
 	lastSessionMessageBody []byte
 	models                 ModelCatalog
 	runs                   map[string]*runState
-	sessions               map[string][]Message
+	sessions               map[string]*mockSession
 	sessionScripts         map[string]*runScript
 
 	// A2A test peer (served at /a2a/...).
-	a2aAgentCard    map[string]any // GET /a2a/agent-card.json
-	a2aReplyText    string         // text portion of POST /a2a/rpc reply
-	lastA2ARequest  []byte
-	a2aAuthHeader   string
+	a2aAgentCard   map[string]any // GET /a2a/agent-card.json
+	a2aReplyText   string         // text portion of POST /a2a/rpc reply
+	lastA2ARequest []byte
+	a2aAuthHeader  string
 
 	// OAuth authorization server simulation.
-	oauthAccessToken        string
-	oauthRefreshToken       string
-	oauthExpiresIn          int
-	oauthScope              string
-	oauthRotateAccessToken  bool
-	oauthNextError          *oauthMockError
-	oauthTokenCallCount     int
-	oauthLastTokenRequest   url.Values
-	oauthRevokeCallCount    int
-	oauthLastRevokeRequest  url.Values
-	oauthTokenLatency       time.Duration
-	oauthTokenHook          func() // optional pre-response hook on /token (for single-flight tests)
+	oauthAccessToken       string
+	oauthRefreshToken      string
+	oauthExpiresIn         int
+	oauthScope             string
+	oauthRotateAccessToken bool
+	oauthNextError         *oauthMockError
+	oauthTokenCallCount    int
+	oauthLastTokenRequest  url.Values
+	oauthRevokeCallCount   int
+	oauthLastRevokeRequest url.Values
+	oauthTokenLatency      time.Duration
+	oauthTokenHook         func() // optional pre-response hook on /token (for single-flight tests)
 }
 
 type oauthMockError struct {
@@ -69,15 +69,21 @@ type oauthMockError struct {
 	Status      int
 }
 
+type mockSession struct {
+	messages  []Message
+	metadata  map[string]string
+	createdAt string
+}
+
 type runScript struct {
 	events    []scriptEvent
 	finalText string
 }
 
 type scriptEvent struct {
-	kind   string                 // "delta" | "result" | "local_tool_call"
-	data   map[string]any
-	wait   bool                   // for local_tool_call: pause until result posted
+	kind string // "delta" | "result" | "local_tool_call"
+	data map[string]any
+	wait bool // for local_tool_call: pause until result posted
 }
 
 type runState struct {
@@ -93,7 +99,7 @@ type runState struct {
 func newMockServer() *mockServer {
 	m := &mockServer{
 		runs:                   map[string]*runState{},
-		sessions:               map[string][]Message{},
+		sessions:               map[string]*mockSession{},
 		sessionScripts:         map[string]*runScript{},
 		oauthAccessToken:       "mantyx_at_mock_initial",
 		oauthRefreshToken:      "mantyx_rt_mock_initial",
@@ -299,28 +305,125 @@ func (m *mockServer) handleAgentSessions(w http.ResponseWriter, r *http.Request,
 		m.mu.Lock()
 		m.lastSessionCreateBody = raw
 		m.mu.Unlock()
+		var body struct {
+			Metadata map[string]string `json:"metadata"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		meta := body.Metadata
+		if meta == nil {
+			meta = map[string]string{}
+		}
 		id := newID("sess")
 		m.mu.Lock()
-		m.sessions[id] = []Message{}
+		m.sessions[id] = &mockSession{
+			messages:  []Message{},
+			metadata:  meta,
+			createdAt: "2026-01-01T00:00:00.000Z",
+		}
 		m.mu.Unlock()
 		m.writeJSON(w, http.StatusCreated, map[string]any{
 			"sessionId": id,
 			"name":      "ephemeral",
-			"createdAt": "now",
+			"metadata":  meta,
+			"createdAt": "2026-01-01T00:00:00.000Z",
+		})
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		filters := map[string]string{}
+		for _, raw := range r.URL.Query()["metadata"] {
+			idx := strings.Index(raw, ":")
+			if idx <= 0 {
+				http.Error(w, `{"error":"Invalid metadata filter"}`, http.StatusBadRequest)
+				return
+			}
+			filters[raw[:idx]] = raw[idx+1:]
+		}
+		m.mu.Lock()
+		summaries := []SessionSummary{}
+		for id, sess := range m.sessions {
+			matches := true
+			for k, v := range filters {
+				if sess.metadata[k] != v {
+					matches = false
+					break
+				}
+			}
+			if !matches {
+				continue
+			}
+			summary := ""
+			for _, msg := range sess.messages {
+				if msg.Role == "user" {
+					summary = msg.Content
+					break
+				}
+			}
+			summaries = append(summaries, SessionSummary{
+				SessionID:           id,
+				CreationDate:        sess.createdAt,
+				LastInteractionDate: sess.createdAt,
+				Summary:             summary,
+				Metadata:            sess.metadata,
+				Status:              "active",
+			})
+		}
+		m.mu.Unlock()
+		m.writeJSON(w, http.StatusOK, SessionListResult{
+			Total:    len(summaries),
+			Limit:    50,
+			Offset:   0,
+			Sessions: summaries,
+		})
+	case len(rest) == 2 && rest[1] == "events" && r.Method == http.MethodGet:
+		m.mu.Lock()
+		sess, ok := m.sessions[rest[0]]
+		m.mu.Unlock()
+		if !ok {
+			http.Error(w, `{"error":"Session not found"}`, http.StatusNotFound)
+			return
+		}
+		all := sess.messages
+		selected := all
+		full := r.URL.Query().Get("full") == "1" || r.URL.Query().Get("full") == "true"
+		if !full {
+			if v := r.URL.Query().Get("lastMessages"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 && n < len(all) {
+					selected = all[len(all)-n:]
+				}
+			}
+		}
+		startIndex := len(all) - len(selected)
+		events := []map[string]any{}
+		for i, msg := range selected {
+			seq := startIndex + i + 1
+			switch msg.Role {
+			case "assistant":
+				events = append(events, map[string]any{"seq": seq, "type": "assistant_message", "text": msg.Content})
+			case "user":
+				events = append(events, map[string]any{"seq": seq, "type": "user_message", "text": msg.Content})
+			default:
+				events = append(events, map[string]any{"seq": seq, "type": "message", "role": msg.Role, "text": msg.Content})
+			}
+		}
+		m.writeJSON(w, http.StatusOK, map[string]any{
+			"sessionId": rest[0],
+			"total":     len(all),
+			"events":    events,
 		})
 	case len(rest) == 1 && r.Method == http.MethodGet:
 		m.mu.Lock()
-		msgs, ok := m.sessions[rest[0]]
+		sess, ok := m.sessions[rest[0]]
 		m.mu.Unlock()
 		if !ok {
 			http.Error(w, `{"error":"Session not found"}`, http.StatusNotFound)
 			return
 		}
 		m.writeJSON(w, http.StatusOK, SessionInfo{
-			ID:       rest[0],
-			Name:     "ephemeral",
-			Status:   "active",
-			Messages: msgs,
+			ID:        rest[0],
+			Name:      "ephemeral",
+			Status:    "active",
+			CreatedAt: sess.createdAt,
+			Messages:  sess.messages,
+			Metadata:  sess.metadata,
 		})
 	case len(rest) == 1 && r.Method == http.MethodDelete:
 		m.mu.Lock()
@@ -351,7 +454,7 @@ func (m *mockServer) handleAgentSessions(w http.ResponseWriter, r *http.Request,
 		}
 		finalText := lastResultText(script)
 		m.mu.Lock()
-		m.sessions[sessionID] = append(m.sessions[sessionID],
+		m.sessions[sessionID].messages = append(m.sessions[sessionID].messages,
 			Message{Role: "user", Content: body.Prompt},
 			Message{Role: "assistant", Content: finalText},
 		)

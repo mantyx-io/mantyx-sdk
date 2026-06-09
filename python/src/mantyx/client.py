@@ -188,6 +188,31 @@ class SessionInfo:
     metadata: dict[str, str]
 
 
+@dataclass
+class SessionSummary:
+    """One row from :meth:`MantyxClient.list_sessions`."""
+
+    session_id: str
+    #: ISO 8601 creation timestamp.
+    creation_date: str
+    #: ISO 8601 timestamp of the most recent message run.
+    last_interaction_date: str
+    #: Best-effort label derived from the first user prompt (sessions have no title).
+    summary: str
+    metadata: dict[str, str]
+    status: str
+
+
+@dataclass
+class SessionListResult:
+    """Paginated result of :meth:`MantyxClient.list_sessions`."""
+
+    total: int
+    limit: int
+    offset: int
+    sessions: list[SessionSummary]
+
+
 # --------------------------------------------------------------------- Client
 
 
@@ -472,6 +497,57 @@ class MantyxClient:
         body = self._request("GET", f"/agent-sessions/{_quote(session_id)}") or {}
         return _parse_session_info(body)
 
+    def list_sessions(
+        self,
+        *,
+        metadata: Mapping[str, str] | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> SessionListResult:
+        """List the workspace's sessions, most-recently-used first.
+
+        Filter by the ``metadata`` you attached at create time to find earlier
+        sessions by your own identifiers (customer id, environment, …).
+        Multiple metadata entries are AND-combined server-side.
+        """
+        params: dict[str, Any] = {}
+        if metadata:
+            params["metadata"] = [f"{k}:{v}" for k, v in metadata.items()]
+        if status:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        body = self._request("GET", "/agent-sessions", params=params) or {}
+        return _parse_session_list(body)
+
+    def get_session_events(
+        self,
+        session_id: str,
+        *,
+        full: bool = False,
+        last_messages: int | None = None,
+    ) -> list[RunEvent]:
+        """Fetch a session's conversation as realtime-style event frames.
+
+        Returns ``user_message`` / ``assistant_message`` frames (see the wire
+        protocol §6.2) so a UI can restore the thread through the same handler
+        it uses for the live stream. Pass ``last_messages`` to fetch only the
+        most recent turns, or ``full=True`` for the entire history (default).
+        """
+        params: dict[str, Any] = {}
+        if full:
+            params["full"] = "1"
+        elif last_messages is not None:
+            params["lastMessages"] = last_messages
+        body = (
+            self._request("GET", f"/agent-sessions/{_quote(session_id)}/events", params=params)
+            or {}
+        )
+        return _parse_session_events(body)
+
     # ------------------------------------------------------------ Internals
 
     def _drive_run(
@@ -751,8 +827,10 @@ class MantyxClient:
         method: str,
         path: str,
         body: Mapping[str, Any] | None = None,
+        *,
+        params: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        return self._request_with_retry(method, path, body, reason="initial")
+        return self._request_with_retry(method, path, body, reason="initial", params=params)
 
     def _request_with_retry(
         self,
@@ -760,11 +838,14 @@ class MantyxClient:
         path: str,
         body: Mapping[str, Any] | None,
         reason: str,
+        params: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         url = self._absolute_url(path)
         headers = self._auth_headers(reason)
         headers["Accept"] = "application/json"
         request_kwargs: dict[str, Any] = {"method": method, "url": url, "headers": headers}
+        if params:
+            request_kwargs["params"] = params
         if body is not None:
             request_kwargs["json"] = body
             headers["Content-Type"] = "application/json"
@@ -776,7 +857,9 @@ class MantyxClient:
         # and retry the original request exactly once. Static-credential
         # clients fall through to ``MantyxAuthError`` as before.
         if resp.status_code == 401 and self.token_source is not None and reason == "initial":
-            return self._request_with_retry(method, path, body, reason="unauthorized")
+            return self._request_with_retry(
+                method, path, body, reason="unauthorized", params=params
+            )
         if resp.status_code >= 400:
             self._raise_for_status(resp)
         text = resp.text
@@ -945,6 +1028,10 @@ class AgentSession:
 
     def info(self) -> SessionInfo:
         return self.client.get_session_info(self.id)
+
+    def events(self, *, full: bool = False, last_messages: int | None = None) -> list[RunEvent]:
+        """Replay this session's conversation as realtime-style event frames."""
+        return self.client.get_session_events(self.id, full=full, last_messages=last_messages)
 
     def end(self) -> None:
         try:
@@ -1151,6 +1238,62 @@ def _parse_model_catalog(body: Mapping[str, Any]) -> ModelCatalog:
     )
 
 
+def _int_or_zero(v: Any) -> int:
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return int(v)
+    return 0
+
+
+def _coerce_str_map(raw: Any) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            out[str(k)] = str(v)
+    return out
+
+
+def _parse_session_summary(raw: Mapping[str, Any]) -> SessionSummary:
+    return SessionSummary(
+        session_id=str(raw.get("sessionId") or ""),
+        creation_date=str(raw.get("creationDate") or ""),
+        last_interaction_date=str(raw.get("lastInteractionDate") or ""),
+        summary=str(raw.get("summary") or ""),
+        metadata=_coerce_str_map(raw.get("metadata")),
+        status=str(raw.get("status") or ""),
+    )
+
+
+def _parse_session_list(body: Mapping[str, Any]) -> SessionListResult:
+    rows_raw = body.get("sessions") if isinstance(body.get("sessions"), list) else []
+    sessions = [
+        _parse_session_summary(r) for r in cast(Iterable[Any], rows_raw) if isinstance(r, dict)
+    ]
+    return SessionListResult(
+        total=_int_or_zero(body.get("total")),
+        limit=_int_or_zero(body.get("limit")),
+        offset=_int_or_zero(body.get("offset")),
+        sessions=sessions,
+    )
+
+
+def _parse_session_events(body: Mapping[str, Any]) -> list[RunEvent]:
+    """Coerce the events endpoint's flattened frames (``{seq, type, ...}``)
+    into :class:`RunEvent` instances, mirroring the live SSE shape."""
+    events_raw = body.get("events") if isinstance(body.get("events"), list) else []
+    events: list[RunEvent] = []
+    for i, frame in enumerate(cast(Iterable[Any], events_raw)):
+        if not isinstance(frame, dict):
+            continue
+        seq_raw = frame.get("seq")
+        seq = int(seq_raw) if isinstance(seq_raw, (int, float)) else i + 1
+        type_ = str(frame.get("type") or "message")
+        data = {k: v for k, v in frame.items() if k not in ("seq", "type")}
+        events.append(RunEvent(seq=seq, type=type_, data=data))
+    return events
+
+
 def _parse_session_info(body: Mapping[str, Any]) -> SessionInfo:
     msgs_raw = body.get("messages") if isinstance(body.get("messages"), list) else []
     messages: list[dict[str, str]] = []
@@ -1309,5 +1452,7 @@ __all__ = [
     "RunResult",
     "RunTokenUsage",
     "SessionInfo",
+    "SessionListResult",
+    "SessionSummary",
     "parse_run_output",
 ]

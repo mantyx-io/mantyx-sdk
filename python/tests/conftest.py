@@ -89,7 +89,8 @@ class MockServer:
         self.last_tool_result_body: dict[str, Any] | None = None
         self.script_for_next_run: RunScript | None = None
         self.session_scripts: dict[str, RunScript] = {}
-        self.sessions: dict[str, list[dict[str, str]]] = {}
+        # Each session: {"messages": [...], "metadata": {...}, "createdAt": str}
+        self.sessions: dict[str, dict[str, Any]] = {}
         self.runs: dict[str, _RunState] = {}
         # Mock A2A peer state — used by define_local_a2a tests so the SDK
         # can fetch a card and POST `message/send` against the same mock.
@@ -250,16 +251,91 @@ class MockServer:
         if not rest and method == "POST":
             body = json.loads(request.content or b"{}")
             sid = _new_id("sess")
+            metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
             with self.lock:
                 self.last_session_create_body = body
-                self.sessions[sid] = []
+                self.sessions[sid] = {
+                    "messages": [],
+                    "metadata": metadata,
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                }
             return httpx.Response(
-                201, json={"sessionId": sid, "name": "ephemeral", "createdAt": "now"}
+                201,
+                json={
+                    "sessionId": sid,
+                    "name": "ephemeral",
+                    "metadata": metadata,
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                },
+            )
+        # GET /agent-sessions — list, with optional repeated ?metadata=key:value
+        if not rest and method == "GET":
+            q = request.url.params
+            raw_filters = q.get_list("metadata")
+            filters: list[tuple[str, str]] = []
+            for raw in raw_filters:
+                idx = raw.find(":")
+                if idx <= 0:
+                    return httpx.Response(400, json={"error": "Invalid metadata filter"})
+                filters.append((raw[:idx], raw[idx + 1 :]))
+            with self.lock:
+                items = list(self.sessions.items())
+            matched = [
+                (sid, s) for sid, s in items if all(s["metadata"].get(k) == v for k, v in filters)
+            ]
+            sessions = [
+                {
+                    "sessionId": sid,
+                    "creationDate": s["createdAt"],
+                    "lastInteractionDate": s["createdAt"],
+                    "summary": next(
+                        (m["content"] for m in s["messages"] if m["role"] == "user"), ""
+                    ),
+                    "metadata": s["metadata"],
+                    "status": "active",
+                }
+                for sid, s in matched
+            ]
+            return httpx.Response(
+                200,
+                json={"total": len(sessions), "limit": 50, "offset": 0, "sessions": sessions},
+            )
+        # GET /agent-sessions/:id/events — replay as realtime-style frames
+        if len(rest) == 2 and rest[1] == "events" and method == "GET":
+            with self.lock:
+                session = self.sessions.get(rest[0])
+            if session is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            all_messages = session["messages"]
+            q = request.url.params
+            full = q.get("full") in ("1", "true")
+            selected = all_messages
+            if not full and q.get("lastMessages"):
+                try:
+                    n = int(q.get("lastMessages") or "0")
+                    if n > 0:
+                        selected = all_messages[-n:]
+                except ValueError:
+                    pass
+            start_index = len(all_messages) - len(selected)
+            events = []
+            for i, m in enumerate(selected):
+                seq = start_index + i + 1
+                if m["role"] == "assistant":
+                    events.append({"seq": seq, "type": "assistant_message", "text": m["content"]})
+                elif m["role"] == "user":
+                    events.append({"seq": seq, "type": "user_message", "text": m["content"]})
+                else:
+                    events.append(
+                        {"seq": seq, "type": "message", "role": m["role"], "text": m["content"]}
+                    )
+            return httpx.Response(
+                200, json={"sessionId": rest[0], "total": len(all_messages), "events": events}
             )
         if len(rest) == 1 and method == "GET":
             with self.lock:
-                msgs = self.sessions.get(rest[0])
-            if msgs is None:
+                session = self.sessions.get(rest[0])
+            if session is None:
                 return httpx.Response(404, json={"error": "not_found"})
             return httpx.Response(
                 200,
@@ -267,12 +343,12 @@ class MockServer:
                     "id": rest[0],
                     "name": "ephemeral",
                     "status": "active",
-                    "createdAt": "",
+                    "createdAt": session["createdAt"],
                     "lastUsedAt": "",
                     "endedAt": None,
                     "agentSpec": {},
-                    "messages": msgs,
-                    "metadata": {},
+                    "messages": session["messages"],
+                    "metadata": session["metadata"],
                 },
             )
         if len(rest) == 1 and method == "DELETE":
@@ -301,7 +377,7 @@ class MockServer:
                     ),
                 )
                 final_text = _last_result_text(script)
-                self.sessions[session_id].extend(
+                self.sessions[session_id]["messages"].extend(
                     [
                         {"role": "user", "content": str(body.get("prompt", ""))},
                         {"role": "assistant", "content": final_text},

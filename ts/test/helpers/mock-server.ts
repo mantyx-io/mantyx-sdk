@@ -6,8 +6,8 @@
  * Each test instantiates a fresh `MockServer`, configures the run/session
  * behaviour, then points a `MantyxClient` at `http://localhost:<port>`.
  */
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 export interface MockToolCallScript {
   toolUseId?: string;
@@ -88,7 +88,15 @@ interface RunState {
 export class MockServer {
   private server: Server;
   private runs = new Map<string, RunState>();
-  private sessions = new Map<string, { id: string; messages: Array<{ role: string; content: string }> }>();
+  private sessions = new Map<
+    string,
+    {
+      id: string;
+      messages: Array<{ role: string; content: string }>;
+      metadata: Record<string, string>;
+      createdAt: string;
+    }
+  >();
   /** When set, `POST /agent-runs` returns this script for the next run. */
   scriptForNextRun: MockRunScript | null = null;
   /** When set, `POST /agent-sessions/:id/messages` returns this script for the next run. */
@@ -316,7 +324,7 @@ export class MockServer {
       return this.handleAgentRuns(req, res, rest.slice(1), url);
     }
     if (rest[0] === "agent-sessions") {
-      return this.handleAgentSessions(req, res, rest.slice(1));
+      return this.handleAgentSessions(req, res, rest.slice(1), url);
     }
     res.statusCode = 404;
     res.end(JSON.stringify({ error: "Not found" }));
@@ -436,16 +444,102 @@ export class MockServer {
     req: IncomingMessage,
     res: ServerResponse,
     rest: string[],
+    url: URL,
   ): Promise<void> {
     if (rest.length === 0 && req.method === "POST") {
       const body = (await readJson(req)) as Record<string, unknown>;
       this.lastSessionCreateBody = body;
       const id = `sess_${randomUUID()}`;
-      this.sessions.set(id, { id, messages: [] });
+      const metadata =
+        body.metadata && typeof body.metadata === "object"
+          ? (body.metadata as Record<string, string>)
+          : {};
+      this.sessions.set(id, {
+        id,
+        messages: [],
+        metadata,
+        createdAt: new Date().toISOString(),
+      });
       res.statusCode = 201;
       res.setHeader("Content-Type", "application/json");
       res.end(
-        JSON.stringify({ sessionId: id, name: "ephemeral", createdAt: new Date().toISOString() }),
+        JSON.stringify({
+          sessionId: id,
+          name: "ephemeral",
+          metadata,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      return;
+    }
+    // GET /agent-sessions — list with optional repeated ?metadata=key:value.
+    if (rest.length === 0 && req.method === "GET") {
+      const filters = url.searchParams
+        .getAll("metadata")
+        .map((raw) => {
+          const sep = raw.indexOf(":");
+          return sep > 0
+            ? { key: raw.slice(0, sep), value: raw.slice(sep + 1) }
+            : null;
+        });
+      if (filters.some((f) => f === null)) {
+        res.statusCode = 400;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "Invalid metadata filter" }));
+        return;
+      }
+      const matched = [...this.sessions.values()].filter((s) =>
+        filters.every((f) => f && s.metadata[f.key] === f.value),
+      );
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          total: matched.length,
+          limit: 50,
+          offset: 0,
+          sessions: matched.map((s) => ({
+            sessionId: s.id,
+            creationDate: s.createdAt,
+            lastInteractionDate: s.createdAt,
+            summary: s.messages.find((m) => m.role === "user")?.content ?? "",
+            metadata: s.metadata,
+            status: "active",
+          })),
+        }),
+      );
+      return;
+    }
+    // GET /agent-sessions/:id/events — reconstruct realtime-style frames.
+    if (rest.length === 2 && rest[1] === "events" && req.method === "GET") {
+      const session = this.sessions.get(rest[0]!);
+      if (!session) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "Session not found" }));
+        return;
+      }
+      const all = session.messages;
+      const full =
+        url.searchParams.get("full") === "1" ||
+        url.searchParams.get("full") === "true";
+      let selected = all;
+      const lastMessages = Number(url.searchParams.get("lastMessages") ?? "");
+      if (!full && Number.isFinite(lastMessages) && lastMessages > 0) {
+        selected = all.slice(-lastMessages);
+      }
+      const startIndex = all.length - selected.length;
+      const events = selected.map((m, i) => {
+        const seq = startIndex + i + 1;
+        if (m.role === "assistant") {
+          return { seq, type: "assistant_message", text: m.content };
+        }
+        if (m.role === "user") {
+          return { seq, type: "user_message", text: m.content };
+        }
+        return { seq, type: "message", role: m.role, text: m.content };
+      });
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({ sessionId: session.id, total: all.length, events }),
       );
       return;
     }
@@ -462,12 +556,12 @@ export class MockServer {
           id: session.id,
           name: "ephemeral",
           status: "active",
-          createdAt: new Date().toISOString(),
+          createdAt: session.createdAt,
           lastUsedAt: new Date().toISOString(),
           endedAt: null,
           agentSpec: { systemPrompt: "" },
           messages: session.messages,
-          metadata: {},
+          metadata: session.metadata,
         }),
       );
       return;

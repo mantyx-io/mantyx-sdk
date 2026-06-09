@@ -249,3 +249,24 @@ async def test_async_run_agent_surfaces_cost_attribution(
     assert result.model is not None
     assert result.model.provider == "openai"
     assert result.model.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_async_list_sessions_and_events(
+    async_mantyx_client: AsyncMantyxClient, mock_server: MockServer
+) -> None:
+    await async_mantyx_client.create_session(system_prompt="x", metadata={"customer": "acme"})
+    session = await async_mantyx_client.create_session(
+        system_prompt="x", metadata={"customer": "globex"}
+    )
+    await session.send("one")
+
+    filtered = await async_mantyx_client.list_sessions(metadata={"customer": "globex"})
+    assert filtered.total == 1
+    assert filtered.sessions[0].metadata == {"customer": "globex"}
+
+    events = await session.events()
+    assert [(e.seq, e.type, e.text) for e in events] == [
+        (1, "user_message", "one"),
+        (2, "assistant_message", "echo:one"),
+    ]

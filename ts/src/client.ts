@@ -655,10 +655,22 @@ export interface CancelledEvent extends RunEventBase {
   reason?: string;
 }
 
+/**
+ * Replay/restore-only frame returned by {@link MantyxClient.getSessionEvents}
+ * (and the `GET /agent-sessions/:id/events` endpoint). The live SSE stream
+ * never emits this — the client already knows the prompt it sent — but
+ * conversation restoration needs it to rebuild the user side of the thread.
+ */
+export interface UserMessageEvent extends RunEventBase {
+  type: "user_message";
+  text: string;
+}
+
 export type RunEvent =
   | AssistantDeltaEvent
   | ThinkingDeltaEvent
   | AssistantMessageEvent
+  | UserMessageEvent
   | ServerToolResultEvent
   | LocalToolCallEvent
   | LocalToolResultInEvent
@@ -681,6 +693,44 @@ export interface SessionInfo {
   messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
   /** Metadata that was attached to the session at create time, returned for observability. */
   metadata: Record<string, string>;
+}
+
+/** One row from {@link MantyxClient.listSessions}. */
+export interface SessionSummary {
+  sessionId: string;
+  /** ISO 8601 creation timestamp. */
+  creationDate: string;
+  /** ISO 8601 timestamp of the most recent message run. */
+  lastInteractionDate: string;
+  /** Best-effort label derived from the first user prompt (sessions have no title). */
+  summary: string;
+  metadata: Record<string, string>;
+  status: "active" | "ended";
+}
+
+/** Paginated result of {@link MantyxClient.listSessions}. */
+export interface SessionListResult {
+  total: number;
+  limit: number;
+  offset: number;
+  sessions: SessionSummary[];
+}
+
+/** Build a `?a=1&b=2` query string, repeating array values and dropping `undefined`. */
+function buildQueryString(
+  query?: Record<string, string | string[] | number | undefined>,
+): string {
+  if (!query) return "";
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined) continue;
+    const values = Array.isArray(value) ? value : [value];
+    for (const v of values) {
+      if (v === undefined) continue;
+      parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(v))}`);
+    }
+  }
+  return parts.length > 0 ? `?${parts.join("&")}` : "";
 }
 
 export class MantyxClient {
@@ -849,6 +899,63 @@ export class MantyxClient {
       method: "GET",
       path: `/agent-sessions/${encodeURIComponent(sessionId)}`,
     });
+  }
+
+  /**
+   * List the workspace's sessions, most-recently-used first. Filter by the
+   * metadata you attached at create time so you can find earlier sessions by
+   * your own identifiers (customer id, environment, …). Multiple metadata
+   * entries are AND-combined server-side.
+   */
+  async listSessions(
+    opts: {
+      metadata?: Record<string, string>;
+      status?: "active" | "ended";
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): Promise<SessionListResult> {
+    const query: Record<string, string | string[] | number | undefined> = {};
+    if (opts.metadata) {
+      const pairs = Object.entries(opts.metadata).map(([k, v]) => `${k}:${v}`);
+      if (pairs.length > 0) query.metadata = pairs;
+    }
+    if (opts.status) query.status = opts.status;
+    if (typeof opts.limit === "number") query.limit = opts.limit;
+    if (typeof opts.offset === "number") query.offset = opts.offset;
+    return this.request<SessionListResult>({
+      method: "GET",
+      path: "/agent-sessions",
+      query,
+    });
+  }
+
+  /**
+   * Fetch a session's conversation as realtime-style event frames so a UI can
+   * restore the thread through the same handler it uses for the live stream.
+   * Returns `user_message` / `assistant_message` frames (see the wire protocol
+   * §6.2). Pass `lastMessages` to fetch only the most recent turns, or
+   * `full: true` for the entire history (the default).
+   */
+  async getSessionEvents(
+    sessionId: string,
+    opts: { full?: boolean; lastMessages?: number } = {},
+  ): Promise<RunEvent[]> {
+    const query: Record<string, string | string[] | number | undefined> = {};
+    if (opts.full) query.full = "1";
+    else if (typeof opts.lastMessages === "number") {
+      query.lastMessages = opts.lastMessages;
+    }
+    const res = await this.request<{
+      sessionId: string;
+      total: number;
+      events: RunEvent[];
+    }>({
+      method: "GET",
+      path: `/agent-sessions/${encodeURIComponent(sessionId)}/events`,
+      query,
+    });
+    return res.events ?? [];
   }
 
   // ----------------------------------------------------------- Internals
@@ -1126,16 +1233,27 @@ export class MantyxClient {
     method: string;
     path: string;
     body?: unknown;
+    /**
+     * Optional query params. Array values are repeated (`?k=a&k=b`); `undefined`
+     * entries are dropped. Used by the list endpoints (e.g. repeated `metadata`).
+     */
+    query?: Record<string, string | string[] | number | undefined>;
     timeoutMs?: number;
   }): Promise<T> {
     return this.requestWithRetry<T>(args, "initial");
   }
 
   private async requestWithRetry<T>(
-    args: { method: string; path: string; body?: unknown; timeoutMs?: number },
+    args: {
+      method: string;
+      path: string;
+      body?: unknown;
+      query?: Record<string, string | string[] | number | undefined>;
+      timeoutMs?: number;
+    },
     reason: "initial" | "unauthorized",
   ): Promise<T> {
-    const url = this.absoluteUrl(args.path);
+    const url = this.absoluteUrl(args.path) + buildQueryString(args.query);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), args.timeoutMs ?? this.options.timeoutMs);
     try {
