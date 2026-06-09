@@ -164,19 +164,59 @@ describe("MantyxAgentExecutor — stateless execute()", () => {
     expect(server.lastRunCreateBody?.prompt).toBe("hi");
     expect(server.lastSessionCreateBody).toBeNull();
   });
+
+  it("forwards reasoningLevel and outputSchema on stateless runs", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: '{"ok":true}' }],
+    };
+    const outputSchema = {
+      type: "object",
+      properties: { ok: { type: "boolean" } },
+      required: ["ok"],
+    } as const;
+
+    const exec = new MantyxAgentExecutor({
+      client,
+      agent: {
+        systemPrompt: "you are helpful",
+        reasoningLevel: "high",
+        outputSchema: { name: "ack", schema: outputSchema },
+      },
+      conversation: "stateless",
+    });
+    await exec.execute(ctx("task_b", "ctx_b", "hi"), new CapturingEventBus());
+
+    expect(server.lastRunCreateBody?.reasoningLevel).toBe("high");
+    expect(server.lastRunCreateBody?.outputSchema).toEqual({
+      name: "ack",
+      schema: outputSchema,
+    });
+  });
 });
 
 describe("MantyxAgentExecutor — auto session mapping", () => {
   it("creates one session per contextId and reuses it on subsequent calls", async () => {
     server.scriptForNextSessionRun = { events: [], finalText: "first" };
 
+    const outputSchema = {
+      type: "object",
+      properties: { reply: { type: "string" } },
+      required: ["reply"],
+    } as const;
+
     const exec = new MantyxAgentExecutor({
       client,
-      agent: { agentId: "agent_xyz" },
+      agent: {
+        agentId: "agent_xyz",
+        reasoningLevel: "medium",
+        outputSchema: { schema: outputSchema },
+      },
     });
 
     await exec.execute(ctx("task_1", "ctx_one", "hello"), new CapturingEventBus());
     expect(server.lastSessionCreateBody?.agentId).toBe("agent_xyz");
+    expect(server.lastSessionCreateBody?.reasoningLevel).toBe("medium");
+    expect(server.lastSessionCreateBody?.outputSchema).toEqual({ schema: outputSchema });
     const meta = server.lastSessionCreateBody?.metadata as
       | Record<string, string>
       | undefined;

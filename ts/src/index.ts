@@ -48,6 +48,7 @@ export type {
   RunSpec,
   SessionSpec,
   OutputSchema,
+  OutputSchemaValue,
   LoopDetection,
   ToolBudget,
   ToolBudgets,

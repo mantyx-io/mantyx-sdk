@@ -422,6 +422,28 @@ describe("outputSchema forwarding + parseRunOutput", () => {
     ).rejects.toMatchObject({ message: expect.stringMatching(/32 KB/) });
   });
 
+  it("converts a Zod outputSchema to JSON Schema before submission", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: '{"city":"SF","temperature_c":17}' }],
+    };
+    const Schema = z.object({
+      city: z.string(),
+      temperature_c: z.number(),
+    });
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      outputSchema: { name: "weather_report", schema: Schema },
+    });
+    const wire = server.lastRunCreateBody?.outputSchema as Record<string, unknown> | undefined;
+    expect(wire?.name).toBe("weather_report");
+    const schema = wire?.schema as Record<string, unknown> | undefined;
+    expect(schema?.type).toBe("object");
+    const props = schema?.properties as Record<string, unknown> | undefined;
+    expect(props?.city).toEqual({ type: "string" });
+    expect(props?.temperature_c).toEqual({ type: "number" });
+  });
+
   it("forwards outputSchema on session create and per-message override", async () => {
     server.scriptForNextSessionRun = {
       events: [{ type: "result", subtype: "success", text: "ok" }],

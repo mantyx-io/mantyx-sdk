@@ -56,6 +56,7 @@ import type {
 import {
   AgentSession,
   type MantyxClient,
+  type OutputSchema,
   type RunResult,
   type SessionSpec,
   type RunSpec,
@@ -83,6 +84,12 @@ export interface MantyxAgentSpec {
   modelId?: string;
   tools?: ToolRef[];
   reasoningLevel?: ReasoningLevel;
+  /**
+   * Constrains the model's final assistant text to a JSON document matching
+   * a JSON Schema (or Zod schema, auto-converted). See
+   * {@link OutputSchema} / `docs/wire-protocol.md` §7.
+   */
+  outputSchema?: OutputSchema;
   metadata?: Record<string, string>;
   budgets?: { maxToolTurns?: number };
   /**
@@ -481,6 +488,7 @@ function specForRun(spec: MantyxAgentSpec): RunSpec {
   if (spec.modelId) out.modelId = spec.modelId;
   if (spec.tools) out.tools = spec.tools;
   if (spec.reasoningLevel !== undefined) out.reasoningLevel = spec.reasoningLevel;
+  if (spec.outputSchema !== undefined) out.outputSchema = spec.outputSchema;
   if (spec.metadata) out.metadata = spec.metadata;
   if (spec.budgets) out.budgets = spec.budgets;
   if (spec.name) out.name = spec.name;
@@ -494,6 +502,7 @@ function specForSession(spec: MantyxAgentSpec, contextId: string): SessionSpec {
   if (spec.modelId) out.modelId = spec.modelId;
   if (spec.tools) out.tools = spec.tools;
   if (spec.reasoningLevel !== undefined) out.reasoningLevel = spec.reasoningLevel;
+  if (spec.outputSchema !== undefined) out.outputSchema = spec.outputSchema;
   // Tag the session with the originating A2A contextId so it's filterable
   // in the MANTYX dashboard.
   const meta: Record<string, string> = { ...(spec.metadata ?? {}) };

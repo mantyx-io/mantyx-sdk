@@ -18,6 +18,7 @@ import type {
   LocalA2ATool,
   LocalMcpServer,
   LocalTool,
+  LocalToolSchemaInput,
   ReasoningLevel,
   ToolRef,
 } from "./tools.js";
@@ -241,6 +242,14 @@ export interface RunSpec extends AgentSpecBase {
 export type SessionSpec = AgentSpecBase;
 
 /**
+ * Either a Zod schema (auto-converted to JSON Schema by the SDK) or a
+ * pre-shaped JSON Schema object. Mirrors {@link LocalToolSchemaInput} and
+ * Go's `OutputSchema.Schema any` (struct reflection) — pass your
+ * source-of-truth schema and the SDK serialises it for the wire.
+ */
+export type OutputSchemaValue = LocalToolSchemaInput;
+
+/**
  * Constrains the final assistant text to a JSON document matching a
  * JSON Schema. See {@link AgentSpecBase.outputSchema} for the full
  * semantics.
@@ -248,8 +257,8 @@ export type SessionSpec = AgentSpecBase;
 export interface OutputSchema {
   /** Optional. Defaults to `"output"`. Must match `/^[a-zA-Z0-9_-]{1,64}$/`. */
   name?: string;
-  /** Required. JSON Schema describing the final assistant text. Root must be a JSON object. */
-  schema: Record<string, unknown>;
+  /** Required. Zod schema or JSON Schema describing the final assistant text. Root must be a JSON object. */
+  schema: OutputSchemaValue;
 }
 
 /**
@@ -1675,10 +1684,12 @@ function normalizeOutputSchema(value: OutputSchema): Record<string, unknown> {
     }
     out.name = value.name;
   }
-  const schema = value.schema;
+  const schema = toToolParametersWire(
+    value.schema as NonNullable<Parameters<typeof toToolParametersWire>[0]>,
+  );
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
     throw new MantyxError(
-      `outputSchema.schema must be a non-null JSON object (the JSON Schema root)`,
+      `outputSchema.schema must be a Zod schema or a non-null JSON object (the JSON Schema root)`,
     );
   }
   out.schema = schema;
