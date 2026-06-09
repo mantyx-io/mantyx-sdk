@@ -3,6 +3,16 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Add session metadata querying and history retrieval
+
+### Documentation
+
+- Sync wire-protocol.md from mantyx-platform source of truth
+
 ## [go/v0.12.0] — 2026-06-04
 
 ### Added
@@ -92,6 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [go/v0.1.0] — 2026-05-02
 
+[unreleased]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.12.0..HEAD
 [go/v0.12.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.11.0..go/v0.12.0
 [go/v0.11.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.10.1..go/v0.11.0
 [go/v0.10.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.9.1..go/v0.10.0
