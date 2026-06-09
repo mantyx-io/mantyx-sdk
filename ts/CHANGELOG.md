@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add Zod outputSchema support and wire it through A2A server
 - Add session metadata querying and history retrieval
 
 ### Documentation
