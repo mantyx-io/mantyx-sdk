@@ -20,7 +20,7 @@ looks like for `mcp_local`, you're in the right place.
 > **scopes** (`runs:read`, `runs:write`, `sessions:read`, `sessions:write`,
 > `models:read`, `mantyx.identity:read`); see §2 of
 > `agent-runs-protocol.md` for the per-endpoint scope table and
-> [`docs/oauth.md`](./oauth.md) for the registration / Authorization Code
+> `docs/oauth.md` for the registration / Authorization Code
 >
 > - PKCE flow.
 
@@ -135,6 +135,7 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
   "supervisor": {
     // optional; see §8.4 — platform LLM judge on ephemeral runs
     "interval": 5,
+    "modelId": "platform:demo",
   },
   "metadata": { "customer": "acme" }, // optional, free-form k/v
 }
@@ -667,6 +668,7 @@ See §8 for the wire-spec field that defines budgets.
 | `reason`   | string  | One- or two-sentence explanation from the judge.                                                                                                                                                                              |
 | `redirect` | string  | Present when `action === "redirect"`: the steering message injected into the conversation (same text the agent sees as a user message). Omitted for `on_track` / `finalize`.                                                 |
 | `llmCalls` | integer | Number of LLM calls (`completeTurn` invocations) completed when this review fired. Matches the pipeline's `modelInvocations` counter at the check boundary.                                                                   |
+| `model`      | object  | Optional. Resolved judge model (`{ id, provider, vendorModelId }`) — same shape as terminal `result.model` (§4.7.1). Present on platform-hosted runs for cost attribution and debug UIs.                                      |
 
 Observability for the run-supervisor guard (see §8.4). The event fires on
 **every** check, not only when the judge intervenes — `on_track` reviews are
@@ -1101,7 +1103,8 @@ when the field is omitted.
 
 ```jsonc
 "supervisor": {
-  "interval": 5     // optional — LLM calls between reviews; default 5
+  "interval": 5,              // optional — LLM calls between reviews; default 5
+  "modelId": "platform:demo"  // optional — judge model; see resolution below
 }
 
 // or:
@@ -1111,7 +1114,14 @@ when the field is omitted.
 | Field      | Type            | Notes                                                                                                                              |
 | ---------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `interval` | integer ≥ 1     | Optional. Default **5** when omitted. Capped at **100** server-side.                                                                |
+| `modelId`  | string          | Optional. Same selector grammar as top-level `modelId` (§2). When omitted, the platform resolves the judge model from the workspace default supervisor model, then the workspace default model. |
 | (literal `false`) | `false`  | Disables the run supervisor for this run. Loop detection and tool budgets still apply.                                             |
+
+**Model resolution.** When the supervisor is enabled, the judge model is chosen in order:
+
+1. `supervisor.modelId` on this run (if set)
+2. Workspace `defaultSupervisorModelId` (Settings → Workspace → General)
+3. Workspace default model (same as omitting top-level `modelId`)
 
 **Defaults.** When `supervisor` is **omitted**, MANTYX enables the platform
 LLM judge on ephemeral runs (web chat enables it separately via the chat
