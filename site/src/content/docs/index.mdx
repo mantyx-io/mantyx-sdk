@@ -11,6 +11,7 @@ pagefind: false
 import Hero from "../../components/Hero.astro";
 import InstallCards from "../../components/InstallCards.astro";
 import QuickstartTabs from "../../components/QuickstartTabs.astro";
+import PlanOnlyTabs from "../../components/PlanOnlyTabs.astro";
 import CTA from "../../components/CTA.astro";
 
 export const baseUrl = import.meta.env.BASE_URL;
@@ -18,4 +19,5 @@ export const baseUrl = import.meta.env.BASE_URL;
 <Hero baseUrl={baseUrl} />
 <InstallCards baseUrl={baseUrl} />
 <QuickstartTabs />
+<PlanOnlyTabs />
 <CTA baseUrl={baseUrl} />

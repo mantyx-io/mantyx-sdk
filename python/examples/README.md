@@ -12,6 +12,7 @@ Each subdirectory is a **self-contained project** with its own `pyproject.toml` 
 | `mcp-tools/`          | Combine `mantyx_mcp` (remote MCP server) and `define_local_mcp` (in-process).|
 | `streaming/`          | Use `client.stream_agent()` to print assistant deltas to stdout.             |
 | `list-models/`        | Call `client.list_models()`, pretty-print, then run an agent on the first.   |
+| `plan-only/`          | Plan-only run via `run_plan` — structured checklist, no agent loop.          |
 
 All examples read configuration from environment variables:
 

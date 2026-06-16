@@ -39,6 +39,7 @@ export {
   AgentSession,
   DEFAULT_BASE_URL,
   parseRunOutput,
+  planOnly,
 } from "./client.js";
 export type {
   MantyxClientOptions,
@@ -54,6 +55,11 @@ export type {
   ToolBudgets,
   Supervisor,
   SupervisorAction,
+  PlanOptions,
+  PlanSpec,
+  TaskPlan,
+  TaskPlanStep,
+  TaskPlanStepStatus,
   RunResult,
   RunTokenUsage,
   RunModelInfo,
@@ -69,6 +75,7 @@ export type {
   LoopDetectedEvent,
   ToolBudgetExceededEvent,
   SupervisorEvent,
+  TaskPlanEvent,
   ResultEvent,
   ErrorEvent,
   CancelledEvent,

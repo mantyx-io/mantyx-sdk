@@ -78,8 +78,12 @@ from .tools import (
     MantyxPluginToolRef,
     MantyxToolRef,
     OutputSchema,
+    PlanOptions,
+    PlanSpec,
     ReasoningLevel,
     Supervisor,
+    TaskPlan,
+    TaskPlanStep,
     ToolBudget,
     ToolBudgets,
     ToolRef,
@@ -93,6 +97,7 @@ from .tools import (
     mantyx_mcp,
     mantyx_plugin_tool,
     mantyx_tool,
+    plan_only,
 )
 
 __all__ = [
@@ -128,6 +133,8 @@ __all__ = [
     "ModelInfo",
     "OAuthToken",
     "OutputSchema",
+    "PlanOptions",
+    "PlanSpec",
     "PricingInfo",
     "ReasoningLevel",
     "RunEvent",
@@ -138,6 +145,8 @@ __all__ = [
     "SessionListResult",
     "SessionSummary",
     "Supervisor",
+    "TaskPlan",
+    "TaskPlanStep",
     "TokenRequestReason",
     "TokenSource",
     "ToolBudget",
@@ -155,4 +164,5 @@ __all__ = [
     "mantyx_plugin_tool",
     "mantyx_tool",
     "parse_run_output",
+    "plan_only",
 ]

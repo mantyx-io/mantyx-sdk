@@ -23,7 +23,7 @@ looks like for `mcp_local`, you're in the right place.
 > **scopes** (`runs:read`, `runs:write`, `sessions:read`, `sessions:write`,
 > `models:read`, `mantyx.identity:read`); see §2 of
 > `agent-runs-protocol.md` for the per-endpoint scope table and
-> `docs/oauth.md` for the registration / Authorization Code
+> [`docs/oauth.md`](./oauth.md) for the registration / Authorization Code
 >
 > - PKCE flow.
 
@@ -140,6 +140,7 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
     "interval": 5,
     "modelId": "platform:demo",
   },
+  "plan": true, // optional; see §8.5 — in-product task plan (opt-in)
   "metadata": { "customer": "acme" }, // optional, free-form k/v
 }
 ```
@@ -148,9 +149,9 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
 
 Same body shape, posted to `POST /agent-sessions/:id/messages`. The session
 keeps the conversation history; per-message `tools`, `reasoningLevel`,
-`outputSchema`, `loopDetection`, `toolBudgets`, and `supervisor` _replace_
-the session's defaults for that single run only — the next run falls back to
-whatever the session was created with.
+`outputSchema`, `loopDetection`, `toolBudgets`, `supervisor`, and `plan`
+_replace_ the session's defaults for that single run only — the next run
+falls back to whatever the session was created with.
 
 ---
 
@@ -400,6 +401,7 @@ The vocabulary (`EphemeralEventType` in `bus.ts`):
 | `loop_detected`        | M → SDK   | 0–2× per run (soft nudge + optional hard cutoff) | Observability for the loop-detection guard (see §8). The server already substituted the synthetic skip + steering nudge — SDK clients render a status note (`looping — nudged` / `looping — gave up`) and otherwise leave the run alone.    |
 | `tool_budget_exceeded` | M → SDK   | Per intercepted tool call                        | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner. |
 | `supervisor`           | M → SDK   | 0–N× per run (every `interval` LLM calls)        | Run-supervisor check (see §4.7 / §8.4). Fired on **every** review — including `on_track` — so SDK clients can render supervisor activity. When the judge steers the run (`redirect` / `finalize`), the pipeline has already injected the steering message or forced a tools-disabled finalize turn. |
+| `task_plan`            | M → SDK   | 0–N× per run (iff `plan` set)                    | Observability for the in-product task plan (see §4.9 / §8.5). Emitted once after classify / caller-supplied plan, then again whenever the tracker advances step statuses. **Non-terminal.** For `planOnly` runs the final plan also rides on the terminal `result` under `data.plan`.            |
 | `assistant_message`    | M → SDK   | 1× per turn                                      | Final assistant message for the turn (concatenated, persistence-ready).                                                                                                                                                                     |
 | `result`               | M → SDK   | 1× terminal                                      | Successful completion. Carries the final assistant text and run summary.                                                                                                                                                                    |
 | `error`                | M → SDK   | 1× terminal                                      | Failure. Carries `error` (message), `code` / `errorClass` (category), `finishReason`, and an optional `partialText` salvage payload. See §4.7.                                                                                              |
@@ -831,6 +833,37 @@ returns just `string` for backward compatibility — see
 directly on the existing `RunResult` struct/dataclass (additive,
 non-breaking since those return types were already objects).
 
+### 4.9 `task_plan`
+
+```jsonc
+// First emission — right after the pre-flight classifier (or a caller-supplied
+// plan). The first step is marked in_progress for executed runs.
+{ "seq": 4, "type": "task_plan",
+  "data": { "brief": "Compare Q3 vs Q4 revenue and summarize drivers.",
+            "steps": [ { "title": "Pull Q3 and Q4 revenue", "status": "in_progress" },
+                       { "title": "Compute deltas by segment", "status": "pending" },
+                       { "title": "Summarize the top drivers", "status": "pending" } ] } }
+
+// Tracker advance — emitted whenever step statuses change during the run.
+{ "seq": 18, "type": "task_plan",
+  "data": { "brief": "Compare Q3 vs Q4 revenue and summarize drivers.",
+            "steps": [ { "title": "Pull Q3 and Q4 revenue", "status": "done" },
+                       { "title": "Compute deltas by segment", "status": "in_progress" },
+                       { "title": "Summarize the top drivers", "status": "pending" } ] } }
+```
+
+| Field   | Type   | Notes                                                                                                   |
+| ------- | ------ | ----------------------------------------------------------------------------------------------------- |
+| `brief` | string | Optional one-line summary of the overall objective.                                                   |
+| `steps` | array  | Ordered checklist. Each `{ title, status }` where `status` is `"pending" \| "in_progress" \| "done"`. |
+
+Observability for the in-product **task plan** (see §8.5). Emitted only when
+the run carries a `plan` spec field. **Non-terminal** — SDK clients render a
+live checklist that advances as the run progresses; the terminal `result`
+stays text-only for executed runs. For `planOnly` runs the run terminates
+right after the plan and the final checklist also rides on the terminal
+`result` under `data.plan` (§8.5).
+
 ---
 
 ## 5. SDK → MANTYX: tool-result POST
@@ -1080,6 +1113,8 @@ banners without re-parsing tool-result bodies:
 - `tool_budget_exceeded` — fired each time a call is intercepted. See §4.6.
 - `supervisor` — fired on every run-supervisor review (`on_track`,
   `redirect`, or `finalize`). See §4.7.
+- `task_plan` — fired when a run carries a `plan` spec field: once after
+  classify / caller-supplied plan, then on each tracker advance. See §4.9 / §8.5.
 
 Both guard events (`loop_detected`, `tool_budget_exceeded`) are
 observability-only: the server has already substituted the synthetic
@@ -1139,14 +1174,69 @@ field above controls the **platform-hosted** judge on ephemeral API runs only.
 Each review emits a SSE `supervisor` event (§4.7). Supervisor LLM usage is
 recorded under the `supervisor` usage surface for cost attribution.
 
-### 8.5 Session inheritance
+### 8.5 `plan` (task plan / plan-only)
 
-Like `reasoningLevel` and `outputSchema`, the run-guard fields support
-session-default + per-message override:
+The optional `plan` field turns on the in-product **task plan** — the same
+engine that drives the live checklist in MANTYX chat / Hive Mind. It is
+**opt-in** on ephemeral runs (unlike the supervisor, which is default-on),
+because every planned run pays for at least one extra classifier LLM call.
 
-- `POST /agent-sessions { loopDetection, toolBudgets, supervisor }` — sets the
-  session-default applied to every subsequent message run.
-- `POST /agent-sessions/:id/messages { loopDetection, toolBudgets, supervisor }` —
+```jsonc
+"plan": true        // auto: pre-flight classify, emit task_plan, track during the run
+
+"plan": {           // caller-provided checklist — skips the classifier
+  "brief": "Migrate the billing tables and backfill",   // optional
+  "steps": ["Snapshot current schema", "Apply migration", "Backfill rows", "Verify counts"]
+}
+
+"plan": { "planOnly": true }                       // produce the plan, do NOT run the agent
+"plan": { "planOnly": true, "steps": ["…", "…"] }  // plan-only with a caller-provided checklist
+
+"plan": false       // (or omit) no planning — a plain run
+```
+
+| Form                              | Behavior                                                                                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| omitted / `false`                 | No planning. Default.                                                                                                                              |
+| `true`                            | Pre-flight classifier decides whether a multi-step plan is warranted. If so, a `task_plan` event is emitted, the checklist is injected into the user turn, and step statuses are tracked (advancing on tool activity and on each supervisor review) until the run ends. If the classifier declines, the run proceeds normally with no plan. |
+| `{ steps, brief? }`               | Caller-provided checklist used verbatim — **skips** the classifier (and its `MIN_STEPS` gate). Injected + tracked like the auto case.               |
+| `{ planOnly: true, steps? }`      | Produce the plan (classifier when `steps` omitted, otherwise the provided checklist) and **terminate without executing the agent loop**.            |
+
+| Field      | Type     | Notes                                                                                                                  |
+| ---------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| `planOnly` | boolean  | Optional. When `true`, the run stops after producing the plan; the terminal `result` carries it under `data.plan`.    |
+| `brief`    | string   | Optional one-line objective for a caller-provided plan. Clamped server-side.                                         |
+| `steps`    | string[] | Optional caller-provided checklist titles. Empty/omitted ⇒ auto-classify. Count and per-step length clamped server-side. |
+| (literal `true`)  | `true`  | Auto pre-flight classifier + live tracking.                                                                  |
+
+**Plan-only terminal shape.** A `planOnly` run terminates with the normal
+terminal `result` event (§4.8), plus a structured `plan`:
+
+```jsonc
+{ "seq": 5, "type": "result",
+  "data": { "subtype": "success",
+            "text": "Migrate the billing tables and backfill\n\n1. Snapshot current schema\n2. Apply migration\n3. Backfill rows\n4. Verify counts",
+            "plan": { "brief": "Migrate the billing tables and backfill",
+                      "steps": [ { "title": "Snapshot current schema", "status": "pending" }, /* … */ ] },
+            "tokens": { /* zeroed — classifier usage is metered separately */ },
+            "turns": 0, "model": { "id": "…", "provider": "…", "vendorModelId": "…" } } }
+```
+
+When the classifier declines in plan-only mode, `data.plan.steps` is `[]` and
+`data.text` explains that no multi-step plan was warranted. Plan-only runs do
+**not** append an assistant turn to a session (the plan is not the answer).
+
+Planner LLM usage (the classifier and the per-run tracker) is metered under
+the `task_planning` usage surface for cost attribution.
+
+### 8.6 Session inheritance
+
+Like `reasoningLevel` and `outputSchema`, the run-guard and `plan` fields
+support session-default + per-message override:
+
+- `POST /agent-sessions { loopDetection, toolBudgets, supervisor, plan }` — sets
+  the session-default applied to every subsequent message run.
+- `POST /agent-sessions/:id/messages { loopDetection, toolBudgets, supervisor, plan }` —
   optional per-message override. Applies to that one run only and does
   not mutate the session's stored value.
 
@@ -1329,6 +1419,12 @@ A reference SDK should:
       status notes / log lines / telemetry — the server already substituted
       synthetic tool-results / steering nudges / supervisor verdicts, so the
       SDK should keep consuming the stream until the terminal event lands.
+- [ ] Accept `plan` from the caller (`true` | `{ steps?, brief?, planOnly? }`
+      | `false`) and pass it through unchanged (see §8.5). It is opt-in —
+      omitting it (or `false`) means no planning. Render `task_plan` events
+      (§4.9) as a live, non-terminal checklist; keep consuming the stream
+      until the terminal event. For `planOnly` runs, read the final checklist
+      from the terminal `result.data.plan`.
 - [ ] Maintain three local-callback registries (or one tagged-union
       registry), keyed by `name`: - generic local tools (`kind: "local"`), - local A2A peers (`kind: "a2a_local"`, indexed by some Agent Card
       field — typically `agentCard.url`), - local MCP servers (`kind: "mcp_local"`, indexed by the SDK-side
@@ -1366,3 +1462,4 @@ A reference SDK should:
   Agent Card schema.
 - [MCP spec](https://spec.modelcontextprotocol.io/) — canonical `Tool` and
   `Implementation` shapes.
+

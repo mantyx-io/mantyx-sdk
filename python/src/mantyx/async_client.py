@@ -60,6 +60,7 @@ from .sse import aiter_sse
 from .tools import (
     LoopDetection,
     OutputSchema,
+    PlanSpec,
     ReasoningLevel,
     Supervisor,
     ToolBudgets,
@@ -69,9 +70,11 @@ from .tools import (
     maybe_await,
     normalize_loop_detection,
     normalize_output_schema,
+    normalize_plan,
     normalize_reasoning_level,
     normalize_supervisor,
     normalize_tool_budgets,
+    plan_only,
     serialize_tool_refs,
 )
 
@@ -170,6 +173,7 @@ class AsyncMantyxClient:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], Any] | None = None,
@@ -189,6 +193,7 @@ class AsyncMantyxClient:
                 loop_detection=loop_detection,
                 tool_budgets=tool_budgets,
                 supervisor=supervisor,
+                plan=plan,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -210,6 +215,48 @@ class AsyncMantyxClient:
         finally:
             await async_close_mcp_refs(tools_list)
 
+    async def run_plan(
+        self,
+        *,
+        prompt: str | None = None,
+        messages: Sequence[Mapping[str, str]] | None = None,
+        system_prompt: str | None = None,
+        agent_id: str | None = None,
+        model_id: str | None = None,
+        name: str | None = None,
+        tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        budgets: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, str] | None = None,
+        steps: Sequence[str] | None = None,
+        brief: str | None = None,
+        on_assistant_delta: Callable[[str], Any] | None = None,
+        on_event: Callable[[RunEvent], Any] | None = None,
+    ) -> RunResult:
+        return await self.run_agent(
+            prompt=prompt,
+            messages=messages,
+            system_prompt=system_prompt,
+            agent_id=agent_id,
+            model_id=model_id,
+            name=name,
+            tools=tools,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
+            supervisor=supervisor,
+            plan=plan_only(steps=list(steps) if steps is not None else None, brief=brief),
+            budgets=budgets,
+            metadata=metadata,
+            on_assistant_delta=on_assistant_delta,
+            on_event=on_event,
+        )
+
     async def stream_agent(
         self,
         *,
@@ -225,6 +272,7 @@ class AsyncMantyxClient:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncIterator[RunEvent]:
@@ -246,6 +294,7 @@ class AsyncMantyxClient:
                 loop_detection=loop_detection,
                 tool_budgets=tool_budgets,
                 supervisor=supervisor,
+                plan=plan,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -281,6 +330,7 @@ class AsyncMantyxClient:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncAgentSession:
@@ -298,6 +348,7 @@ class AsyncMantyxClient:
                 loop_detection=loop_detection,
                 tool_budgets=tool_budgets,
                 supervisor=supervisor,
+                plan=plan,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -766,6 +817,7 @@ class AsyncAgentSession:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
         on_assistant_delta: Callable[[str], Any] | None = None,
         on_event: Callable[[RunEvent], Any] | None = None,
     ) -> RunResult:
@@ -777,6 +829,7 @@ class AsyncAgentSession:
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
             supervisor=supervisor,
+            plan=plan,
         )
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
@@ -802,6 +855,7 @@ class AsyncAgentSession:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
     ) -> AsyncIterator[RunEvent]:
         """Stream events from a session turn as they arrive.
 
@@ -815,6 +869,7 @@ class AsyncAgentSession:
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
             supervisor=supervisor,
+            plan=plan,
         )
         created = (
             await self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body)
@@ -826,6 +881,34 @@ class AsyncAgentSession:
         async for ev in self.client._stream_events(run_id, self._handlers):
             yield ev
 
+    async def run_plan(
+        self,
+        prompt: str,
+        *,
+        metadata: Mapping[str, str] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        steps: Sequence[str] | None = None,
+        brief: str | None = None,
+        on_assistant_delta: Callable[[str], Any] | None = None,
+        on_event: Callable[[RunEvent], Any] | None = None,
+    ) -> RunResult:
+        return await self.send(
+            prompt,
+            metadata=metadata,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
+            supervisor=supervisor,
+            plan=plan_only(steps=list(steps) if steps is not None else None, brief=brief),
+            on_assistant_delta=on_assistant_delta,
+            on_event=on_event,
+        )
+
     def _build_message_body(
         self,
         prompt: str,
@@ -836,6 +919,7 @@ class AsyncAgentSession:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"prompt": prompt}
         if self._tools_for_resume:
@@ -860,6 +944,10 @@ class AsyncAgentSession:
             normalized_supervisor = normalize_supervisor(supervisor)
             if normalized_supervisor is not None:
                 body["supervisor"] = normalized_supervisor
+        if plan is not _UNSET:
+            normalized_plan = normalize_plan(plan)
+            if normalized_plan is not None:
+                body["plan"] = normalized_plan
         return body
 
     async def history(self) -> list[dict[str, str]]:

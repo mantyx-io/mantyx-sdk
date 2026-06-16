@@ -60,18 +60,12 @@ exercises it end-to-end.
 1. Fork and create a feature branch.
 2. Add or update tests.
 3. `pnpm test && pnpm typecheck && pnpm build`.
-4. Update `CHANGELOG.md` under `## [Unreleased]`.
+4. Use [Conventional Commits](https://www.conventionalcommits.org/) with scope `ts` — `CHANGELOG.md` is regenerated from git history on release (do not edit it by hand).
 5. Open a PR. Describe the change and any protocol implications.
 
 ## Releasing
 
-Releases happen out-of-band by a MANTYX maintainer:
-
-1. Move `## [Unreleased]` content into a new version section in
-   `CHANGELOG.md`.
-2. Bump `package.json` `version`.
-3. `pnpm build && pnpm publish --access public`.
-4. Tag the commit `sdk-typescript-vX.Y.Z` and push.
+Releases are handled by the shared **Publish** GitHub Actions workflow on `main` (lockstep across all three SDKs). See the [top-level CONTRIBUTING.md](../CONTRIBUTING.md#releasing). The npm tag is `vX.Y.Z`; do not publish or tag manually from this package.
 
 ## Code of Conduct
 

@@ -119,6 +119,46 @@ class Supervisor(TypedDict, total=False):
     interval: int
 
 
+class PlanOptions(TypedDict, total=False):
+    """Caller-supplied task-plan options.
+
+    Pass ``True`` / ``False`` at the top level via :data:`PlanSpec` for
+    auto-classify / disable. See ``docs/agent-runs-protocol.md`` §4.9.
+    """
+
+    planOnly: bool
+    brief: str
+    steps: list[str]
+
+
+#: ``True`` (auto-classify) | options mapping | ``False`` (disable).
+PlanSpec = bool | PlanOptions
+
+
+class TaskPlanStep(TypedDict):
+    """One checklist row in a :class:`TaskPlan`."""
+
+    title: str
+    status: str  # "pending" | "in_progress" | "done"
+
+
+class TaskPlan(TypedDict, total=False):
+    """Structured task plan on ``task_plan`` events and plan-only results."""
+
+    brief: str
+    steps: list[TaskPlanStep]
+
+
+def plan_only(*, steps: list[str] | None = None, brief: str | None = None) -> PlanOptions:
+    """Build a plan-only :data:`PlanSpec` fragment (``{ planOnly: true, ... }``)."""
+    out: PlanOptions = {"planOnly": True}
+    if steps is not None:
+        out["steps"] = steps
+    if brief is not None:
+        out["brief"] = brief
+    return out
+
+
 _LOCAL_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{1,64}$")
 _PLUGIN_TOOL_NAME_RE = re.compile(r"^@[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$")
 
@@ -882,6 +922,73 @@ def normalize_supervisor(
     return out
 
 
+def normalize_plan(
+    value: PlanSpec | Mapping[str, Any] | None,
+) -> bool | dict[str, Any] | None:
+    """Validate a :data:`PlanSpec` value and return the wire shape unchanged.
+
+    Accepts ``True`` / ``False`` or ``{ planOnly?, brief?, steps? }``.
+    """
+    if value is None:
+        return None
+    if value is True or value is False:
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError(
+            "plan must be True, False, or a mapping { planOnly?, brief?, steps? }; "
+            f"got {type(value).__name__}"
+        )
+    out: dict[str, Any] = {}
+    if "planOnly" in value and value["planOnly"] is not None:
+        plan_only_raw = value["planOnly"]
+        if not isinstance(plan_only_raw, bool):
+            raise ValueError(f"plan.planOnly must be a boolean; got {plan_only_raw!r}")
+        out["planOnly"] = plan_only_raw
+    if "brief" in value and value["brief"] is not None:
+        brief_raw = value["brief"]
+        if not isinstance(brief_raw, str):
+            raise ValueError(f"plan.brief must be a string; got {brief_raw!r}")
+        out["brief"] = brief_raw
+    if "steps" in value and value["steps"] is not None:
+        steps_raw = value["steps"]
+        if not isinstance(steps_raw, list):
+            raise ValueError(
+                f"plan.steps must be a list of strings; got {type(steps_raw).__name__}"
+            )
+        steps: list[str] = []
+        for i, step in enumerate(steps_raw):
+            if not isinstance(step, str):
+                raise ValueError(f"plan.steps[{i}] must be a string; got {step!r}")
+            steps.append(step)
+        out["steps"] = steps
+    return out
+
+
+def parse_task_plan(raw: Any) -> TaskPlan | None:
+    """Parse a terminal ``result.data.plan`` blob into a :class:`TaskPlan`."""
+    if not isinstance(raw, Mapping):
+        return None
+    steps_raw = raw.get("steps")
+    if not isinstance(steps_raw, list):
+        return None
+    steps: list[TaskPlanStep] = []
+    for entry in steps_raw:
+        if not isinstance(entry, Mapping):
+            continue
+        title = entry.get("title")
+        status = entry.get("status")
+        if not isinstance(title, str) or not isinstance(status, str):
+            continue
+        if status not in ("pending", "in_progress", "done"):
+            continue
+        steps.append({"title": title, "status": status})
+    out: TaskPlan = {"steps": steps}
+    brief_raw = raw.get("brief")
+    if isinstance(brief_raw, str) and brief_raw:
+        out["brief"] = brief_raw
+    return out
+
+
 def normalize_output_schema(
     value: OutputSchema | Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -938,8 +1045,12 @@ __all__ = [
     "MantyxPluginToolRef",
     "MantyxToolRef",
     "OutputSchema",
+    "PlanOptions",
+    "PlanSpec",
     "ReasoningLevel",
     "Supervisor",
+    "TaskPlan",
+    "TaskPlanStep",
     "ToolBudget",
     "ToolBudgets",
     "ToolName",
@@ -959,8 +1070,11 @@ __all__ = [
     "maybe_await",
     "normalize_loop_detection",
     "normalize_output_schema",
+    "normalize_plan",
     "normalize_reasoning_level",
     "normalize_supervisor",
     "normalize_tool_budgets",
+    "parse_task_plan",
+    "plan_only",
     "serialize_tool_refs",
 ]

@@ -43,18 +43,14 @@ When fixing a bug, prefer a regression test against the mock server. When adding
 
 ## Releasing
 
-Releases happen via the lockstep flow described in the [top-level CONTRIBUTING.md](../CONTRIBUTING.md). Briefly:
+Releases are handled by the shared **Publish** GitHub Actions workflow on `main`. See the [top-level CONTRIBUTING.md](../CONTRIBUTING.md#releasing) — pick patch/minor/major (or an explicit version) and run the workflow; no local version bump or `git-cliff` required.
 
-1. Bump the root `VERSION` and run `node scripts/sync-version.mjs`. This rewrites `python/sdk-version.txt` and `python/src/mantyx/_version.py`.
-2. Run `node scripts/changelog.mjs --write` to regenerate `python/CHANGELOG.md` from the git log.
-3. Commit, push to `main`, and trigger the **Publish** workflow from the Actions tab.
+The publish workflow for Python:
 
-The publish workflow:
-
+- Bumps root `VERSION` and syncs `python/sdk-version.txt` + `python/src/mantyx/_version.py`.
 - Builds the wheel + sdist with `python -m build` from `python/`.
 - Uploads to PyPI via [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC) — there is no PyPI API token in repo secrets.
-- Pushes a `python/v$V` git tag.
-- Opens a GitHub Release populated by `scripts/changelog.mjs --release-body`.
+- Pushes a `python/v$V` git tag and opens a GitHub Release with notes from `scripts/changelog.mjs --release-body`.
 
 ### One-time PyPI Trusted Publisher setup
 

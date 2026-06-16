@@ -6,13 +6,12 @@
  * CHANGELOG only contains TypeScript-relevant commits, etc.
  *
  *   node scripts/changelog.mjs --check
- *     Exits non-zero if any CHANGELOG.md is out of sync. Used in CI.
+ *     Exits non-zero if any CHANGELOG.md is out of sync. For local use
+ *     (e.g. after editing cliff.toml); not run in PR CI.
  *
  *   node scripts/changelog.mjs --write
  *     Regenerates ts/CHANGELOG.md, go/CHANGELOG.md, python/CHANGELOG.md
- *     in place. The existing `[Unreleased]` and previously-released
- *     sections in each file are *replaced* by the rendered output, since
- *     git-cliff is the source of truth.
+ *     in place. Run by the Publish workflow after tags are pushed.
  *
  *   node scripts/changelog.mjs --release-body --version=X.Y.Z [--package=ts|go|py]
  *     Prints just the unreleased section to stdout, suitable for piping into
@@ -20,7 +19,7 @@
  *     spanning all three SDKs when --package is omitted.
  *
  * Requires `git-cliff` on PATH, or set **GIT_CLIFF_BIN** to the full path (use
- * the same version as CI — see `tool: git-cliff@…` in `.github/workflows/ci.yml`).
+ * the same version as Publish — see `tool: git-cliff@…` in `.github/workflows/publish.yml`).
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -107,8 +106,8 @@ function printHelp() {
       "  node scripts/changelog.mjs --release-body --version=X.Y.Z [--package=ts|go|py]",
       "",
       "Drives git-cliff to regenerate per-SDK CHANGELOG.md files from",
-      "Conventional Commits history. Run --check in CI to ensure CHANGELOGs",
-      "are up to date before publishing.",
+      "Conventional Commits history. The Publish workflow runs --write",
+      "after tagging; --check is for local cliff.toml validation only.",
     ].join("\n"),
   );
 }
@@ -121,7 +120,7 @@ function ensureGitCliff() {
       [
         `git-cliff is not installed or not runnable (${exe}).`,
         "  brew install git-cliff           (macOS)",
-        "  cargo install git-cliff --version 2.10.1 --locked   (match CI)",
+        "  cargo install git-cliff --version 2.10.1 --locked   (match Publish workflow)",
         "  Or set GIT_CLIFF_BIN=/path/to/git-cliff",
         "",
         "See https://git-cliff.org/docs/installation",
@@ -193,7 +192,7 @@ function modeCheck() {
         "",
         "Hints:",
         "  • Pull latest and fetch tags:  git pull && git fetch origin --tags",
-        "  • Use the same git-cliff as CI (see .github/workflows/ci.yml `tool: git-cliff@…`).",
+        "  • Use the same git-cliff as Publish (see .github/workflows/publish.yml `tool: git-cliff@…`).",
         "     export GIT_CLIFF_BIN=/path/to/git-cliff   # optional",
         "  • Run from repo root, then commit all three CHANGELOG.md files together.",
       ].join("\n"),

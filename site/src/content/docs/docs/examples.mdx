@@ -9,6 +9,28 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
 Each example is its own project (`package.json` / `go.mod` / `pyproject.toml`) so you can copy any one of them out of the repo and run it standalone.
 
+## Task planning
+
+Plan-only and live-checklist examples. For inline snippets see [Task planning](/docs/planning/).
+
+<CardGrid>
+  <LinkCard
+    title="plan-only (TypeScript)"
+    description="Classify a task and print result.plan without running the agent loop."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/plan-only"
+  />
+  <LinkCard
+    title="plan-only (Go)"
+    description="RunPlan with task_plan event logging and structured output."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/plan-only"
+  />
+  <LinkCard
+    title="plan-only (Python)"
+    description="run_plan with optional caller-provided steps."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/plan-only"
+  />
+</CardGrid>
+
 ## TypeScript
 
 <CardGrid>
@@ -51,6 +73,11 @@ Each example is its own project (`package.json` / `go.mod` / `pyproject.toml`) s
     title="agent-by-id"
     description="Trigger a persisted MANTYX agent by id."
     href="https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/agent-by-id"
+  />
+  <LinkCard
+    title="plan-only"
+    description="Plan-only run via runPlan — structured checklist, no agent loop."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/plan-only"
   />
 </CardGrid>
 
@@ -97,6 +124,11 @@ Each example is its own project (`package.json` / `go.mod` / `pyproject.toml`) s
     description="Trigger a persisted MANTYX agent by id."
     href="https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/agent-by-id"
   />
+  <LinkCard
+    title="plan-only"
+    description="Plan-only run via RunPlan — structured checklist, no agent loop."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/plan-only"
+  />
 </CardGrid>
 
 ## Python
@@ -141,5 +173,10 @@ Each example is its own project (`package.json` / `go.mod` / `pyproject.toml`) s
     title="agent-by-id"
     description="Trigger a persisted MANTYX agent by id."
     href="https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/agent-by-id"
+  />
+  <LinkCard
+    title="plan-only"
+    description="Plan-only run via run_plan — structured checklist, no agent loop."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/plan-only"
   />
 </CardGrid>
