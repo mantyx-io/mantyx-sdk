@@ -448,6 +448,47 @@ def test_run_agent_supervisor_invalid_interval(mantyx_client: MantyxClient) -> N
         )
 
 
+def test_run_agent_plan_forwarded_and_run_plan(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[ScriptEvent(kind="result", data={"subtype": "success", "text": "ok"})]
+    )
+    mantyx_client.run_agent(system_prompt="x", prompt="y", plan=True)
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["plan"] is True
+
+    mantyx_client.run_plan(system_prompt="x", prompt="y", steps=["A", "B"])
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["plan"] == {"planOnly": True, "steps": ["A", "B"]}
+
+
+def test_run_plan_surfaces_terminal_checklist(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={
+                    "subtype": "success",
+                    "text": "1. Snapshot",
+                    "plan": {
+                        "brief": "Migrate",
+                        "steps": [{"title": "Snapshot", "status": "pending"}],
+                    },
+                },
+            )
+        ]
+    )
+    result = mantyx_client.run_plan(system_prompt="x", prompt="plan it")
+    assert result.plan is not None
+    assert result.plan.get("brief") == "Migrate"
+    assert result.plan["steps"][0]["title"] == "Snapshot"
+
+
 def test_stream_agent_yields_events(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
     mock_server.script_for_next_run = RunScript(
         events=[

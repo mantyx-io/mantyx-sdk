@@ -536,12 +536,17 @@ interface MantyxClientOptions {
 }
 ```
 
+## Task planning (`plan` / `runPlan`)
+
+Opt-in multi-step checklists. Pass `plan: true` (auto-classify + live tracking) or `plan: { steps, brief? }` on `runAgent` / `session.send`. For **plan-only** runs that stop after producing the checklist, use `client.runPlan({ ... })` (or `session.runPlan(prompt, { steps?, brief? })`) — the structured result is on `result.plan`. See `docs/agent-runs-protocol.md` §4.9.
+
 ### Methods
 
 | Method                                        | Returns                              |
 | --------------------------------------------- | ------------------------------------ |
 | `listModels()`                                | `Promise<ModelCatalog>`              |
 | `runAgent(spec)`                              | `Promise<RunResult>`                 |
+| `runPlan(spec)`                               | `Promise<RunResult>` (plan-only)     |
 | `streamAgent(spec)`                           | `AsyncIterable<RunEvent>`            |
 | `createSession(spec)`                         | `Promise<AgentSession>`              |
 | `resumeSession(sessionId, { tools? })`        | `Promise<AgentSession>`              |

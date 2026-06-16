@@ -88,11 +88,12 @@ for ev := range ch {
 | `loop_detected` | The [loop-detection guard](/docs/run-guards/#loop-detection) intervened | `{ consecutiveCount, hardCutoff, tools }` |
 | `tool_budget_exceeded` | A tool call hit its [`toolBudgets`](/docs/run-guards/#tool-budgets) cap | `{ tool, maxCalls, callIndex }` |
 | `supervisor` | The [run supervisor](/docs/run-guards/#supervisor) reviewed the transcript | `{ action, reason, redirect?, llmCalls }` |
-| `result` | Terminal | `{ subtype, text?, error? }` |
+| `task_plan` | The [task plan](/docs/planning/) checklist was emitted or advanced | `{ brief?, steps: [{ title, status }] }` |
+| `result` | Terminal | `{ subtype, text?, error?, plan? }` |
 | `cancelled` | Terminal (after `cancelRun`) | `{}` |
 
 The `local_tool_call` payload carries a `kind` discriminator (`"local"` when omitted, `"a2a_local"`, or `"mcp_local"`) plus extra metadata for the specialised kinds. The SDKs route to the right handler automatically; you only need to care about this if you're implementing a third-party client. The full event vocabulary is documented in [Wire protocol §7](/docs/protocol/).
 
-`loop_detected`, `tool_budget_exceeded`, and `supervisor` are observability-only — the synthetic skip / steering nudge / "budget exceeded" tool result (and supervisor verdicts when `action` is `redirect` or `finalize`) already ride the normal channels, so the run keeps progressing without any SDK action. Surface them as status banners or telemetry; see [Run guards](/docs/run-guards/) for tuning the thresholds, budgets, and supervisor interval.
+`loop_detected`, `tool_budget_exceeded`, `supervisor`, and `task_plan` are observability-only — the synthetic skip / steering nudge / "budget exceeded" tool result (and supervisor verdicts when `action` is `redirect` or `finalize`) already ride the normal channels, so the run keeps progressing without any SDK action. Surface them as status banners or telemetry; see [Run guards](/docs/run-guards/) for tuning the thresholds, budgets, and supervisor interval, and [Task planning](/docs/planning/) for `task_plan` checklist rendering.
 
 The SDKs all reconnect automatically via `Last-Event-ID` + `?lastSeq=` if the SSE stream drops.

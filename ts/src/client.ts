@@ -215,6 +215,22 @@ export interface AgentSpecBase {
    */
   supervisor?: Supervisor | false;
   /**
+   * In-product **task plan** — live checklist emitted as `task_plan` SSE
+   * events and (for `planOnly` runs) returned on the terminal `result`.
+   * Opt-in: every planned run pays for at least one classifier LLM call.
+   *
+   * - `true` — auto-classify; track step statuses during the run when warranted.
+   * - `{ steps?, brief? }` — caller-provided checklist (skips the classifier).
+   * - `{ planOnly: true, steps?, brief? }` — produce the plan and **stop**
+   *   without executing the agent loop; read the final checklist from
+   *   {@link RunResult.plan}.
+   * - `false` — no planning (default when omitted).
+   *
+   * See `docs/agent-runs-protocol.md` §4.9. Prefer {@link MantyxClient.runPlan}
+   * for plan-only runs.
+   */
+  plan?: PlanSpec;
+  /**
    * Flat string→string KV carried alongside the run / session for
    * observability. Use it to tag runs with your own application identifiers
    * (customer id, environment, workflow name, …) — the values are visible in
@@ -324,6 +340,53 @@ export interface Supervisor {
 /** Verdict from a run-supervisor review. */
 export type SupervisorAction = "on_track" | "redirect" | "finalize";
 
+/** Status of one step in an in-product task plan. */
+export type TaskPlanStepStatus = "pending" | "in_progress" | "done";
+
+/** One checklist row in a {@link TaskPlan}. */
+export interface TaskPlanStep {
+  title: string;
+  status: TaskPlanStepStatus;
+}
+
+/**
+ * Structured task plan surfaced on `task_plan` events and (for plan-only runs)
+ * on {@link RunResult.plan}. See `docs/agent-runs-protocol.md` §4.9.
+ */
+export interface TaskPlan {
+  /** Optional one-line objective summary. */
+  brief?: string;
+  steps: TaskPlanStep[];
+}
+
+/**
+ * Caller-supplied plan options. Pass `true` / `false` at the top level via
+ * {@link PlanSpec} for auto-classify / disable.
+ */
+export interface PlanOptions {
+  /** When `true`, produce the plan and terminate without executing the agent loop. */
+  planOnly?: boolean;
+  /** One-line objective for a caller-provided plan. Clamped server-side. */
+  brief?: string;
+  /** Caller-provided checklist titles. Omit to let the classifier decide. */
+  steps?: string[];
+}
+
+/** `true` (auto-classify) | options object | `false` (disable). */
+export type PlanSpec = boolean | PlanOptions;
+
+/**
+ * Build a {@link PlanSpec} for plan-only runs. Equivalent to
+ * `{ planOnly: true, steps?, brief? }`.
+ */
+export function planOnly(options: { steps?: string[]; brief?: string } = {}): PlanOptions {
+  return {
+    planOnly: true,
+    ...(options.steps !== undefined ? { steps: options.steps } : {}),
+    ...(options.brief !== undefined ? { brief: options.brief } : {}),
+  };
+}
+
 /**
  * Per-run token totals attached to terminal `result` / `error` events
  * (and to the `GET /agent-runs/:runId` snapshot) by MANTYX ≥ 2026-09.
@@ -422,6 +485,12 @@ export interface RunResult {
   turns?: number;
   /** Resolved model that executed the run. See {@link RunModelInfo}. */
   model?: RunModelInfo;
+  /**
+   * Final structured checklist for `planOnly` runs. Undefined for normal
+   * executed runs (use `task_plan` events for live progress). See
+   * `docs/agent-runs-protocol.md` §4.9.
+   */
+  plan?: TaskPlan;
 }
 
 export interface RunEventBase {
@@ -592,11 +661,23 @@ export interface SupervisorEvent extends RunEventBase {
   llmCalls: number;
 }
 
+/**
+ * Live checklist update for an in-product task plan. Non-terminal — the run
+ * continues until `result` / `error` / `cancelled`. See §4.9.
+ */
+export interface TaskPlanEvent extends RunEventBase {
+  type: "task_plan";
+  brief?: string;
+  steps: TaskPlanStep[];
+}
+
 export interface ResultEvent extends RunEventBase {
   type: "result";
   subtype: string;
   text?: string;
   error?: string;
+  /** Present on plan-only terminal results. See {@link RunResult.plan}. */
+  plan?: TaskPlan;
   /**
    * Per-run token totals. Present against MANTYX ≥ 2026-09 — see
    * {@link RunTokenUsage} and `docs/agent-runs-protocol.md` §7.1.
@@ -686,6 +767,7 @@ export type RunEvent =
   | LoopDetectedEvent
   | ToolBudgetExceededEvent
   | SupervisorEvent
+  | TaskPlanEvent
   | ResultEvent
   | ErrorEvent
   | CancelledEvent
@@ -824,6 +906,27 @@ export class MantyxClient {
       // One-shot runs own their MCP transports; close them on exit.
       await closeMcpRefs(tools);
     }
+  }
+
+  /**
+   * Plan-only run: classify (or accept caller `steps`) and return the
+   * structured checklist without executing the agent loop. Sugar for
+   * `runAgent({ ..., plan: planOnly({ steps, brief }) })`.
+   *
+   * The final checklist is on {@link RunResult.plan}; intermediate
+   * progress is available via `task_plan` events when streaming.
+   */
+  async runPlan(
+    spec: Omit<RunSpec, "plan"> & { steps?: string[]; brief?: string },
+  ): Promise<RunResult> {
+    const { steps, brief, ...rest } = spec;
+    return this.runAgent({
+      ...rest,
+      plan: planOnly({
+        ...(steps !== undefined ? { steps } : {}),
+        ...(brief !== undefined ? { brief } : {}),
+      }),
+    });
   }
 
   async *streamAgent(spec: RunSpec): AsyncGenerator<RunEvent, void, void> {
@@ -988,6 +1091,7 @@ export class MantyxClient {
     let tokens: RunTokenUsage | undefined;
     let turns: number | undefined;
     let modelInfo: RunModelInfo | undefined;
+    let plan: TaskPlan | undefined;
     for await (const ev of this.streamRunEvents(runId, handlers, opts.signal)) {
       collected.push(ev);
       if (opts.onEvent) opts.onEvent(ev);
@@ -1001,6 +1105,10 @@ export class MantyxClient {
         modelInfo = parseRunModel(r.model) ?? modelInfo;
         if (r.subtype === "success") {
           finalText = typeof r.text === "string" ? r.text : "";
+          const parsedPlan = parseTaskPlan(r.plan);
+          if (parsedPlan !== undefined) {
+            plan = parsedPlan;
+          }
         } else {
           const errInit: MantyxRunErrorInit = {};
           if (tokens !== undefined) errInit.tokens = tokens;
@@ -1035,6 +1143,7 @@ export class MantyxClient {
     if (tokens !== undefined) result.tokens = tokens;
     if (turns !== undefined) result.turns = turns;
     if (modelInfo !== undefined) result.model = modelInfo;
+    if (plan !== undefined) result.plan = plan;
     return result;
   }
 
@@ -1405,6 +1514,11 @@ export class AgentSession {
        * disable the platform judge for this single turn.
        */
       supervisor?: Supervisor | false;
+      /**
+       * Per-message override for `plan`. Applies only to this run and does
+       * not mutate the session's stored value. See {@link AgentSpecBase.plan}.
+       */
+      plan?: PlanSpec;
     } = {},
   ): Promise<RunResult> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -1428,6 +1542,7 @@ export class AgentSession {
       loopDetection?: LoopDetection | false;
       toolBudgets?: ToolBudgets;
       supervisor?: Supervisor | false;
+      plan?: PlanSpec;
     } = {},
   ): AsyncGenerator<RunEvent, void, void> {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
@@ -1447,6 +1562,7 @@ export class AgentSession {
       loopDetection?: LoopDetection | false;
       toolBudgets?: ToolBudgets;
       supervisor?: Supervisor | false;
+      plan?: PlanSpec;
     },
   ): Record<string, unknown> {
     const body: Record<string, unknown> = { prompt };
@@ -1467,7 +1583,38 @@ export class AgentSession {
     if (opts.supervisor !== undefined) {
       body.supervisor = normalizeSupervisor(opts.supervisor);
     }
+    if (opts.plan !== undefined) {
+      body.plan = normalizePlan(opts.plan);
+    }
     return body;
+  }
+
+  /**
+   * Plan-only session turn. Sugar for `send(prompt, { plan: planOnly(...) })`.
+   */
+  async runPlan(
+    prompt: string,
+    opts: {
+      onAssistantDelta?: (s: string) => void;
+      signal?: AbortSignal;
+      metadata?: Record<string, string>;
+      reasoningLevel?: ReasoningLevel;
+      outputSchema?: OutputSchema;
+      loopDetection?: LoopDetection | false;
+      toolBudgets?: ToolBudgets;
+      supervisor?: Supervisor | false;
+      steps?: string[];
+      brief?: string;
+    } = {},
+  ): Promise<RunResult> {
+    const { steps, brief, ...rest } = opts;
+    return this.send(prompt, {
+      ...rest,
+      plan: planOnly({
+        ...(steps !== undefined ? { steps } : {}),
+        ...(brief !== undefined ? { brief } : {}),
+      }),
+    });
   }
 
   async history(): Promise<Array<{ role: "user" | "assistant" | "system"; content: string }>> {
@@ -1519,6 +1666,9 @@ function serializeAgentSpec(
   }
   if (spec.supervisor !== undefined) {
     body.supervisor = normalizeSupervisor(spec.supervisor);
+  }
+  if (spec.plan !== undefined) {
+    body.plan = normalizePlan(spec.plan);
   }
   if (spec.budgets) body.budgets = spec.budgets;
   if (spec.metadata && Object.keys(spec.metadata).length > 0) body.metadata = spec.metadata;
@@ -1790,6 +1940,68 @@ function normalizeSupervisor(value: Supervisor | false): false | Record<string, 
     out.interval = assertThreshold("supervisor.interval", value.interval, 1);
   }
   return out;
+}
+
+/**
+ * Validate a {@link PlanSpec} value and return the wire shape unchanged
+ * (`true` | `false` | `{ planOnly?, brief?, steps? }`). Mirrors the
+ * server-side checks so callers see an early local error.
+ */
+function normalizePlan(value: PlanSpec): boolean | Record<string, unknown> {
+  if (value === true || value === false) return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MantyxError(
+      `plan must be \`true\`, \`false\`, or an object { planOnly?, brief?, steps? }, got ${JSON.stringify(value)}`,
+    );
+  }
+  const out: Record<string, unknown> = {};
+  if (value.planOnly !== undefined) {
+    if (typeof value.planOnly !== "boolean") {
+      throw new MantyxError(`plan.planOnly must be a boolean, got ${JSON.stringify(value.planOnly)}`);
+    }
+    out.planOnly = value.planOnly;
+  }
+  if (value.brief !== undefined) {
+    if (typeof value.brief !== "string") {
+      throw new MantyxError(`plan.brief must be a string, got ${JSON.stringify(value.brief)}`);
+    }
+    out.brief = value.brief;
+  }
+  if (value.steps !== undefined) {
+    if (!Array.isArray(value.steps)) {
+      throw new MantyxError(`plan.steps must be an array of strings, got ${JSON.stringify(value.steps)}`);
+    }
+    const steps: string[] = [];
+    for (let i = 0; i < value.steps.length; i++) {
+      const step = value.steps[i];
+      if (typeof step !== "string") {
+        throw new MantyxError(`plan.steps[${i}] must be a string, got ${JSON.stringify(step)}`);
+      }
+      steps.push(step);
+    }
+    out.steps = steps;
+  }
+  return out;
+}
+
+function parseTaskPlan(raw: unknown): TaskPlan | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const stepsRaw = obj.steps;
+  if (!Array.isArray(stepsRaw)) return undefined;
+  const steps: TaskPlanStep[] = [];
+  for (const entry of stepsRaw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const row = entry as Record<string, unknown>;
+    const title = row.title;
+    const status = row.status;
+    if (typeof title !== "string" || typeof status !== "string") continue;
+    if (status !== "pending" && status !== "in_progress" && status !== "done") continue;
+    steps.push({ title, status });
+  }
+  const briefRaw = obj.brief;
+  const brief = typeof briefRaw === "string" && briefRaw ? briefRaw : undefined;
+  return { steps, ...(brief !== undefined ? { brief } : {}) };
 }
 
 /**

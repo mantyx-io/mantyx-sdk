@@ -124,7 +124,9 @@ two differences:
    | `POST   .../agent-runs/{runId}/cancel`           | `runs:write`           |
    | `POST   .../agent-runs/{runId}/tool-results`     | `runs:write`           |
    | `POST   .../agent-sessions`                      | `sessions:write`       |
+   | `GET    .../agent-sessions`                      | `sessions:read`        |
    | `GET    .../agent-sessions/{sessionId}`          | `sessions:read`        |
+   | `GET    .../agent-sessions/{sessionId}/events`   | `sessions:read`        |
    | `DELETE .../agent-sessions/{sessionId}`          | `sessions:write`       |
    | `POST   .../agent-sessions/{sessionId}/messages` | `sessions:write`       |
    | `GET    /api/oauth/userinfo`                     | `mantyx.identity:read` |
@@ -199,8 +201,8 @@ platform-hosted offerings visible to the workspace's tier.
 {
   "models": [
     {
-      "id": "platform:cm6abc123",
-      "label": "Anthropic Claude Sonnet 4.5 (platform)",
+      "id": "anthropic/claude-sonnet-4-5",
+      "label": "anthropic · claude-sonnet-4-5",
       "provider": "anthropic",
       "vendorModelId": "claude-sonnet-4-5",
       "source": "platform_offering",
@@ -212,8 +214,8 @@ platform-hosted offerings visible to the workspace's tier.
       },
     },
     {
-      "id": "provider:cm6def456",
-      "label": "OpenAI (workspace BYOK) — gpt-5.5",
+      "id": "openai/gpt-5.5",
+      "label": "openai · gpt-5.5",
       "provider": "openai",
       "vendorModelId": "gpt-5.5",
       "source": "workspace_provider",
@@ -221,15 +223,21 @@ platform-hosted offerings visible to the workspace's tier.
       "pricing": null,
     },
   ],
-  "defaultModelId": "platform:cm6abc123",
+  "defaultModelId": "openai/gpt-5.5",
 }
 ```
 
 The `id` is the canonical value the SDK passes back as `RunSpec.modelId` /
-`SessionSpec.modelId`. The server accepts three additional shorthand forms:
+`SessionSpec.modelId`. Catalog ids use the `{provider}/{vendorModelId}` slug
+(for example `openai/gpt-5.5` or `openrouter/anthropic/claude-sonnet-4`).
+Each workspace may have at most one connection per provider + vendor model pair.
 
-- `provider:<id>:<vendor>` — pin a specific BYOK provider but override the
-  vendor model id.
+The server also accepts these forms:
+
+- `{provider}/{vendorModelId}` — same slug as the catalog `id` (preferred).
+- `platform:<offeringId>` — hosted catalog entry by internal id.
+- `provider:<id>` / `provider:<id>:<vendor>` — BYOK provider by row id, with
+  optional vendor model override.
 - `<vendorModelId>` — bare vendor id; only succeeds if exactly one workspace
   provider can run it.
 - `undefined`/omitted — falls back to the workspace default provider's
@@ -365,8 +373,9 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
     // optional, see §4.8 — platform LLM judge; pass false to disable
     "interval": 5,
   },
+  "plan": true, // optional, see §4.9 — in-product task plan (opt-in)
   "metadata": {
-    // optional, see §4.9
+    // optional, see §4.10
     "customer": "acme",
     "env": "prod",
   },
@@ -864,7 +873,8 @@ the bottom of tool-emitting rounds. Default interval is **5** when enabled.
 
 ```jsonc
 "supervisor": {
-  "interval": 5     // optional — LLM calls between reviews; default 5
+  "interval": 5,
+  "modelId": "platform:demo"
 }
 
 // or:
@@ -874,6 +884,7 @@ the bottom of tool-emitting rounds. Default interval is **5** when enabled.
 | Field             | Type            | Required | Notes                                                                                                                        |
 | ----------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `interval`        | integer ≥ 1     | no       | Defaults to **5** when the supervisor is enabled and `interval` is omitted. Capped at **100** server-side.                   |
+| `modelId`         | string          | no       | Judge model selector (same grammar as `modelId`). Falls back to workspace `defaultSupervisorModelId`, then workspace default model. |
 | (literal `false`) | `false`         | no       | Disables the run supervisor for this run. `loopDetection` and `toolBudgets` still apply.                                       |
 
 **Defaults.** When `supervisor` is **omitted**, MANTYX enables the platform
@@ -905,7 +916,52 @@ including `on_track` checks — so SDK clients can render supervisor activity.
 When `action` is `redirect` or `finalize`, the pipeline has already applied
 the verdict by the time the event arrives.
 
-### 4.9 `metadata` (developer-supplied KV for filtering)
+### 4.9 `plan` (task plan / plan-only)
+
+`plan` turns on the in-product **task plan** — the same live-checklist engine
+that powers MANTYX chat / Hive Mind. It is **opt-in** on API/ephemeral runs
+(unlike the supervisor, which is default-on) because every planned run pays
+for at least one extra classifier LLM call.
+
+```jsonc
+"plan": true        // auto: classify, emit a task_plan event, track during the run
+
+"plan": {           // caller-provided checklist — skips the classifier
+  "brief": "Migrate the billing tables and backfill",   // optional
+  "steps": ["Snapshot current schema", "Apply migration", "Backfill rows", "Verify counts"]
+}
+
+"plan": { "planOnly": true }                       // produce the plan, do NOT run the agent
+"plan": { "planOnly": true, "steps": ["…", "…"] }  // plan-only with a caller-provided checklist
+
+"plan": false       // (or omit) no planning — a plain run
+```
+
+| Form                         | Behavior                                                                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| omitted / `false`            | No planning. Default.                                                                                                                                                            |
+| `true`                       | Pre-flight classifier decides whether a multi-step plan is warranted. If so, a `task_plan` event is emitted (see §7), the checklist is injected into the user turn, and step statuses are tracked (advancing on tool activity and supervisor reviews) until the run ends. If it declines, the run proceeds with no plan. |
+| `{ steps, brief? }`          | Caller-provided checklist used verbatim — **skips** the classifier (and its `MIN_STEPS` gate). Injected + tracked like the auto case.                                            |
+| `{ planOnly: true, steps? }` | Produce the plan (classifier when `steps` omitted, otherwise the provided checklist) and **terminate without executing the agent loop**. The terminal `result` carries `data.plan` (see §7). |
+
+| Field      | Type     | Required | Notes                                                                                                  |
+| ---------- | -------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `planOnly` | boolean  | no       | When `true`, the run stops after producing the plan.                                                  |
+| `brief`    | string   | no       | One-line objective for a caller-provided plan. Clamped server-side.                                   |
+| `steps`    | string[] | no       | Caller-provided checklist titles. Empty/omitted ⇒ auto-classify. Count + per-step length clamped server-side. |
+
+Plan-only runs do **not** append an assistant turn to a session (the plan is
+not the answer). Planner LLM usage (classifier + per-run tracker) is metered
+under the `task_planning` usage surface.
+
+**Inheritance for sessions.**
+
+- `POST /agent-sessions { plan }` — sets the session-default, applied to every
+  subsequent message run.
+- `POST /agent-sessions/:id/messages { plan }` — optional per-message override;
+  applies to that one run only and does not mutate the session's stored value.
+
+### 4.10 `metadata` (developer-supplied KV for filtering)
 
 `metadata` is a flat string→string KV that is **persisted alongside the run /
 session** and surfaced in the MANTYX dashboard. Use it to tag runs with your
@@ -1145,9 +1201,14 @@ data: <utf-8 JSON>
 { "seq": 7, "type": "tool_budget_exceeded", "data": { "tool": "recall", "maxCalls": 4, "callIndex": 5 } }
 
 // run-supervisor check (see §4.8). Fired on every review — on_track included.
-{ "seq": 7, "type": "supervisor", "data": { "action": "on_track", "reason": "Agent is making progress.", "llmCalls": 5 } }
+{ "seq": 7, "type": "supervisor", "data": { "action": "on_track", "reason": "Agent is making progress.", "llmCalls": 5, "model": { "id": "platform:demo", "provider": "openai", "vendorModelId": "gpt-4o-mini" } } }
 { "seq": 8, "type": "supervisor", "data": { "action": "redirect", "reason": "Stuck re-querying.", "redirect": "Answer from the data you already have.", "llmCalls": 10 } }
 { "seq": 9, "type": "supervisor", "data": { "action": "finalize", "reason": "Enough to answer.", "llmCalls": 15 } }
+
+// in-product task plan (see §4.9). Emitted only when the run carries a `plan` spec
+// field: once after classify / caller-supplied plan, then on each tracker advance.
+// Non-terminal — render as a live checklist. status ∈ "pending" | "in_progress" | "done".
+{ "seq": 4, "type": "task_plan", "data": { "brief": "Compare Q3 vs Q4 revenue.", "steps": [ { "title": "Pull revenue", "status": "in_progress" }, { "title": "Compute deltas", "status": "pending" } ] } }
 
 // terminal event
 // Every terminal `result` event also carries `tokens`, `turns`, and `model`
@@ -1167,6 +1228,17 @@ data: <utf-8 JSON>
     "tokens":  { "inputTokens": 980, "cachedTokens": 0, "reasoningTokens": 0, "outputTokens": 14 },
     "turns":   2,
     "model":   { "id": "platform:demo", "provider": "anthropic", "vendorModelId": "claude-opus-4-7" }
+} }
+// plan-only terminal result (see §4.9): the agent loop did NOT run. `data.plan`
+// carries the structured checklist; `turns` is 0 and `tokens` are zeroed
+// (classifier usage is metered separately under the `task_planning` surface).
+{ "seq": 5, "type": "result",    "data": {
+    "subtype": "success",
+    "text":    "Compare Q3 vs Q4 revenue.\n\n1. Pull revenue\n2. Compute deltas",
+    "plan":    { "brief": "Compare Q3 vs Q4 revenue.", "steps": [ { "title": "Pull revenue", "status": "pending" }, { "title": "Compute deltas", "status": "pending" } ] },
+    "tokens":  { "inputTokens": 0, "cachedTokens": 0, "reasoningTokens": 0, "outputTokens": 0 },
+    "turns":   0,
+    "model":   { "id": "platform:demo", "provider": "openai", "vendorModelId": "gpt-5.4-mini" }
 } }
 { "seq": 8, "type": "cancelled", "data": {} }
 ```
@@ -1401,6 +1473,11 @@ A reference SDK should:
      the SDK's job is just to surface the event to the caller (status banner,
      log line, telemetry). Do **not** abort the run on these events; the run
      continues through `result` / `error` / `cancelled` as usual.
+   - Accept `plan` from the caller (`true` | `{ steps?, brief?, planOnly? }` |
+     `false`) and pass it through unchanged (see §4.9). It is opt-in — omitting
+     it (or `false`) means no planning. Render `task_plan` events as a live,
+     non-terminal checklist; for `planOnly` runs read the final checklist from
+     the terminal `result.data.plan`.
    - On terminal `result`, resolve the call. On `error` subtype, throw.
 4. Re-emit assistant deltas/events as a stream/iterator for callers who care
    about live output.

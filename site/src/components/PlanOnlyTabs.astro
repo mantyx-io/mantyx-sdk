@@ -1,0 +1,68 @@
+---
+import { Tabs, TabItem, Code, LinkButton } from "@astrojs/starlight/components";
+
+const ts = `import { MantyxClient } from "@mantyx/sdk";
+
+const client = new MantyxClient({
+  apiKey: process.env.MANTYX_API_KEY!,
+  workspaceSlug: process.env.MANTYX_WORKSPACE_SLUG!,
+});
+
+const result = await client.runPlan({
+  systemPrompt: "You break complex work into ordered steps.",
+  prompt: "Migrate billing tables from Postgres 14 to 16 and backfill rows.",
+});
+
+for (const step of result.plan?.steps ?? []) {
+  console.log(\`[\${step.status}] \${step.title}\`);
+}`;
+
+const go = `out, err := client.RunPlan(ctx, mantyx.RunPlanSpec{
+    RunSpec: mantyx.RunSpec{
+        SystemPrompt: "You break complex work into ordered steps.",
+        Prompt:       "Migrate billing tables from Postgres 14 to 16.",
+    },
+})
+if err != nil { log.Fatal(err) }
+for _, step := range out.Plan.Steps {
+    fmt.Printf("[%s] %s\\n", step.Status, step.Title)
+}`;
+
+const py = `result = client.run_plan(
+    system_prompt="You break complex work into ordered steps.",
+    prompt="Migrate billing tables from Postgres 14 to 16 and backfill rows.",
+)
+for step in (result.plan or {}).get("steps", []):
+    print(f"[{step['status']}] {step['title']}")`;
+
+const baseUrl = import.meta.env.BASE_URL;
+---
+
+<section class="mx-auto max-w-6xl border-t border-(--sl-color-gray-5) px-6 py-16 sm:py-20">
+  <div class="mb-10 text-center">
+    <h2 class="text-2xl font-bold text-(--sl-color-white) sm:text-3xl">
+      Plan-only runs
+    </h2>
+    <p class="mt-3 max-w-2xl mx-auto text-(--sl-color-gray-2)">
+      Get a structured multi-step checklist with <code class="text-sm">runPlan</code> — no agent
+      loop, no tools. The final checklist lives on <code class="text-sm">result.plan</code>.
+    </p>
+    <div class="mt-5">
+      <LinkButton href={`${baseUrl}docs/planning/`} variant="secondary" icon="right-arrow">
+        Task planning guide
+      </LinkButton>
+    </div>
+  </div>
+
+  <Tabs syncKey="lang">
+    <TabItem label="TypeScript" icon="seti:typescript">
+      <Code code={ts} lang="ts" title="plan-only.ts" />
+    </TabItem>
+    <TabItem label="Go" icon="seti:go">
+      <Code code={go} lang="go" title="plan-only.go" />
+    </TabItem>
+    <TabItem label="Python" icon="seti:python">
+      <Code code={py} lang="python" title="plan_only.py" />
+    </TabItem>
+  </Tabs>
+</section>

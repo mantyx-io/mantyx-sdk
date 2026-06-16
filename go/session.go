@@ -27,6 +27,7 @@ type sendOptions struct {
 	LoopDetection    *LoopDetection
 	ToolBudgets      ToolBudgets
 	Supervisor       *Supervisor
+	Plan             *Plan
 }
 
 // WithAssistantDelta registers a callback that receives streaming assistant text.
@@ -88,6 +89,14 @@ func WithSupervisor(s *Supervisor) SendOption {
 	return func(o *sendOptions) { o.Supervisor = s }
 }
 
+// WithPlan overrides the session's stored Plan for this single run. Build
+// the value with PlanAuto, PlanWithSteps, PlanOnly, or PlanDisabled. The
+// override applies to that one run only and does not mutate the session's
+// stored value. See `docs/agent-runs-protocol.md` §4.9.
+func WithPlan(p *Plan) SendOption {
+	return func(o *sendOptions) { o.Plan = p }
+}
+
 // Send sends a user turn and waits for the agent's reply.
 func (s *Session) Send(ctx context.Context, prompt string, opts ...SendOption) (RunResult, error) {
 	o := sendOptions{}
@@ -106,12 +115,27 @@ func (s *Session) Send(ctx context.Context, prompt string, opts ...SendOption) (
 	if err := o.Supervisor.validate(); err != nil {
 		return RunResult{}, err
 	}
+	if err := o.Plan.validate(); err != nil {
+		return RunResult{}, err
+	}
 	body := s.buildMessageBody(prompt, o)
 	created, err := s.client.createRun(ctx, fmt.Sprintf("/agent-sessions/%s/messages", pathEscape(s.ID)), body)
 	if err != nil {
 		return RunResult{}, err
 	}
 	return s.client.driveRunWithRegistry(ctx, created.RunID, s.handlers, o.OnAssistantDelta, o.OnEvent)
+}
+
+// RunPlan is sugar for Send with PlanOnly — classify (or accept caller
+// steps) and return the structured checklist without executing the agent
+// loop.
+func (s *Session) RunPlan(ctx context.Context, prompt string, steps []string, brief string, opts ...SendOption) (RunResult, error) {
+	p := PlanOnly(steps...)
+	if brief != "" {
+		p = p.WithBrief(brief)
+	}
+	opts = append([]SendOption{WithPlan(p)}, opts...)
+	return s.Send(ctx, prompt, opts...)
 }
 
 // Stream is the streaming variant of Send.
@@ -130,6 +154,9 @@ func (s *Session) Stream(ctx context.Context, prompt string, opts ...SendOption)
 		return nil, err
 	}
 	if err := o.Supervisor.validate(); err != nil {
+		return nil, err
+	}
+	if err := o.Plan.validate(); err != nil {
 		return nil, err
 	}
 	body := s.buildMessageBody(prompt, o)
@@ -172,6 +199,9 @@ func (s *Session) buildMessageBody(prompt string, o sendOptions) map[string]any 
 	}
 	if o.Supervisor != nil {
 		body["supervisor"] = o.Supervisor
+	}
+	if o.Plan != nil {
+		body["plan"] = o.Plan
 	}
 	return body
 }

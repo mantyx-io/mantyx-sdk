@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { MantyxAuthError, MantyxClient, MantyxError, MantyxRunError, defineLocalTool } from "../src/index.js";
-import { MockServer } from "./helpers/mock-server.js";
+import { MockServer, type MockRunScript } from "./helpers/mock-server.js";
 
 let server: MockServer;
 let client: MantyxClient;
@@ -436,5 +436,60 @@ describe("MantyxClient.runAgent", () => {
         supervisor: { interval: 0 },
       }),
     ).rejects.toBeInstanceOf(MantyxError);
+  });
+
+  it("forwards plan auto-classify and plan-only shapes verbatim", async () => {
+    const ok: MockRunScript = { events: [{ type: "result", subtype: "success", text: "ok" }] };
+
+    server.scriptForNextRun = ok;
+    await client.runAgent({ systemPrompt: "x", prompt: "y", plan: true });
+    expect(server.lastRunCreateBody?.plan).toBe(true);
+
+    server.scriptForNextRun = ok;
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      plan: { steps: ["A", "B"], brief: "Do it" },
+    });
+    expect(server.lastRunCreateBody?.plan).toEqual({
+      steps: ["A", "B"],
+      brief: "Do it",
+    });
+
+    server.scriptForNextRun = ok;
+    await client.runPlan({ systemPrompt: "x", prompt: "y", steps: ["Step 1"] });
+    expect(server.lastRunCreateBody?.plan).toEqual({
+      planOnly: true,
+      steps: ["Step 1"],
+    });
+  });
+
+  it("surfaces plan-only terminal checklist on RunResult.plan", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "task_plan",
+          brief: "Migrate billing",
+          steps: [{ title: "Snapshot schema", status: "pending" }],
+        },
+        {
+          type: "result",
+          subtype: "success",
+          text: "1. Snapshot schema",
+          plan: {
+            brief: "Migrate billing",
+            steps: [{ title: "Snapshot schema", status: "pending" }],
+          },
+        },
+      ],
+    };
+    const result = await client.runPlan({
+      systemPrompt: "x",
+      prompt: "Plan the migration",
+    });
+    expect(result.plan?.brief).toBe("Migrate billing");
+    expect(result.plan?.steps).toEqual([
+      { title: "Snapshot schema", status: "pending" },
+    ]);
   });
 });

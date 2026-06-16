@@ -22,5 +22,6 @@ To run any example after publishing the SDK as a real Go module, delete the
 | `output-schema/` | Constrain the final reply to a JSON schema and decode it via `ParseRunOutput`.         |
 | `a2a-tools/`     | Combine remote (`MantyxA2A`) + local (`LocalA2A`) Agent2Agent peers.                   |
 | `mcp-tools/`     | Combine remote (`MantyxMcp`) + local (`LocalMcp`) MCP servers.                         |
+| `plan-only/`     | Plan-only run via `RunPlan` — structured checklist, no agent loop.                     |
 
 All examples use `MANTYX_API_KEY` and `MANTYX_WORKSPACE_SLUG` env vars.

@@ -13,6 +13,7 @@ documented in each `README.md`.
 | `mixed-tools/`        | Combine `mantyxTool`, `mantyxPluginTool`, and a local tool in one agent.   |
 | `streaming/`          | Use `client.streamAgent()` to print assistant deltas to stdout.            |
 | `list-models/`        | Call `client.listModels()`, pretty-print, then run an agent on the first. |
+| `plan-only/`          | Plan-only run via `runPlan` — structured checklist, no agent loop.         |
 
 All examples read configuration from environment variables:
 

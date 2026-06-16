@@ -1,0 +1,208 @@
+---
+title: Task planning
+description: Opt-in multi-step checklists and plan-only runs via the `plan` field.
+sidebar:
+  order: 6.5
+---
+
+import { Tabs, TabItem, Code, Aside, LinkCard, CardGrid } from "@astrojs/starlight/components";
+
+The optional `plan` field turns on the in-product **task plan** — the same live-checklist engine that powers MANTYX chat. Planning is **opt-in** on API runs (unlike the supervisor, which is default-on) because every planned run pays for at least one classifier LLM call.
+
+## Modes
+
+| Form | Behavior |
+| ---- | -------- |
+| omitted / `false` | No planning. Default. |
+| `true` | Pre-flight classifier decides whether a multi-step plan is warranted. If so, a `task_plan` event is emitted, the checklist is injected into the user turn, and step statuses are tracked until the run ends. |
+| `{ steps, brief? }` | Caller-provided checklist — **skips** the classifier. Injected and tracked like the auto case. |
+| `{ planOnly: true, steps? }` | Produce the plan and **terminate without executing the agent loop**. Read the final checklist from `result.plan`. |
+
+Plan-only runs do **not** append an assistant turn to a session (the plan is not the answer).
+
+<Aside type="tip" title="Runnable examples">
+  Self-contained **plan-only** projects live in the repo under `examples/plan-only` for [TypeScript](https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/plan-only), [Go](https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/plan-only), and [Python](https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/plan-only). See also the [Examples](/docs/examples/) index.
+</Aside>
+
+## Plan-only (`runPlan`)
+
+Use `runPlan` when you only need a structured checklist back — no tool loop, no assistant turn appended to a session. The classifier decides whether the task warrants multiple steps; when it does, the final checklist is on `result.plan`.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript" icon="seti:typescript">
+    <Code code={`import { MantyxClient } from "@mantyx/sdk";
+
+const client = new MantyxClient({
+  apiKey: process.env.MANTYX_API_KEY!,
+  workspaceSlug: process.env.MANTYX_WORKSPACE_SLUG!,
+});
+
+const result = await client.runPlan({
+  systemPrompt: "You break complex engineering work into ordered steps.",
+  prompt: "Migrate billing tables from Postgres 14 to 16 and backfill historical rows.",
+});
+
+console.log(result.text);
+for (const step of result.plan?.steps ?? []) {
+  console.log(\`[\${step.status}] \${step.title}\`);
+}`} lang="ts" title="plan-only.ts" />
+  </TabItem>
+  <TabItem label="Go" icon="seti:go">
+    <Code code={`out, err := client.RunPlan(ctx, mantyx.RunPlanSpec{
+    RunSpec: mantyx.RunSpec{
+        SystemPrompt: "You break complex engineering work into ordered steps.",
+        Prompt:       "Migrate billing tables from Postgres 14 to 16 and backfill.",
+    },
+})
+if err != nil { log.Fatal(err) }
+for _, step := range out.Plan.Steps {
+    fmt.Printf("[%s] %s\\n", step.Status, step.Title)
+}`} lang="go" title="main.go" />
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+    <Code code={`result = client.run_plan(
+    system_prompt="You break complex engineering work into ordered steps.",
+    prompt="Migrate billing tables from Postgres 14 to 16 and backfill.",
+)
+for step in (result.plan or {}).get("steps", []):
+    print(f"[{step['status']}] {step['title']}")`} lang="python" title="plan_only.py" />
+  </TabItem>
+</Tabs>
+
+When the classifier declines, `result.plan.steps` is `[]` and `result.text` explains that no multi-step plan was warranted.
+
+## Caller-provided checklist
+
+Skip the classifier by passing your own step titles:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript" icon="seti:typescript">
+    <Code code={`await client.runPlan({
+  systemPrompt: "You are a migration planner.",
+  prompt: "Migrate billing tables and backfill.",
+  brief: "Postgres 14 → 16 billing migration",
+  steps: ["Snapshot schema", "Apply DDL", "Backfill rows", "Verify counts"],
+});`} lang="ts" />
+  </TabItem>
+  <TabItem label="Go" icon="seti:go">
+    <Code code={`client.RunPlan(ctx, mantyx.RunPlanSpec{
+    RunSpec: mantyx.RunSpec{SystemPrompt: "...", Prompt: "..."},
+    Brief: "Postgres 14 → 16 billing migration",
+    Steps: []string{"Snapshot schema", "Apply DDL", "Backfill rows", "Verify counts"},
+})`} lang="go" />
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+    <Code code={`client.run_plan(
+    system_prompt="You are a migration planner.",
+    prompt="Migrate billing tables and backfill.",
+    brief="Postgres 14 → 16 billing migration",
+    steps=["Snapshot schema", "Apply DDL", "Backfill rows", "Verify counts"],
+)`} lang="python" />
+  </TabItem>
+</Tabs>
+
+## Executed run with live tracking
+
+Pass `plan: true` (or a caller checklist **without** `planOnly`) when the agent should run tools and produce a final answer while you still want a live checklist:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript" icon="seti:typescript">
+    <Code code={`const result = await client.runAgent({
+  systemPrompt: "You are a release engineer.",
+  prompt: "Roll out v2.4 to staging, smoke test, then promote to prod.",
+  plan: true,
+  onEvent: (ev) => {
+    if (ev.type === "task_plan") {
+      for (const step of ev.steps) {
+        console.log(\`  [\${step.status}] \${step.title}\`);
+      }
+    }
+  },
+});`} lang="ts" />
+  </TabItem>
+  <TabItem label="Go" icon="seti:go">
+    <Code code={`client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt: "...",
+    Prompt:       "...",
+    Plan:         mantyx.PlanAuto(),
+    OnEvent: func(ev mantyx.RunEvent) {
+        if ev.Type == "task_plan" { /* render ev.Data["steps"] */ }
+    },
+})`} lang="go" />
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+    <Code code={`client.run_agent(
+    system_prompt="You are a release engineer.",
+    prompt="Roll out v2.4 to staging, smoke test, then promote to prod.",
+    plan=True,
+    on_event=lambda ev: print(ev.data) if ev.type == "task_plan" else None,
+)`} lang="python" />
+  </TabItem>
+</Tabs>
+
+## Streaming `task_plan` events
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript" icon="seti:typescript">
+    <Code code={`for await (const event of client.streamAgent({
+  systemPrompt: "...",
+  prompt: "Compare Q3 vs Q4 revenue.",
+  plan: true,
+})) {
+  if (event.type === "task_plan") {
+    for (const step of event.steps) {
+      console.log(\`[\${step.status}] \${step.title}\`);
+    }
+  }
+}`} lang="ts" />
+  </TabItem>
+  <TabItem label="Go" icon="seti:go">
+    <Code code={`ch, _ := client.StreamAgent(ctx, mantyx.RunSpec{Plan: mantyx.PlanAuto(), ...})
+for ev := range ch {
+    if ev.Type == "task_plan" { /* ev.Data["steps"] */ }
+}`} lang="go" />
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+    <Code code={`for event in client.stream_agent(..., plan=True):
+    if event.type == "task_plan":
+        for step in event.data.get("steps", []):
+            print(step["title"], step["status"])`} lang="python" />
+  </TabItem>
+</Tabs>
+
+## Sessions
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript" icon="seti:typescript">
+    <Code code={`const session = await client.createSession({
+  systemPrompt: "You are a migration planner.",
+  plan: true,
+});
+
+const plan = await session.runPlan("Backfill orders after migration.", {
+  steps: ["Count rows", "Run backfill", "Verify counts"],
+});
+
+const answer = await session.send("Execute step 1.");
+await session.end();`} lang="ts" />
+  </TabItem>
+  <TabItem label="Go" icon="seti:go">
+    <Code code={`session, _ := client.CreateSession(ctx, mantyx.SessionSpec{Plan: mantyx.PlanAuto(), ...})
+plan, _ := session.RunPlan(ctx, "Backfill orders.", []string{"Count", "Backfill", "Verify"}, "")
+_, _ = session.Send(ctx, "Execute step 1.")`} lang="go" />
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+    <Code code={`session = client.create_session(system_prompt="...", plan=True)
+session.run_plan("Backfill orders.", steps=["Count", "Backfill", "Verify"])
+session.send("Execute step 1.")
+session.end()`} lang="python" />
+  </TabItem>
+</Tabs>
+
+## See also
+
+<CardGrid>
+  <LinkCard title="Examples — plan-only" href="/docs/examples/#task-planning" />
+  <LinkCard title="Streaming" href="/docs/streaming/" description="Full SSE vocabulary including task_plan." />
+  <LinkCard title="Agent-runs protocol §4.9" href="/docs/protocol/#49-plan-task-plan--plan-only" />
+</CardGrid>

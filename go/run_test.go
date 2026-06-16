@@ -437,6 +437,70 @@ func TestRunAgent_SupervisorRejectsBadInterval(t *testing.T) {
 	_ = SupervisorInterval(101)
 }
 
+func TestRunAgent_PlanIsForwarded(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	_, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		Plan:         PlanAuto(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := body["plan"]; got != true {
+		t.Fatalf("plan: got %#v want true", got)
+	}
+}
+
+func TestRunPlan_ForwardsPlanOnlyAndSurfacesTerminalPlan(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{
+			kind: "result",
+			data: map[string]any{
+				"subtype": "success",
+				"text":    "1. Snapshot schema",
+				"plan": map[string]any{
+					"brief": "Migrate billing",
+					"steps": []any{
+						map[string]any{"title": "Snapshot schema", "status": "pending"},
+					},
+				},
+			},
+		}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	out, err := client.RunPlan(context.Background(), RunPlanSpec{
+		RunSpec: RunSpec{SystemPrompt: "x", Prompt: "Plan it"},
+		Steps:   []string{"Snapshot schema"},
+		Brief:   "Migrate billing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &wire); err != nil {
+		t.Fatal(err)
+	}
+	planRaw, ok := wire["plan"].(map[string]any)
+	if !ok || planRaw["planOnly"] != true {
+		t.Fatalf("plan wire: %#v", wire["plan"])
+	}
+	if out.Plan == nil || out.Plan.Brief != "Migrate billing" || len(out.Plan.Steps) != 1 {
+		t.Fatalf("result plan: %#v", out.Plan)
+	}
+}
+
 // TestRunAgent_ErrorEventCarriesTriageAttributes covers the truncation
 // salvage path from docs/agent-runs-protocol.md §7: the engine emits an
 // `assistant_message` with the partial text and a `finishReason`, then a

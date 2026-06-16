@@ -214,6 +214,12 @@ type RunSpec struct {
 	// ephemeral API runs: enabled with interval 5). See
 	// docs/agent-runs-protocol.md §4.8.
 	Supervisor *Supervisor
+	// Plan turns on the in-product task plan (live checklist + optional
+	// plan-only termination). Build with PlanAuto, PlanWithSteps,
+	// PlanOnly, or PlanDisabled. nil leaves the field unset. See
+	// `docs/agent-runs-protocol.md` §4.9. Prefer RunPlan for plan-only
+	// runs.
+	Plan *Plan
 	// Metadata is a flat string→string KV carried alongside the run for
 	// observability. Visible (and filterable) in the MANTYX dashboard. Keys
 	// must match `[A-Za-z0-9._-]{1,64}`, values are strings ≤ 256 chars, and
@@ -249,6 +255,9 @@ type SessionSpec struct {
 	// Supervisor sets the session-wide default applied to every run created
 	// through Session.Send. See RunSpec.Supervisor.
 	Supervisor *Supervisor
+	// Plan sets the session-wide default applied to every run created
+	// through Session.Send. See RunSpec.Plan.
+	Plan *Plan
 	// Metadata is inherited by every run created through `Session.Send`. See
 	// RunSpec.Metadata for the validation rules.
 	Metadata map[string]string
@@ -552,6 +561,115 @@ func (s *Supervisor) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
+// TaskPlanStepStatus is the lifecycle state of one checklist row.
+type TaskPlanStepStatus string
+
+const (
+	TaskPlanPending    TaskPlanStepStatus = "pending"
+	TaskPlanInProgress TaskPlanStepStatus = "in_progress"
+	TaskPlanDone       TaskPlanStepStatus = "done"
+)
+
+// TaskPlanStep is one row in an in-product task plan.
+type TaskPlanStep struct {
+	Title  string             `json:"title"`
+	Status TaskPlanStepStatus `json:"status"`
+}
+
+// TaskPlan is the structured checklist on `task_plan` events and
+// plan-only terminal results. See `docs/agent-runs-protocol.md` §4.9.
+type TaskPlan struct {
+	Brief string         `json:"brief,omitempty"`
+	Steps []TaskPlanStep `json:"steps"`
+}
+
+type planWireMode int
+
+const (
+	planWireUnset planWireMode = iota
+	planWireAuto
+	planWireDisabled
+	planWireObject
+)
+
+// Plan configures the in-product task plan. Build with PlanAuto,
+// PlanWithSteps, PlanOnly, or PlanDisabled. nil leaves the field unset
+// (no planning). See `docs/agent-runs-protocol.md` §4.9.
+type Plan struct {
+	mode     planWireMode
+	PlanOnly bool
+	Brief    string
+	Steps    []string
+}
+
+// PlanAuto enables auto-classify planning with live step tracking during
+// the run when the classifier decides a multi-step plan is warranted.
+func PlanAuto() *Plan { return &Plan{mode: planWireAuto} }
+
+// PlanDisabled explicitly disables planning for the run / session.
+func PlanDisabled() *Plan { return &Plan{mode: planWireDisabled} }
+
+// PlanWithSteps supplies a caller-provided checklist (skips the classifier)
+// and tracks step statuses during execution.
+func PlanWithSteps(steps ...string) *Plan {
+	return &Plan{mode: planWireObject, Steps: steps}
+}
+
+// PlanOnly produces the plan and terminates without executing the agent
+// loop. Omit steps to let the classifier decide; pass steps for a
+// caller-provided checklist.
+func PlanOnly(steps ...string) *Plan {
+	return &Plan{mode: planWireObject, PlanOnly: true, Steps: steps}
+}
+
+// WithBrief returns a copy of the plan with an optional one-line objective.
+func (p *Plan) WithBrief(brief string) *Plan {
+	if p == nil {
+		return &Plan{mode: planWireObject, PlanOnly: true, Brief: brief}
+	}
+	cp := *p
+	cp.Brief = brief
+	return &cp
+}
+
+func (p *Plan) validate() error {
+	if p == nil || p.mode != planWireObject {
+		return nil
+	}
+	for i, step := range p.Steps {
+		if step == "" {
+			return &Error{Code: "invalid_request", Message: fmt.Sprintf("Plan.Steps[%d] must be a non-empty string", i)}
+		}
+	}
+	return nil
+}
+
+// MarshalJSON serialises Plan to its wire shape: `true`, `false`, or
+// `{ planOnly?, brief?, steps? }`.
+func (p *Plan) MarshalJSON() ([]byte, error) {
+	if p == nil {
+		return []byte("null"), nil
+	}
+	switch p.mode {
+	case planWireAuto:
+		return []byte("true"), nil
+	case planWireDisabled:
+		return []byte("false"), nil
+	default:
+		out := map[string]any{}
+		if p.PlanOnly {
+			out["planOnly"] = true
+		}
+		if p.Brief != "" {
+			out["brief"] = p.Brief
+		}
+		if len(p.Steps) > 0 {
+			out["steps"] = p.Steps
+		}
+		return json.Marshal(out)
+	}
+}
+
 // ToolBudget caps how many times one tool may execute over the run.
 type ToolBudget struct {
 	// MaxCalls is the hard cap on executed calls per run. 0 disables the
@@ -670,6 +788,10 @@ type RunResult struct {
 	// Model identifies the resolved model that executed the run. nil
 	// against legacy MANTYX servers. See RunModelInfo.
 	Model *RunModelInfo
+	// Plan carries the final structured checklist for plan-only runs.
+	// nil for normal executed runs — use `task_plan` events for live
+	// progress. See `docs/agent-runs-protocol.md` §4.9.
+	Plan *TaskPlan
 }
 
 // RunEvent is one durable run event. Specific payload fields vary by Type.
@@ -758,6 +880,9 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 	if err := spec.Supervisor.validate(); err != nil {
 		return RunResult{}, err
 	}
+	if err := spec.Plan.validate(); err != nil {
+		return RunResult{}, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return RunResult{}, err
 	}
@@ -768,6 +893,28 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 		return RunResult{}, err
 	}
 	return c.driveRun(ctx, created.RunID, spec.Tools, spec.OnAssistantDelta, spec.OnEvent)
+}
+
+// RunPlanSpec is sugar for a plan-only RunAgent call.
+type RunPlanSpec struct {
+	RunSpec
+	// Steps, when non-empty, supplies a caller-provided checklist (skips
+	// the classifier). Omit to let the classifier decide.
+	Steps []string
+	// Brief is an optional one-line objective for a caller-provided plan.
+	Brief string
+}
+
+// RunPlan classifies (or accepts caller Steps) and returns the structured
+// checklist without executing the agent loop. Equivalent to RunAgent with
+// Plan: PlanOnly(...).
+func (c *Client) RunPlan(ctx context.Context, spec RunPlanSpec) (RunResult, error) {
+	p := PlanOnly(spec.Steps...)
+	if spec.Brief != "" {
+		p = p.WithBrief(spec.Brief)
+	}
+	spec.RunSpec.Plan = p
+	return c.RunAgent(ctx, spec.RunSpec)
 }
 
 // StreamAgent returns a channel that yields run events as they arrive. The
@@ -787,6 +934,9 @@ func (c *Client) StreamAgent(ctx context.Context, spec RunSpec) (<-chan RunEvent
 		return nil, err
 	}
 	if err := spec.Supervisor.validate(); err != nil {
+		return nil, err
+	}
+	if err := spec.Plan.validate(); err != nil {
 		return nil, err
 	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
@@ -831,6 +981,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	if err := spec.Supervisor.validate(); err != nil {
 		return nil, err
 	}
+	if err := spec.Plan.validate(); err != nil {
+		return nil, err
+	}
 	if err := resolveLocalRefs(ctx, spec.Tools, c.httpClient); err != nil {
 		return nil, err
 	}
@@ -863,6 +1016,9 @@ func (c *Client) CreateSession(ctx context.Context, spec SessionSpec) (*Session,
 	}
 	if spec.Supervisor != nil {
 		body["supervisor"] = spec.Supervisor
+	}
+	if spec.Plan != nil {
+		body["plan"] = spec.Plan
 	}
 	if len(spec.Metadata) > 0 {
 		body["metadata"] = spec.Metadata
@@ -1029,6 +1185,7 @@ func (c *Client) driveRunWithRegistry(
 	var tokens *RunTokenUsage
 	var turns int
 	var modelInfo *RunModelInfo
+	var taskPlan *TaskPlan
 	terminalErr, err := c.consumeStream(ctx, runID, handlers, func(ev RunEvent) {
 		collected = append(collected, ev)
 		if onEvent != nil {
@@ -1052,6 +1209,9 @@ func (c *Client) driveRunWithRegistry(
 			if m := parseRunModel(ev.Data["model"]); m != nil {
 				modelInfo = m
 			}
+			if p := parseTaskPlan(ev.Data["plan"]); p != nil {
+				taskPlan = p
+			}
 		}
 	})
 	if err != nil {
@@ -1067,6 +1227,7 @@ func (c *Client) driveRunWithRegistry(
 		Tokens: tokens,
 		Turns:  turns,
 		Model:  modelInfo,
+		Plan:   taskPlan,
 	}, nil
 }
 
@@ -1530,6 +1691,9 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 	if spec.Supervisor != nil {
 		body["supervisor"] = spec.Supervisor
 	}
+	if spec.Plan != nil {
+		body["plan"] = spec.Plan
+	}
 	if spec.Prompt != "" {
 		body["prompt"] = spec.Prompt
 	}
@@ -1634,6 +1798,39 @@ func parseRunModel(raw any) *RunModelInfo {
 	}
 	if s, ok := m["reasoningEffort"].(string); ok {
 		out.ReasoningEffort = s
+	}
+	return out
+}
+
+// parseTaskPlan decodes a wire `plan` object from a terminal result.
+func parseTaskPlan(raw any) *TaskPlan {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	stepsRaw, ok := m["steps"].([]any)
+	if !ok {
+		return nil
+	}
+	steps := make([]TaskPlanStep, 0, len(stepsRaw))
+	for _, entry := range stepsRaw {
+		row, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		title, _ := row["title"].(string)
+		status, _ := row["status"].(string)
+		if title == "" || status == "" {
+			continue
+		}
+		if status != string(TaskPlanPending) && status != string(TaskPlanInProgress) && status != string(TaskPlanDone) {
+			continue
+		}
+		steps = append(steps, TaskPlanStep{Title: title, Status: TaskPlanStepStatus(status)})
+	}
+	out := &TaskPlan{Steps: steps}
+	if brief, ok := m["brief"].(string); ok && brief != "" {
+		out.Brief = brief
 	}
 	return out
 }

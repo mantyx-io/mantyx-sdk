@@ -300,4 +300,5 @@ The reference SDKs mirror these checks locally so callers see an early typed err
 
 - [Streaming](/docs/streaming/) — the full SSE event vocabulary, including the `loop_detected`, `tool_budget_exceeded`, and `supervisor` observability events.
 - [Wire protocol §8](/docs/wire-protocol/#8-run-guards-loopdetection-toolbudgets) — canonical spec for the wire shapes (with subsections 8.1 `loopDetection` and 8.2 `toolBudgets`).
+- [Task planning](/docs/planning/) — opt-in `plan` field and `task_plan` SSE events (complements supervisor reviews during planned runs).
 - [Agent-runs protocol §4.6](/docs/protocol/#46-loopdetection-steering-nudge--hard-cutoff) and [§4.7](/docs/protocol/#47-toolbudgets-per-tool-call-caps) — server-side validation contract and inheritance rules for sessions.

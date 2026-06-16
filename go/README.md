@@ -594,18 +594,24 @@ type Options struct {
 func NewClient(opts Options) *Client
 ```
 
+## Task planning (`Plan` / `RunPlan`)
+
+Opt-in multi-step checklists. Pass `Plan: mantyx.PlanAuto()` or `Plan: mantyx.PlanWithSteps(...)` on `RunSpec` / `SessionSpec`. For **plan-only** runs, use `client.RunPlan(ctx, RunPlanSpec{...})` or `session.RunPlan(ctx, prompt, steps, brief, ...)` — the structured checklist is on `result.Plan`. See `docs/agent-runs-protocol.md` §4.9.
+
 ### Methods
 
 | Method                                                            | Returns                          |
 | ----------------------------------------------------------------- | -------------------------------- |
 | `(*Client).ListModels(ctx)`                                       | `(ModelCatalog, error)`          |
 | `(*Client).RunAgent(ctx, RunSpec)`                                | `(*RunResult, error)`            |
+| `(*Client).RunPlan(ctx, RunPlanSpec)`                             | `(*RunResult, error)` (plan-only)|
 | `(*Client).StreamAgent(ctx, RunSpec)`                             | `(<-chan RunEvent, error)`       |
 | `(*Client).CreateSession(ctx, SessionSpec)`                       | `(*Session, error)`              |
 | `(*Client).ResumeSession(ctx, id, tools)`                         | `(*Session, error)`              |
 | `(*Client).ListSessions(ctx, ListSessionsOptions)`                | `(SessionListResult, error)`     |
 | `(*Client).GetSessionEvents(ctx, id, GetSessionEventsOptions)`    | `([]RunEvent, error)`            |
 | `(*Session).Send(ctx, prompt, ...SendOption)`                     | `(*RunResult, error)`            |
+| `(*Session).RunPlan(ctx, prompt, steps, brief, ...SendOption)`  | `(*RunResult, error)` (plan-only)|
 | `(*Session).Stream(ctx, prompt)`                                  | `(<-chan RunEvent, error)`       |
 | `(*Session).History(ctx)`                                         | `([]Message, error)`             |
 | `(*Session).Events(ctx, GetSessionEventsOptions)`                 | `([]RunEvent, error)`            |

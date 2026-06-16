@@ -60,19 +60,12 @@ exercises it end-to-end.
 1. Fork and create a feature branch.
 2. Add or update tests.
 3. `go test ./... && go vet ./... && go build ./...`.
-4. Update `CHANGELOG.md` under `## [Unreleased]`.
+4. Use [Conventional Commits](https://www.conventionalcommits.org/) with scope `go` — `CHANGELOG.md` is regenerated from git history on release (do not edit it by hand).
 5. Open a PR. Describe the change and any protocol implications.
 
 ## Releasing
 
-Releases happen out-of-band by a MANTYX maintainer:
-
-1. Move `## [Unreleased]` content into a new version section in
-   `CHANGELOG.md`.
-2. Tag the commit `sdk-go-vX.Y.Z` and push. Go's module proxy picks it up
-   automatically.
-3. (Optional) Mirror the tag to a standalone GitHub repo if the SDK has been
-   extracted.
+Releases are handled by the shared **Publish** GitHub Actions workflow on `main` (lockstep across all three SDKs). See the [top-level CONTRIBUTING.md](../CONTRIBUTING.md#releasing). Go consumers resolve versions via the `go/vX.Y.Z` git tag; do not tag manually from this module.
 
 ## Code of Conduct
 

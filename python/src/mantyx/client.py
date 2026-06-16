@@ -41,17 +41,22 @@ from .sse import SseEvent, iter_sse
 from .tools import (
     LoopDetection,
     OutputSchema,
+    PlanSpec,
     ReasoningLevel,
     Supervisor,
+    TaskPlan,
     ToolBudgets,
     ToolRef,
     _LocalHandlers,
     collect_local_handlers,
     normalize_loop_detection,
     normalize_output_schema,
+    normalize_plan,
     normalize_reasoning_level,
     normalize_supervisor,
     normalize_tool_budgets,
+    parse_task_plan,
+    plan_only,
     serialize_tool_refs,
 )
 
@@ -173,6 +178,9 @@ class RunResult:
     # Resolved model that executed the run. ``None`` against legacy
     # MANTYX servers.
     model: RunModelInfo | None = None
+    # Final structured checklist for plan-only runs. ``None`` for normal
+    # executed runs — use ``task_plan`` events for live progress.
+    plan: TaskPlan | None = None
 
 
 @dataclass
@@ -325,6 +333,7 @@ class MantyxClient:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
@@ -348,6 +357,7 @@ class MantyxClient:
                 loop_detection=loop_detection,
                 tool_budgets=tool_budgets,
                 supervisor=supervisor,
+                plan=plan,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -371,7 +381,7 @@ class MantyxClient:
             # One-shot runs own their MCP transports; close on exit.
             sync_close_mcp_refs(tools_list)
 
-    def stream_agent(
+    def run_plan(
         self,
         *,
         prompt: str | None = None,
@@ -388,6 +398,51 @@ class MantyxClient:
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
+        steps: Sequence[str] | None = None,
+        brief: str | None = None,
+        on_assistant_delta: Callable[[str], None] | None = None,
+        on_event: Callable[[RunEvent], None] | None = None,
+    ) -> RunResult:
+        """Plan-only run: classify (or accept caller ``steps``) and return
+        the structured checklist without executing the agent loop."""
+        return self.run_agent(
+            prompt=prompt,
+            messages=messages,
+            system_prompt=system_prompt,
+            agent_id=agent_id,
+            model_id=model_id,
+            name=name,
+            tools=tools,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
+            supervisor=supervisor,
+            plan=plan_only(steps=list(steps) if steps is not None else None, brief=brief),
+            budgets=budgets,
+            metadata=metadata,
+            on_assistant_delta=on_assistant_delta,
+            on_event=on_event,
+        )
+
+    def stream_agent(
+        self,
+        *,
+        prompt: str | None = None,
+        messages: Sequence[Mapping[str, str]] | None = None,
+        system_prompt: str | None = None,
+        agent_id: str | None = None,
+        model_id: str | None = None,
+        name: str | None = None,
+        tools: Sequence[ToolRef] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
+        budgets: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> Iterator[RunEvent]:
         tools_list: list[ToolRef] | None = list(tools) if tools else None
         sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
@@ -402,6 +457,7 @@ class MantyxClient:
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
             supervisor=supervisor,
+            plan=plan,
             budgets=budgets,
             metadata=metadata,
         )
@@ -443,6 +499,7 @@ class MantyxClient:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
         budgets: Mapping[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AgentSession:
@@ -462,6 +519,7 @@ class MantyxClient:
                 loop_detection=loop_detection,
                 tool_budgets=tool_budgets,
                 supervisor=supervisor,
+                plan=plan,
                 budgets=budgets,
                 metadata=metadata,
             )
@@ -568,6 +626,7 @@ class MantyxClient:
         tokens: RunTokenUsage | None = None
         turns: int | None = None
         model_info: RunModelInfo | None = None
+        task_plan: TaskPlan | None = None
         for ev in self._stream_events(run_id, handlers):
             collected.append(ev)
             if on_event is not None:
@@ -590,6 +649,9 @@ class MantyxClient:
                 if subtype == "success":
                     txt = ev.data.get("text")
                     final_text = txt if isinstance(txt, str) else ""
+                    parsed_plan = parse_task_plan(ev.data.get("plan"))
+                    if parsed_plan is not None:
+                        task_plan = parsed_plan
                 else:
                     msg = ev.data.get("error") or subtype or "run failed"
                     raise MantyxRunError(
@@ -642,6 +704,7 @@ class MantyxClient:
             tokens=tokens,
             turns=turns,
             model=model_info,
+            plan=task_plan,
         )
 
     def _stream_events(
@@ -933,6 +996,7 @@ class AgentSession:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
@@ -944,6 +1008,7 @@ class AgentSession:
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
             supervisor=supervisor,
+            plan=plan,
         )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
@@ -968,6 +1033,7 @@ class AgentSession:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
     ) -> Iterator[RunEvent]:
         body = self._build_message_body(
             prompt,
@@ -977,6 +1043,7 @@ class AgentSession:
             loop_detection=loop_detection,
             tool_budgets=tool_budgets,
             supervisor=supervisor,
+            plan=plan,
         )
         created = (
             self.client._request("POST", f"/agent-sessions/{_quote(self.id)}/messages", body) or {}
@@ -985,6 +1052,35 @@ class AgentSession:
         if not run_id:
             raise MantyxError("server did not return a runId")
         return self.client._stream_events(run_id, self._handlers)
+
+    def run_plan(
+        self,
+        prompt: str,
+        *,
+        metadata: Mapping[str, str] | None = None,
+        reasoning_level: ReasoningLevel | None = None,
+        output_schema: OutputSchema | Mapping[str, Any] | None = None,
+        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
+        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        steps: Sequence[str] | None = None,
+        brief: str | None = None,
+        on_assistant_delta: Callable[[str], None] | None = None,
+        on_event: Callable[[RunEvent], None] | None = None,
+    ) -> RunResult:
+        """Plan-only session turn without executing the agent loop."""
+        return self.send(
+            prompt,
+            metadata=metadata,
+            reasoning_level=reasoning_level,
+            output_schema=output_schema,
+            loop_detection=loop_detection,
+            tool_budgets=tool_budgets,
+            supervisor=supervisor,
+            plan=plan_only(steps=list(steps) if steps is not None else None, brief=brief),
+            on_assistant_delta=on_assistant_delta,
+            on_event=on_event,
+        )
 
     def _build_message_body(
         self,
@@ -996,6 +1092,7 @@ class AgentSession:
         loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
         tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
         supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"prompt": prompt}
         if self._tools_for_resume:
@@ -1020,6 +1117,10 @@ class AgentSession:
             normalized_supervisor = normalize_supervisor(supervisor)
             if normalized_supervisor is not None:
                 body["supervisor"] = normalized_supervisor
+        if plan is not _UNSET:
+            normalized_plan = normalize_plan(plan)
+            if normalized_plan is not None:
+                body["plan"] = normalized_plan
         return body
 
     def history(self) -> list[dict[str, str]]:
@@ -1140,6 +1241,7 @@ def _serialize_agent_spec(
     loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
     tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
     supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+    plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
     budgets: Mapping[str, Any] | None,
     metadata: Mapping[str, str] | None,
 ) -> dict[str, Any]:
@@ -1172,6 +1274,10 @@ def _serialize_agent_spec(
         normalized_supervisor = normalize_supervisor(supervisor)
         if normalized_supervisor is not None:
             body["supervisor"] = normalized_supervisor
+    if plan is not _UNSET:
+        normalized_plan = normalize_plan(plan)
+        if normalized_plan is not None:
+            body["plan"] = normalized_plan
     if budgets:
         body["budgets"] = dict(budgets)
     if metadata:

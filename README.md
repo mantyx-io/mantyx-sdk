@@ -293,8 +293,8 @@ and OSS-extraction notes
 [`go/EXTRACT.md`](./go/EXTRACT.md),
 [`python/EXTRACT.md`](./python/EXTRACT.md)).
 The repo-root [`CONTRIBUTING.md`](./CONTRIBUTING.md) documents the
-Conventional Commits format that drives the auto-generated CHANGELOGs and
-release notes (via [`cliff.toml`](./cliff.toml) +
+Conventional Commits format that drives release notes and per-SDK
+`CHANGELOG.md` files (regenerated on each release via [`cliff.toml`](./cliff.toml) +
 [`scripts/changelog.mjs`](./scripts/changelog.mjs)).
 
 ## Documentation

@@ -61,6 +61,16 @@ export type MockEvent =
       tokens?: Record<string, unknown>;
       turns?: number;
       model?: Record<string, unknown>;
+      /** Structured checklist on plan-only terminal results (§4.9). */
+      plan?: {
+        brief?: string;
+        steps: Array<{ title: string; status: string }>;
+      };
+    }
+  | {
+      type: "task_plan";
+      brief?: string;
+      steps: Array<{ title: string; status: string }>;
     }
   | {
       type: "error";

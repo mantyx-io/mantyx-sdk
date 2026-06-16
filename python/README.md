@@ -296,12 +296,17 @@ class MantyxClient:
 
 `AsyncMantyxClient` accepts an `httpx.AsyncClient` instead.
 
+## Task planning (`plan` / `run_plan`)
+
+Opt-in multi-step checklists. Pass `plan=True` or `plan={"steps": [...], "brief": "..."}` on `run_agent` / `session.send`. For **plan-only** runs, use `client.run_plan(...)` or `session.run_plan(...)` — the structured checklist is on `result.plan`. Helper: `plan_only(steps=..., brief=...)`. See `docs/agent-runs-protocol.md` §4.9.
+
 ### Methods
 
 | Method                                          | Returns (sync)                       |
 | ----------------------------------------------- | ------------------------------------ |
 | `list_models()`                                 | `ModelCatalog`                       |
 | `run_agent(...)`                                | `RunResult`                          |
+| `run_plan(...)`                                 | `RunResult` (plan-only)              |
 | `stream_agent(...)`                             | `Iterator[RunEvent]`                 |
 | `create_session(...)`                           | `AgentSession`                       |
 | `resume_session(session_id, *, tools=None)`     | `AgentSession`                       |
