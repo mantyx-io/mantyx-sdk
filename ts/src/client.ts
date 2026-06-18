@@ -27,6 +27,69 @@ import { toToolParametersWire } from "./zod-to-json-schema.js";
 
 export const DEFAULT_BASE_URL = "https://app.mantyx.io";
 
+/** Inline file bytes for a user message (base64, no data-URL prefix). */
+export interface InputFileAttachment {
+  type: "input_file";
+  mimeType: string;
+  filename: string;
+  data: string;
+}
+
+/** HTTPS URL the provider fetches as a user-message file input. */
+export interface InputFileUrlAttachment {
+  type: "input_file_url";
+  url: string;
+  mimeType?: string;
+  filename?: string;
+}
+
+/** File input attached to a user message on `POST /agent-runs` or session turns. */
+export type MessageAttachment = InputFileAttachment | InputFileUrlAttachment;
+
+/** Metadata for an inline file on replay-only `user_message` frames (no bytes). */
+export interface InputFileAttachmentMetadata {
+  type: "input_file";
+  mimeType: string;
+  filename: string;
+  size: number;
+}
+
+/** Metadata for a URL file on replay-only `user_message` frames. */
+export interface InputFileUrlAttachmentMetadata {
+  type: "input_file_url";
+  url: string;
+  mimeType?: string;
+  filename?: string;
+}
+
+/** Attachment metadata on session-event `user_message` replay frames. */
+export type AttachmentMetadata = InputFileAttachmentMetadata | InputFileUrlAttachmentMetadata;
+
+/** One entry in a multi-role `messages` array. */
+export interface ConversationMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+  attachments?: MessageAttachment[];
+}
+
+/** Build an inline file attachment for the last user message in a run. */
+export function inputFileAttachment(opts: {
+  mimeType: string;
+  filename: string;
+  data: string;
+}): InputFileAttachment {
+  return { type: "input_file", ...opts };
+}
+
+/** Build a URL file attachment for the last user message in a run. */
+export function inputFileUrlAttachment(opts: {
+  url: string;
+  mimeType?: string;
+  filename?: string;
+}): InputFileUrlAttachment {
+  return { type: "input_file_url", ...opts };
+}
+
 export interface MantyxClientOptions {
   /**
    * Workspace API key (token prefix `mantyx_`) **or** a MANTYX OAuth 2.0
@@ -246,7 +309,14 @@ export interface AgentSpecBase {
 
 export interface RunSpec extends AgentSpecBase {
   prompt?: string;
-  messages?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  messages?: ConversationMessage[];
+  /**
+   * Shorthand for a single user turn with file inputs. When `prompt` is set
+   * and `messages` is omitted, the SDK builds a one-entry `messages` array.
+   * Ignored when `messages` is provided. See `docs/agent-runs-protocol.md`
+   * §4.0.1.
+   */
+  attachments?: MessageAttachment[];
   /** Receives streaming assistant text deltas. */
   onAssistantDelta?: (delta: string) => void;
   /** Receives raw events (assistant_message, local_tool_call, tool_result, ...) for advanced consumers. */
@@ -754,6 +824,8 @@ export interface CancelledEvent extends RunEventBase {
 export interface UserMessageEvent extends RunEventBase {
   type: "user_message";
   text: string;
+  /** Present on session-event replay when the user turn carried file inputs. */
+  attachments?: AttachmentMetadata[];
 }
 
 export type RunEvent =
@@ -781,7 +853,7 @@ export interface SessionInfo {
   lastUsedAt: string;
   endedAt: string | null;
   agentSpec: AgentSpecBase;
-  messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  messages: ConversationMessage[];
   /** Metadata that was attached to the session at create time, returned for observability. */
   metadata: Record<string, string>;
 }
@@ -895,6 +967,7 @@ export class MantyxClient {
         body: serializeAgentSpec(spec, {
           prompt: spec.prompt,
           messages: spec.messages,
+          attachments: spec.attachments,
         }),
       });
       return await this.driveRun(created.runId, handlers, {
@@ -940,6 +1013,7 @@ export class MantyxClient {
         body: serializeAgentSpec(spec, {
           prompt: spec.prompt,
           messages: spec.messages,
+          attachments: spec.attachments,
         }),
       });
       yield* this.streamRunEvents(created.runId, handlers, spec.signal);
@@ -1477,10 +1551,16 @@ export class AgentSession {
   }
 
   async send(
-    prompt: string,
+    promptOrMessages: string | ConversationMessage[],
     opts: {
       onAssistantDelta?: (s: string) => void;
       signal?: AbortSignal;
+      /**
+       * File inputs for a single `prompt` turn. Ignored when the first
+       * argument is a `messages` array. See `docs/agent-runs-protocol.md`
+       * §4.0.1.
+       */
+      attachments?: MessageAttachment[];
       /**
        * Per-message metadata override. Server-side this is merged on top of
        * the session's metadata at run-creation time (run-level keys win).
@@ -1524,7 +1604,7 @@ export class AgentSession {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
       method: "POST",
       path: `/agent-sessions/${encodeURIComponent(this.id)}/messages`,
-      body: this.buildSessionMessageBody(prompt, opts),
+      body: this.buildSessionMessageBody(promptOrMessages, opts),
     });
     return this.client.driveRun(created.runId, this.handlers, {
       ...(opts.onAssistantDelta ? { onAssistantDelta: opts.onAssistantDelta } : {}),
@@ -1533,9 +1613,10 @@ export class AgentSession {
   }
 
   async *stream(
-    prompt: string,
+    promptOrMessages: string | ConversationMessage[],
     opts: {
       signal?: AbortSignal;
+      attachments?: MessageAttachment[];
       metadata?: Record<string, string>;
       reasoningLevel?: ReasoningLevel;
       outputSchema?: OutputSchema;
@@ -1548,14 +1629,15 @@ export class AgentSession {
     const created = await this.client.request<{ runId: string; streamUrl: string }>({
       method: "POST",
       path: `/agent-sessions/${encodeURIComponent(this.id)}/messages`,
-      body: this.buildSessionMessageBody(prompt, opts),
+      body: this.buildSessionMessageBody(promptOrMessages, opts),
     });
     yield* this.client.streamRunEvents(created.runId, this.handlers, opts.signal);
   }
 
   private buildSessionMessageBody(
-    prompt: string,
+    promptOrMessages: string | ConversationMessage[],
     opts: {
+      attachments?: MessageAttachment[];
       metadata?: Record<string, string>;
       reasoningLevel?: ReasoningLevel;
       outputSchema?: OutputSchema;
@@ -1565,7 +1647,14 @@ export class AgentSession {
       plan?: PlanSpec;
     },
   ): Record<string, unknown> {
-    const body: Record<string, unknown> = { prompt };
+    const body: Record<string, unknown> = serializeTurnInput(
+      typeof promptOrMessages === "string"
+        ? { prompt: promptOrMessages, attachments: opts.attachments }
+        : { messages: promptOrMessages },
+    );
+    if (!("prompt" in body) && !("messages" in body)) {
+      throw new MantyxError("Either `prompt` or `messages` is required");
+    }
     if (this.tools.length > 0) body.tools = serializeToolRefs(this.tools);
     if (opts.metadata && Object.keys(opts.metadata).length > 0) body.metadata = opts.metadata;
     if (opts.reasoningLevel !== undefined) {
@@ -1593,7 +1682,7 @@ export class AgentSession {
    * Plan-only session turn. Sugar for `send(prompt, { plan: planOnly(...) })`.
    */
   async runPlan(
-    prompt: string,
+    promptOrMessages: string | ConversationMessage[],
     opts: {
       onAssistantDelta?: (s: string) => void;
       signal?: AbortSignal;
@@ -1608,7 +1697,7 @@ export class AgentSession {
     } = {},
   ): Promise<RunResult> {
     const { steps, brief, ...rest } = opts;
-    return this.send(prompt, {
+    return this.send(promptOrMessages, {
       ...rest,
       plan: planOnly({
         ...(steps !== undefined ? { steps } : {}),
@@ -1617,7 +1706,7 @@ export class AgentSession {
     });
   }
 
-  async history(): Promise<Array<{ role: "user" | "assistant" | "system"; content: string }>> {
+  async history(): Promise<ConversationMessage[]> {
     const info = await this.client.getSessionInfo(this.id);
     return info.messages;
   }
@@ -1638,12 +1727,50 @@ export class AgentSession {
 
 // ---------------------------------------------------------------- Helpers
 
+function serializeTurnInput(input: {
+  prompt?: string;
+  messages?: ConversationMessage[];
+  attachments?: MessageAttachment[];
+}): Record<string, unknown> {
+  if (input.messages !== undefined) {
+    return { messages: input.messages };
+  }
+  if (input.prompt !== undefined) {
+    if (input.attachments && input.attachments.length > 0) {
+      return {
+        messages: [{ role: "user", content: input.prompt, attachments: input.attachments }],
+      };
+    }
+    return { prompt: input.prompt };
+  }
+  return {};
+}
+
+function hasNonEmptySystemMessage(messages?: ConversationMessage[]): boolean {
+  return (
+    messages?.some((m) => m.role === "system" && m.content.trim().length > 0) ?? false
+  );
+}
+
 function serializeAgentSpec(
   spec: AgentSpecBase,
-  extra: { prompt?: string; messages?: Array<{ role: string; content: string }> } = {},
+  extra: {
+    prompt?: string;
+    messages?: ConversationMessage[];
+    attachments?: MessageAttachment[];
+  } = {},
 ): Record<string, unknown> {
-  if (!spec.agentId && (typeof spec.systemPrompt !== "string" || spec.systemPrompt.length === 0)) {
-    throw new MantyxError("Either `agentId` or `systemPrompt` is required");
+  const messagesForIdentity = extra.messages ?? (extra.attachments?.length
+    ? [{ role: "user" as const, content: extra.prompt ?? "", attachments: extra.attachments }]
+    : undefined);
+  if (
+    !spec.agentId &&
+    (typeof spec.systemPrompt !== "string" || spec.systemPrompt.length === 0) &&
+    !hasNonEmptySystemMessage(messagesForIdentity)
+  ) {
+    throw new MantyxError(
+      "Either `agentId`, `systemPrompt`, or a non-empty `system` message in `messages` is required",
+    );
   }
   const body: Record<string, unknown> = {
     tools: serializeToolRefs(spec.tools ?? []),
@@ -1672,8 +1799,7 @@ function serializeAgentSpec(
   }
   if (spec.budgets) body.budgets = spec.budgets;
   if (spec.metadata && Object.keys(spec.metadata).length > 0) body.metadata = spec.metadata;
-  if (extra.prompt !== undefined) body.prompt = extra.prompt;
-  if (extra.messages !== undefined) body.messages = extra.messages;
+  Object.assign(body, serializeTurnInput(extra));
   return body;
 }
 

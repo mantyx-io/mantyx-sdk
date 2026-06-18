@@ -162,8 +162,36 @@ func (c *Client) ListModels(ctx context.Context) (ModelCatalog, error) {
 
 // Message is one entry in the conversation transcript.
 type Message struct {
-	Role    string `json:"role"` // user | assistant | system
-	Content string `json:"content"`
+	Role    string           `json:"role"` // user | assistant | system
+	Content string           `json:"content"`
+	Attachments []map[string]any `json:"attachments,omitempty"`
+}
+
+// InputFileAttachment builds an inline file attachment for the last user
+// message in a run. See docs/agent-runs-protocol.md §4.0.1.
+func InputFileAttachment(mimeType, filename, data string) map[string]any {
+	return map[string]any{
+		"type":     "input_file",
+		"mimeType": mimeType,
+		"filename": filename,
+		"data":     data,
+	}
+}
+
+// InputFileURLAttachment builds a URL file attachment for the last user
+// message in a run.
+func InputFileURLAttachment(url string, mimeType, filename string) map[string]any {
+	out := map[string]any{
+		"type": "input_file_url",
+		"url":  url,
+	}
+	if mimeType != "" {
+		out["mimeType"] = mimeType
+	}
+	if filename != "" {
+		out["filename"] = filename
+	}
+	return out
 }
 
 // RunSpec describes a one-shot run.
@@ -182,6 +210,10 @@ type RunSpec struct {
 	Tools        []ToolRef
 	Prompt       string
 	Messages     []Message
+	// Attachments is shorthand for a single user turn with file inputs. When
+	// Prompt is set and Messages is empty, the SDK builds a one-entry
+	// Messages slice. Ignored when Messages is non-empty.
+	Attachments  []map[string]any
 	// ReasoningLevel controls provider thinking strength on reasoning models.
 	// Build one with ReasoningOff/Low/Medium/High or ReasoningEffort(n) where
 	// n ∈ [0, 100]. Nil leaves the field unset (the server then falls back to
@@ -865,8 +897,8 @@ type GetSessionEventsOptions struct {
 // ----- One-shot run ---------------------------------------------------------
 
 func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) {
-	if spec.AgentID == "" && spec.SystemPrompt == "" {
-		return RunResult{}, &Error{Code: "invalid_request", Message: "either AgentID or SystemPrompt is required"}
+	if !agentIdentityPresent(spec.AgentID, spec.SystemPrompt, spec.Messages, spec.Attachments, spec.Prompt) {
+		return RunResult{}, &Error{Code: "invalid_request", Message: "either AgentID, SystemPrompt, or a non-empty system message in Messages is required"}
 	}
 	if err := spec.OutputSchema.validate(); err != nil {
 		return RunResult{}, err
@@ -1694,16 +1726,51 @@ func serializeRunSpec(spec RunSpec) map[string]any {
 	if spec.Plan != nil {
 		body["plan"] = spec.Plan
 	}
-	if spec.Prompt != "" {
-		body["prompt"] = spec.Prompt
-	}
-	if len(spec.Messages) > 0 {
-		body["messages"] = spec.Messages
+	for k, v := range serializeTurnInput(spec.Prompt, spec.Messages, spec.Attachments) {
+		body[k] = v
 	}
 	if len(spec.Metadata) > 0 {
 		body["metadata"] = spec.Metadata
 	}
 	return body
+}
+
+func agentIdentityPresent(agentID, systemPrompt string, messages []Message, attachments []map[string]any, prompt string) bool {
+	if agentID != "" {
+		return true
+	}
+	if systemPrompt != "" {
+		return true
+	}
+	identityMessages := messages
+	if len(identityMessages) == 0 && len(attachments) > 0 && prompt != "" {
+		identityMessages = []Message{{Role: "user", Content: prompt}}
+	}
+	for _, m := range identityMessages {
+		if m.Role == "system" && strings.TrimSpace(m.Content) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func serializeTurnInput(prompt string, messages []Message, attachments []map[string]any) map[string]any {
+	if len(messages) > 0 {
+		return map[string]any{"messages": messages}
+	}
+	if prompt != "" {
+		if len(attachments) > 0 {
+			return map[string]any{
+				"messages": []Message{{
+					Role:        "user",
+					Content:     prompt,
+					Attachments: attachments,
+				}},
+			}
+		}
+		return map[string]any{"prompt": prompt}
+	}
+	return map[string]any{}
 }
 
 // serializeToolBudgets returns a wire-shaped representation of a

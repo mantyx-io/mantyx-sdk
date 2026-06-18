@@ -40,6 +40,8 @@ export {
   DEFAULT_BASE_URL,
   parseRunOutput,
   planOnly,
+  inputFileAttachment,
+  inputFileUrlAttachment,
 } from "./client.js";
 export type {
   MantyxClientOptions,
@@ -69,6 +71,13 @@ export type {
   ThinkingDeltaEvent,
   AssistantMessageEvent,
   UserMessageEvent,
+  InputFileAttachment,
+  InputFileUrlAttachment,
+  MessageAttachment,
+  InputFileAttachmentMetadata,
+  InputFileUrlAttachmentMetadata,
+  AttachmentMetadata,
+  ConversationMessage,
   ServerToolResultEvent,
   LocalToolCallEvent,
   LocalToolResultInEvent,

@@ -382,8 +382,59 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
 }
 ```
 
-`POST /agent-runs` additionally accepts `prompt` _or_ `messages` (an array of
-`{role, content}`). Sending both is a `400 invalid_request`.
+`POST /agent-runs` additionally accepts `prompt` _or_ `messages`. Sending both,
+or neither, is a `400 invalid_request`. See [§4.0.1](#401-multi-role-messages-and-file-inputs)
+for the `messages` shape and file attachments.
+
+### 4.0.1 Multi-role `messages` and file inputs
+
+Instead of a single `prompt` string, supply a `messages` array to send a
+multi-role conversation in one request. The same shape is accepted on
+`POST /agent-sessions/:id/messages` (where it represents the new turn(s) to
+append to the session).
+
+```jsonc
+{
+  "modelId": "openai:gpt-5.5",
+  "messages": [
+    { "role": "system", "content": "You are a terse assistant." },
+    { "role": "user", "content": "Earlier question" },
+    { "role": "assistant", "content": "Earlier answer" },
+    {
+      "role": "user",
+      "content": "What's in this file?",
+      "attachments": [
+        { "type": "input_file", "mimeType": "application/pdf", "filename": "report.pdf", "data": "<base64>" },
+        { "type": "input_file_url", "url": "https://example.com/image.png", "mimeType": "image/png" }
+      ]
+    }
+  ]
+}
+```
+
+Rules:
+
+- **`role`** is one of `user`, `assistant`, `system`. `system` messages are
+  applied as additional system context, **appended after** the spec's
+  `systemPrompt` (both apply). A run is valid when it has an `agentId`, a
+  `systemPrompt`, **or** at least one non-empty `system` message in `messages`.
+- The **last non-system message must be `role: "user"`** (`400` otherwise) —
+  it is the current turn the model responds to, and the only message whose
+  `attachments` are sent to the model.
+- Max 200 messages; each `content` ≤ 200,000 characters.
+
+**File attachments** (`attachments` on the last `user` message, max 20):
+
+| `type`            | Fields                                              | Notes                                                                                     |
+| ----------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `input_file`      | `mimeType`, `filename`, `data` (base64, no data-URL prefix) | Inline bytes. Total inline bytes per run are capped (currently 5 MB); larger files must use a URL. |
+| `input_file_url`  | `url` (https only), `mimeType?`, `filename?`        | Publicly fetchable HTTPS URL. The provider fetches it directly.                            |
+
+Allowed MIME types match the workspace chat allowlist (images, PDF, DOCX,
+and `text/*` subtypes). Disallowed types, non-HTTPS URLs, malformed base64, or
+oversized inline payloads return `400 invalid_request`. Attachments on older
+history turns are not re-sent to the model (text only); only the current
+turn's files reach the LLM.
 
 ### 4.1 Triggering a persisted MANTYX agent (`agentId`)
 
@@ -872,23 +923,27 @@ Reviews fire every **`interval` LLM calls** (`completeTurn` invocations) at
 the bottom of tool-emitting rounds. Default interval is **5** when enabled.
 
 ```jsonc
+"supervisor": true   // enable with platform defaults
+
 "supervisor": {
   "interval": 5,
   "modelId": "platform:demo"
 }
 
 // or:
-"supervisor": false   // explicitly disable the platform judge for this run
+"supervisor": false   // explicitly disable (same as omitting the field)
 ```
 
 | Field             | Type            | Required | Notes                                                                                                                        |
 | ----------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| (literal `true`)  | `true`          | no       | Enables the run supervisor with platform defaults (`interval` 5, workspace judge model).                                       |
 | `interval`        | integer ≥ 1     | no       | Defaults to **5** when the supervisor is enabled and `interval` is omitted. Capped at **100** server-side.                   |
 | `modelId`         | string          | no       | Judge model selector (same grammar as `modelId`). Falls back to workspace `defaultSupervisorModelId`, then workspace default model. |
 | (literal `false`) | `false`         | no       | Disables the run supervisor for this run. `loopDetection` and `toolBudgets` still apply.                                       |
 
-**Defaults.** When `supervisor` is **omitted**, MANTYX enables the platform
-LLM judge on ephemeral runs. Pass `"supervisor": false` to opt out.
+**Defaults.** When `supervisor` is **omitted** (or `false`), MANTYX does **not**
+run the platform LLM judge on ephemeral API runs. Pass `"supervisor": true`,
+`"supervisor": {}`, or a config object to opt in.
 
 **SDK-only usage.** When calling `@mantyx/ts-sdk` directly (not via
 `POST /agent-runs`), the supervisor is **off unless explicitly configured**:
@@ -919,9 +974,8 @@ the verdict by the time the event arrives.
 ### 4.9 `plan` (task plan / plan-only)
 
 `plan` turns on the in-product **task plan** — the same live-checklist engine
-that powers MANTYX chat / Hive Mind. It is **opt-in** on API/ephemeral runs
-(unlike the supervisor, which is default-on) because every planned run pays
-for at least one extra classifier LLM call.
+that powers MANTYX chat / Hive Mind. It is **opt-in** on API/ephemeral runs,
+same as `supervisor` (§4.8), because both features add extra LLM calls.
 
 ```jsonc
 "plan": true        // auto: classify, emit a task_plan event, track during the run
@@ -1117,11 +1171,17 @@ conversation (stable across paging). Reconstructed turns map as:
 `user_message` is a **replay/restore-only** frame — the live SSE stream never
 emits it (the client already knows the prompt it sent), but history
 restoration needs it to rebuild the user side of the conversation. This first
-cut reconstructs from the durable transcript (`role`/`content` only); tool
-calls are not replayed here.
+cut reconstructs from the durable transcript (`role`/`content`); tool
+calls are not replayed here. When a user turn carried file inputs, the frame
+also includes an `attachments` array of **metadata** (no bytes):
+`{ type: "input_file", mimeType, filename, size }` or
+`{ type: "input_file_url", url, mimeType?, filename? }`.
 
 `POST /agent-sessions/{id}/messages` queues a new run scoped to the session
-and returns `{ runId, streamUrl }` just like a one-shot run. Body:
+and returns `{ runId, streamUrl }` just like a one-shot run. Body accepts a
+single `prompt` **or** a `messages` array (same shape and file-attachment
+rules as [§4.0.1](#401-multi-role-messages-and-file-inputs); the messages
+represent the new turn(s) appended to the session):
 
 ```jsonc
 {
@@ -1133,7 +1193,8 @@ and returns `{ runId, streamUrl }` just like a one-shot run. Body:
 ```
 
 The server prepends the session's prior messages, runs the model, and on
-success appends the new user/assistant turns back to the session row. Local
+success appends the new user/assistant turns back to the session row (file
+attachments are stored as metadata only). Local
 tool **handlers** are _not_ persisted: the session stores definitions
 (name, schema, description) so that a restarted SDK can re-bind handlers and
 keep going.
@@ -1462,11 +1523,12 @@ A reference SDK should:
      them by default. Their presence depends on `reasoningLevel > 0` and
      on the active model exposing thought parts.
    - Accept `loopDetection`, `toolBudgets`, and `supervisor` from the caller
-     and pass them through unchanged (see §4.6 / §4.7 / §4.8). All three are
-     _additive_: omitting them keeps MANTYX's runtime defaults; passing
-     `loopDetection: false` or `supervisor: false` opts out; passing
-     `toolBudgets: {}` clears the defaults; passing entries layers caller
-     overrides on top of the defaults.
+     and pass them through unchanged (see §4.6 / §4.7 / §4.8). `loopDetection`
+     and `toolBudgets` are additive: omitting them keeps MANTYX's runtime
+     defaults; passing `loopDetection: false` opts out; passing `toolBudgets: {}`
+     clears the defaults. `supervisor` and `plan` are opt-in — omitting them
+     keeps both off; pass `supervisor: true` / `{}` / `{ interval?, modelId? }`
+     or `plan: true` / `{ … }` to enable.
    - Treat `loop_detected`, `tool_budget_exceeded`, and `supervisor` SSE
      events as observability-only — the server already substituted synthetic
      tool-results / steering nudges / supervisor verdicts where applicable, so

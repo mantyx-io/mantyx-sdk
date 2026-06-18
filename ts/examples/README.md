@@ -14,6 +14,7 @@ documented in each `README.md`.
 | `streaming/`          | Use `client.streamAgent()` to print assistant deltas to stdout.            |
 | `list-models/`        | Call `client.listModels()`, pretty-print, then run an agent on the first. |
 | `plan-only/`          | Plan-only run via `runPlan` — structured checklist, no agent loop.         |
+| `message-attachments/`| File inputs via `attachments`, `messages`, and `session.send`.             |
 
 All examples read configuration from environment variables:
 

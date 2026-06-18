@@ -29,6 +29,10 @@ console.log(r2.text);
 await session.end();
 ```
 
+## Messages & file attachments
+
+Runs and session turns accept either a `prompt` or a multi-role `messages` array. File inputs attach to the last user message. See [Messages & file attachments](/docs/agents/messages-and-attachments/) for helpers and examples.
+
 ## Resuming a session
 
 A session lives on the server. Resuming from a different process re-binds your local tool handlers — pass them via `resumeSession`:

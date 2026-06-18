@@ -500,3 +500,60 @@ def test_stream_agent_yields_events(mantyx_client: MantyxClient, mock_server: Mo
     types = [ev.type for ev in events]
     assert "assistant_delta" in types
     assert types[-1] == "result"
+
+
+def test_run_agent_builds_messages_from_prompt_attachments(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    from mantyx import input_file_attachment
+
+    mock_server.script_for_next_run = RunScript(
+        events=[ScriptEvent(kind="result", data={"subtype": "success", "text": "ok"})]
+    )
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="read this",
+        attachments=[
+            input_file_attachment(
+                mime_type="text/plain",
+                filename="note.txt",
+                data="aGVsbG8=",
+            )
+        ],
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["messages"] == [
+        {
+            "role": "user",
+            "content": "read this",
+            "attachments": [
+                {
+                    "type": "input_file",
+                    "mimeType": "text/plain",
+                    "filename": "note.txt",
+                    "data": "aGVsbG8=",
+                }
+            ],
+        }
+    ]
+
+
+def test_run_agent_accepts_system_message_without_system_prompt(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[ScriptEvent(kind="result", data={"subtype": "success", "text": "ok"})]
+    )
+    mantyx_client.run_agent(
+        messages=[
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["messages"] == [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "hi"},
+    ]

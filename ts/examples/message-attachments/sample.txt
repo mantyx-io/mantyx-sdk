@@ -1,0 +1,7 @@
+Quarterly notes — Q2 planning
+
+- Migrate billing tables from Postgres 14 to 16 by end of month.
+- Backfill historical invoice rows after schema cutover.
+- Run smoke tests on staging before promoting to production.
+
+Owner: platform team

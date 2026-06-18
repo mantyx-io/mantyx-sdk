@@ -843,6 +843,61 @@ func TestRunAgent_ClampsMalformedTokenBuckets(t *testing.T) {
 	}
 }
 
+func TestRunAgent_BuildsMessagesFromPromptAttachments(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "read this",
+		Attachments: []map[string]any{
+			InputFileAttachment("text/plain", "note.txt", "aGVsbG8="),
+		},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	msgs, ok := body["messages"].([]any)
+	if !ok || len(msgs) != 1 {
+		t.Fatalf("expected one message, got %#v", body["messages"])
+	}
+	msg, ok := msgs[0].(map[string]any)
+	if !ok || msg["role"] != "user" || msg["content"] != "read this" {
+		t.Fatalf("unexpected message: %#v", msgs[0])
+	}
+}
+
+func TestRunAgent_AcceptsSystemMessageWithoutSystemPrompt(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		Messages: []Message{
+			{Role: "system", Content: "be terse"},
+			{Role: "user", Content: "hi"},
+		},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+}
+
 func TestListModels(t *testing.T) {
 	server := newMockServer()
 	defer server.close()
