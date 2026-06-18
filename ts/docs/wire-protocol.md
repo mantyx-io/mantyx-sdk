@@ -142,13 +142,41 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
 }
 ```
 
+### 2.1.1 `messages` and file inputs
+
+Instead of `prompt`, send a `messages` array for multi-role input. Each entry
+is `{ role: "user" | "assistant" | "system", content, attachments? }`. `system`
+messages are merged after `systemPrompt`; the last non-system message must be a
+`user` turn. The last user message may carry up to 20 `attachments`:
+
+```jsonc
+{
+  "type": "input_file",
+  "mimeType": "application/pdf",
+  "filename": "report.pdf",
+  "data": "<base64>", // inline bytes; total inline ≤ 5 MB per run
+}
+// — or —
+{
+  "type": "input_file_url",
+  "url": "https://example.com/image.png", // https only; provider fetches it
+  "mimeType": "image/png", // optional
+}
+```
+
+See [`agent-runs-protocol.md` §4.0.1](./agent-runs-protocol.md) for the full
+rules (allowed MIME types, size caps, validation errors). On session-events
+replay, `user_message` frames include `attachments` **metadata** (no bytes).
+
 ### 2.2 Sessions
 
-Same body shape, posted to `POST /agent-sessions/:id/messages`. The session
-keeps the conversation history; per-message `tools`, `reasoningLevel`,
-`outputSchema`, `loopDetection`, `toolBudgets`, `supervisor`, and `plan`
-_replace_ the session's defaults for that single run only — the next run
-falls back to whatever the session was created with.
+Same body shape, posted to `POST /agent-sessions/:id/messages` (accepts either
+`prompt` or `messages`, including file attachments — the messages are the new
+turn(s) appended to the session). The session keeps the conversation history;
+per-message `tools`, `reasoningLevel`, `outputSchema`, `loopDetection`,
+`toolBudgets`, `supervisor`, and `plan` _replace_ the session's defaults for
+that single run only — the next run falls back to whatever the session was
+created with.
 
 ---
 
@@ -683,9 +711,9 @@ appended (`redirect`) or the next turn was forced tools-disabled
 (`finalize`). SDK clients should render a status note and **not** try to
 steer the run themselves.
 
-Pass `"supervisor": false` in the spec (§8.4) to disable the platform judge
-for a run. Omission keeps the runtime default (supervisor **enabled** on
-ephemeral runs).
+Pass `"supervisor": true` or `"supervisor": {}` in the spec (§8.4) to enable
+the platform judge for a run. Omission (or `"supervisor": false`) keeps the
+supervisor **off** on ephemeral API runs.
 
 ### 4.8 Terminal events
 
@@ -1137,17 +1165,20 @@ measured at the bottom of tool-emitting rounds. Default interval is **5**
 when the field is omitted.
 
 ```jsonc
+"supervisor": true   // enable with platform defaults (interval 5, workspace judge model)
+
 "supervisor": {
   "interval": 5,              // optional — LLM calls between reviews; default 5
   "modelId": "platform:demo"  // optional — judge model; see resolution below
 }
 
 // or:
-"supervisor": false   // explicitly disable the platform judge for this run
+"supervisor": false   // explicitly disable (same as omitting the field)
 ```
 
 | Field      | Type            | Notes                                                                                                                              |
 | ---------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| (literal `true`) | `true`    | Enables the run supervisor with platform defaults (`interval` 5, workspace judge model).                                             |
 | `interval` | integer ≥ 1     | Optional. Default **5** when omitted. Capped at **100** server-side.                                                                |
 | `modelId`  | string          | Optional. Same selector grammar as top-level `modelId` (§2). When omitted, the platform resolves the judge model from the workspace default supervisor model, then the workspace default model. |
 | (literal `false`) | `false`  | Disables the run supervisor for this run. Loop detection and tool budgets still apply.                                             |
@@ -1158,15 +1189,17 @@ when the field is omitted.
 2. Workspace `defaultSupervisorModelId` (Settings → Workspace → General)
 3. Workspace default model (same as omitting top-level `modelId`)
 
-**Defaults.** When `supervisor` is **omitted**, MANTYX enables the platform
-LLM judge on ephemeral runs (web chat enables it separately via the chat
-runner). Pass `"supervisor": false` to opt out.
+**Defaults.** When `supervisor` is **omitted** (or `false`), MANTYX does **not**
+run the platform LLM judge on ephemeral API runs — same opt-in semantics as
+`plan` (§8.5). Pass `"supervisor": true`, `"supervisor": {}`, or a config
+object to enable. Web chat enables the supervisor separately via the chat
+runner.
 
 **SDK-only runs.** When a caller uses `@mantyx/ts-sdk` directly (not via
 `POST /agent-runs`), the supervisor is **off unless explicitly configured**:
 pass a `RunAgentSupervisor` object with a `review` callback to enable it, or
-pass `supervisor: false` (or omit the field) to keep it disabled. The wire
-field above controls the **platform-hosted** judge on ephemeral API runs only.
+omit the field to keep it disabled. The wire field above controls the
+**platform-hosted** judge on ephemeral API runs only.
 
 Each review emits a SSE `supervisor` event (§4.7). Supervisor LLM usage is
 recorded under the `supervisor` usage surface for cost attribution.
@@ -1175,8 +1208,8 @@ recorded under the `supervisor` usage surface for cost attribution.
 
 The optional `plan` field turns on the in-product **task plan** — the same
 engine that drives the live checklist in MANTYX chat / Hive Mind. It is
-**opt-in** on ephemeral runs (unlike the supervisor, which is default-on),
-because every planned run pays for at least one extra classifier LLM call.
+**opt-in** on ephemeral runs, same as `supervisor` (§8.4), because both
+features add extra LLM calls.
 
 ```jsonc
 "plan": true        // auto: pre-flight classify, emit task_plan, track during the run
@@ -1406,11 +1439,13 @@ A reference SDK should:
       JSON shape via the provider, but transient model errors can still
       produce strings that fail to parse in rare cases.
 - [ ] Accept `loopDetection`, `toolBudgets`, and `supervisor` from the caller
-      and pass them through unchanged (see §8). All three are _additive_ —
-      omitting them keeps the runtime defaults; passing `loopDetection: false`
-      or `supervisor: false` opts out; passing `toolBudgets: {}` clears the
-      defaults; passing entries layers caller overrides on top of the defaults.
-      Do **not** translate to vendor-specific knobs.
+      and pass them through unchanged (see §8). `loopDetection` and
+      `toolBudgets` are additive — omitting them keeps the runtime defaults;
+      passing `loopDetection: false` opts out; passing `toolBudgets: {}`
+      clears the defaults. `supervisor` and `plan` are opt-in — omitting them
+      keeps both off; pass `supervisor: true` / `{}` / `{ interval?, modelId? }`
+      or `plan: true` / `{ … }` to enable. Do **not** translate to
+      vendor-specific knobs.
 - [ ] Treat `loop_detected`, `tool_budget_exceeded`, and `supervisor` SSE
       events as observability-only (see §4.5 / §4.6 / §4.7). Surface them as
       status notes / log lines / telemetry — the server already substituted

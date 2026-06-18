@@ -13,6 +13,7 @@ Each subdirectory is a **self-contained project** with its own `pyproject.toml` 
 | `streaming/`          | Use `client.stream_agent()` to print assistant deltas to stdout.             |
 | `list-models/`        | Call `client.list_models()`, pretty-print, then run an agent on the first.   |
 | `plan-only/`          | Plan-only run via `run_plan` — structured checklist, no agent loop.          |
+| `message-attachments/`| File inputs via `attachments`, `messages`, and `session.send`.               |
 
 All examples read configuration from environment variables:
 

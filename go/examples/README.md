@@ -23,5 +23,6 @@ To run any example after publishing the SDK as a real Go module, delete the
 | `a2a-tools/`     | Combine remote (`MantyxA2A`) + local (`LocalA2A`) Agent2Agent peers.                   |
 | `mcp-tools/`     | Combine remote (`MantyxMcp`) + local (`LocalMcp`) MCP servers.                         |
 | `plan-only/`     | Plan-only run via `RunPlan` — structured checklist, no agent loop.                     |
+| `message-attachments/` | File inputs via `Attachments`, `Messages`, and `WithAttachments`.                |
 
 All examples use `MANTYX_API_KEY` and `MANTYX_WORKSPACE_SLUG` env vars.

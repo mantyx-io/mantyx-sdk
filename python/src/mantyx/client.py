@@ -59,6 +59,16 @@ from .tools import (
     plan_only,
     serialize_tool_refs,
 )
+from .types import (
+    AgentSpec,
+    AttachmentMetadata,
+    ConversationMessage,
+    MessageAttachment,
+    Metadata,
+    RunBudgets,
+    RunEventData,
+    UserMessageEventData,
+)
 
 DEFAULT_BASE_URL = "https://app.mantyx.io"
 DEFAULT_TIMEOUT_S = 60.0
@@ -67,9 +77,6 @@ DEFAULT_TIMEOUT_S = 60.0
 # ``None``/``False`` are valid wire values for ``loop_detection`` (``False``
 # disables the guard) — the helpers need to tell "omit" from "set to that".
 _UNSET: Any = object()
-
-
-# --------------------------------------------------------------------- Data
 
 
 @dataclass
@@ -102,13 +109,19 @@ class RunEvent:
 
     seq: int
     type: str
-    data: dict[str, Any] = field(default_factory=dict)
+    data: RunEventData = field(default_factory=dict)
 
     @property
     def text(self) -> str:
         """Convenience for `assistant_delta` / `assistant_message` events."""
         v = self.data.get("text")
         return v if isinstance(v, str) else ""
+
+    def user_message(self) -> UserMessageEventData | None:
+        """Typed view of ``user_message`` replay frames, if applicable."""
+        if self.type != "user_message":
+            return None
+        return cast(UserMessageEventData, self.data)
 
 
 @dataclass
@@ -191,9 +204,9 @@ class SessionInfo:
     created_at: str
     last_used_at: str
     ended_at: str | None
-    agent_spec: dict[str, Any]
-    messages: list[dict[str, str]]
-    metadata: dict[str, str]
+    agent_spec: AgentSpec
+    messages: list[ConversationMessage]
+    metadata: Metadata
 
 
 @dataclass
@@ -322,20 +335,21 @@ class MantyxClient:
         self,
         *,
         prompt: str | None = None,
-        messages: Sequence[Mapping[str, str]] | None = None,
+        messages: Sequence[ConversationMessage] | None = None,
+        attachments: Sequence[MessageAttachment] | None = None,
         system_prompt: str | None = None,
         agent_id: str | None = None,
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
-        budgets: Mapping[str, Any] | None = None,
-        metadata: Mapping[str, str] | None = None,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
+        plan: PlanSpec | None = _UNSET,
+        budgets: RunBudgets | None = None,
+        metadata: Metadata | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
@@ -360,11 +374,10 @@ class MantyxClient:
                 plan=plan,
                 budgets=budgets,
                 metadata=metadata,
+                prompt=prompt,
+                messages=messages,
+                attachments=attachments,
             )
-            if prompt is not None:
-                body["prompt"] = prompt
-            if messages is not None:
-                body["messages"] = list(messages)
 
             created = self._request("POST", "/agent-runs", body)
             run_id = str((created or {}).get("runId") or "")
@@ -385,19 +398,20 @@ class MantyxClient:
         self,
         *,
         prompt: str | None = None,
-        messages: Sequence[Mapping[str, str]] | None = None,
+        messages: Sequence[ConversationMessage] | None = None,
+        attachments: Sequence[MessageAttachment] | None = None,
         system_prompt: str | None = None,
         agent_id: str | None = None,
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-        budgets: Mapping[str, Any] | None = None,
-        metadata: Mapping[str, str] | None = None,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
+        budgets: RunBudgets | None = None,
+        metadata: Metadata | None = None,
         steps: Sequence[str] | None = None,
         brief: str | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
@@ -408,6 +422,7 @@ class MantyxClient:
         return self.run_agent(
             prompt=prompt,
             messages=messages,
+            attachments=attachments,
             system_prompt=system_prompt,
             agent_id=agent_id,
             model_id=model_id,
@@ -429,20 +444,21 @@ class MantyxClient:
         self,
         *,
         prompt: str | None = None,
-        messages: Sequence[Mapping[str, str]] | None = None,
+        messages: Sequence[ConversationMessage] | None = None,
+        attachments: Sequence[MessageAttachment] | None = None,
         system_prompt: str | None = None,
         agent_id: str | None = None,
         model_id: str | None = None,
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
-        budgets: Mapping[str, Any] | None = None,
-        metadata: Mapping[str, str] | None = None,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
+        plan: PlanSpec | None = _UNSET,
+        budgets: RunBudgets | None = None,
+        metadata: Metadata | None = None,
     ) -> Iterator[RunEvent]:
         tools_list: list[ToolRef] | None = list(tools) if tools else None
         sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
@@ -460,11 +476,10 @@ class MantyxClient:
             plan=plan,
             budgets=budgets,
             metadata=metadata,
+            prompt=prompt,
+            messages=messages,
+            attachments=attachments,
         )
-        if prompt is not None:
-            body["prompt"] = prompt
-        if messages is not None:
-            body["messages"] = list(messages)
 
         created = self._request("POST", "/agent-runs", body)
         run_id = str((created or {}).get("runId") or "")
@@ -495,13 +510,13 @@ class MantyxClient:
         name: str | None = None,
         tools: Sequence[ToolRef] | None = None,
         reasoning_level: ReasoningLevel | None = None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
-        budgets: Mapping[str, Any] | None = None,
-        metadata: Mapping[str, str] | None = None,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
+        plan: PlanSpec | None = _UNSET,
+        budgets: RunBudgets | None = None,
+        metadata: Metadata | None = None,
     ) -> AgentSession:
         tools_list: list[ToolRef] | None = list(tools) if tools else None
         # Resolve once at session creation; the session keeps the resolved
@@ -558,7 +573,7 @@ class MantyxClient:
     def list_sessions(
         self,
         *,
-        metadata: Mapping[str, str] | None = None,
+        metadata: Metadata | None = None,
         status: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
@@ -988,20 +1003,22 @@ class AgentSession:
 
     def send(
         self,
-        prompt: str,
+        prompt_or_messages: str | Sequence[ConversationMessage],
         *,
-        metadata: Mapping[str, str] | None = None,
+        attachments: Sequence[MessageAttachment] | None = None,
+        metadata: Metadata | None = None,
         reasoning_level: ReasoningLevel | None = None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
+        plan: PlanSpec | None = _UNSET,
         on_assistant_delta: Callable[[str], None] | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
     ) -> RunResult:
         body = self._build_message_body(
-            prompt,
+            prompt_or_messages,
+            attachments=attachments,
             metadata=metadata,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
@@ -1025,18 +1042,20 @@ class AgentSession:
 
     def stream(
         self,
-        prompt: str,
+        prompt_or_messages: str | Sequence[ConversationMessage],
         *,
-        metadata: Mapping[str, str] | None = None,
+        attachments: Sequence[MessageAttachment] | None = None,
+        metadata: Metadata | None = None,
         reasoning_level: ReasoningLevel | None = None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
+        plan: PlanSpec | None = _UNSET,
     ) -> Iterator[RunEvent]:
         body = self._build_message_body(
-            prompt,
+            prompt_or_messages,
+            attachments=attachments,
             metadata=metadata,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
@@ -1055,14 +1074,14 @@ class AgentSession:
 
     def run_plan(
         self,
-        prompt: str,
+        prompt_or_messages: str | Sequence[ConversationMessage],
         *,
-        metadata: Mapping[str, str] | None = None,
+        metadata: Metadata | None = None,
         reasoning_level: ReasoningLevel | None = None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
         steps: Sequence[str] | None = None,
         brief: str | None = None,
         on_assistant_delta: Callable[[str], None] | None = None,
@@ -1070,7 +1089,7 @@ class AgentSession:
     ) -> RunResult:
         """Plan-only session turn without executing the agent loop."""
         return self.send(
-            prompt,
+            prompt_or_messages,
             metadata=metadata,
             reasoning_level=reasoning_level,
             output_schema=output_schema,
@@ -1084,17 +1103,24 @@ class AgentSession:
 
     def _build_message_body(
         self,
-        prompt: str,
+        prompt_or_messages: str | Sequence[ConversationMessage],
         *,
-        metadata: Mapping[str, str] | None,
+        attachments: Sequence[MessageAttachment] | None = None,
+        metadata: Metadata | None,
         reasoning_level: ReasoningLevel | None,
-        output_schema: OutputSchema | Mapping[str, Any] | None = None,
-        loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-        tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-        supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-        plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
+        output_schema: OutputSchema | None = None,
+        loop_detection: LoopDetection | bool | None = _UNSET,
+        tool_budgets: ToolBudgets | None = _UNSET,
+        supervisor: Supervisor | bool | None = _UNSET,
+        plan: PlanSpec | None = _UNSET,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"prompt": prompt}
+        if isinstance(prompt_or_messages, str):
+            body = _serialize_turn_input(
+                prompt=prompt_or_messages,
+                attachments=attachments,
+            )
+        else:
+            body = _serialize_turn_input(messages=prompt_or_messages)
         if self._tools_for_resume:
             body["tools"] = serialize_tool_refs(self._tools_for_resume)
         if metadata:
@@ -1123,7 +1149,7 @@ class AgentSession:
                 body["plan"] = normalized_plan
         return body
 
-    def history(self) -> list[dict[str, str]]:
+    def history(self) -> list[ConversationMessage]:
         info = self.client.get_session_info(self.id)
         return info.messages
 
@@ -1229,6 +1255,36 @@ def _quote(s: str) -> str:
     return "".join(out)
 
 
+def _has_non_empty_system_message(messages: Sequence[ConversationMessage] | None) -> bool:
+    if not messages:
+        return False
+    return any(
+        str(m.get("role") or "") == "system" and str(m.get("content") or "").strip()
+        for m in messages
+        if isinstance(m, Mapping)
+    )
+
+
+def _serialize_turn_input(
+    *,
+    prompt: str | None = None,
+    messages: Sequence[ConversationMessage] | None = None,
+    attachments: Sequence[MessageAttachment] | None = None,
+) -> dict[str, Any]:
+    if messages is not None:
+        return {"messages": list(messages)}
+    if prompt is not None:
+        if attachments:
+            msg: ConversationMessage = {
+                "role": "user",
+                "content": prompt,
+                "attachments": list(attachments),
+            }
+            return {"messages": [msg]}
+        return {"prompt": prompt}
+    return {}
+
+
 def _serialize_agent_spec(
     *,
     agent_id: str | None,
@@ -1237,16 +1293,24 @@ def _serialize_agent_spec(
     name: str | None,
     tools: list[ToolRef] | None,
     reasoning_level: ReasoningLevel | None,
-    output_schema: OutputSchema | Mapping[str, Any] | None,
-    loop_detection: LoopDetection | Mapping[str, Any] | bool | None = _UNSET,
-    tool_budgets: ToolBudgets | Mapping[str, Mapping[str, Any]] | None = _UNSET,
-    supervisor: Supervisor | Mapping[str, Any] | bool | None = _UNSET,
-    plan: PlanSpec | Mapping[str, Any] | None = _UNSET,
-    budgets: Mapping[str, Any] | None,
-    metadata: Mapping[str, str] | None,
+    output_schema: OutputSchema | None,
+    loop_detection: LoopDetection | bool | None = _UNSET,
+    tool_budgets: ToolBudgets | None = _UNSET,
+    supervisor: Supervisor | bool | None = _UNSET,
+    plan: PlanSpec | None = _UNSET,
+    budgets: RunBudgets | None,
+    metadata: Metadata | None,
+    prompt: str | None = None,
+    messages: Sequence[ConversationMessage] | None = None,
+    attachments: Sequence[MessageAttachment] | None = None,
 ) -> dict[str, Any]:
-    if not agent_id and not system_prompt:
-        raise MantyxError("Either agent_id or system_prompt is required")
+    identity_messages: Sequence[ConversationMessage] | None = messages
+    if identity_messages is None and attachments and prompt is not None:
+        identity_messages = [{"role": "user", "content": prompt}]
+    if not agent_id and not system_prompt and not _has_non_empty_system_message(identity_messages):
+        raise MantyxError(
+            "Either agent_id, system_prompt, or a non-empty system message in messages is required"
+        )
     body: dict[str, Any] = {"tools": serialize_tool_refs(tools)}
     if system_prompt:
         body["systemPrompt"] = system_prompt
@@ -1282,6 +1346,7 @@ def _serialize_agent_spec(
         body["budgets"] = dict(budgets)
     if metadata:
         body["metadata"] = dict(metadata)
+    body.update(_serialize_turn_input(prompt=prompt, messages=messages, attachments=attachments))
     return body
 
 
@@ -1402,12 +1467,22 @@ def _parse_session_events(body: Mapping[str, Any]) -> list[RunEvent]:
 
 def _parse_session_info(body: Mapping[str, Any]) -> SessionInfo:
     msgs_raw = body.get("messages") if isinstance(body.get("messages"), list) else []
-    messages: list[dict[str, str]] = []
+    messages: list[ConversationMessage] = []
     for m in cast(Iterable[Any], msgs_raw):
         if isinstance(m, dict):
-            messages.append(
-                {"role": str(m.get("role") or ""), "content": str(m.get("content") or "")}
+            msg = cast(
+                ConversationMessage,
+                {
+                    "role": str(m.get("role") or ""),
+                    "content": str(m.get("content") or ""),
+                },
             )
+            attachments_raw = m.get("attachments")
+            if isinstance(attachments_raw, list):
+                msg["attachments"] = [
+                    cast(AttachmentMetadata, a) for a in attachments_raw if isinstance(a, dict)
+                ]
+            messages.append(msg)
     metadata_raw = body.get("metadata")
     metadata: dict[str, str] = {}
     if isinstance(metadata_raw, dict):
@@ -1420,7 +1495,7 @@ def _parse_session_info(body: Mapping[str, Any]) -> SessionInfo:
         created_at=str(body.get("createdAt") or ""),
         last_used_at=str(body.get("lastUsedAt") or ""),
         ended_at=cast(str | None, body.get("endedAt")),
-        agent_spec=cast(dict[str, Any], body.get("agentSpec") or {}),
+        agent_spec=cast(AgentSpec, body.get("agentSpec") or {}),
         messages=messages,
         metadata=metadata,
     )

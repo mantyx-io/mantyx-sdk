@@ -492,4 +492,56 @@ describe("MantyxClient.runAgent", () => {
       { title: "Snapshot schema", status: "pending" },
     ]);
   });
+
+  it("builds messages with attachments from prompt shorthand", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    const { inputFileAttachment } = await import("../src/index.js");
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "read this",
+      attachments: [
+        inputFileAttachment({
+          mimeType: "text/plain",
+          filename: "note.txt",
+          data: "aGVsbG8=",
+        }),
+      ],
+    });
+    expect(server.lastRunCreateBody).toEqual({
+      tools: [],
+      systemPrompt: "x",
+      messages: [
+        {
+          role: "user",
+          content: "read this",
+          attachments: [
+            {
+              type: "input_file",
+              mimeType: "text/plain",
+              filename: "note.txt",
+              data: "aGVsbG8=",
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("accepts system role in messages without systemPrompt", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({
+      messages: [
+        { role: "system", content: "be terse" },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(server.lastRunCreateBody?.messages).toEqual([
+      { role: "system", content: "be terse" },
+      { role: "user", content: "hi" },
+    ]);
+  });
 });

@@ -28,6 +28,8 @@ type sendOptions struct {
 	ToolBudgets      ToolBudgets
 	Supervisor       *Supervisor
 	Plan             *Plan
+	Messages         []Message
+	Attachments      []map[string]any
 }
 
 // WithAssistantDelta registers a callback that receives streaming assistant text.
@@ -95,6 +97,18 @@ func WithSupervisor(s *Supervisor) SendOption {
 // stored value. See `docs/agent-runs-protocol.md` §4.9.
 func WithPlan(p *Plan) SendOption {
 	return func(o *sendOptions) { o.Plan = p }
+}
+
+// WithMessages sends a multi-role turn (or turns) instead of a single prompt.
+// See docs/agent-runs-protocol.md §4.0.1.
+func WithMessages(msgs []Message) SendOption {
+	return func(o *sendOptions) { o.Messages = msgs }
+}
+
+// WithAttachments attaches file inputs to a single prompt turn. Ignored when
+// WithMessages is also set.
+func WithAttachments(atts ...map[string]any) SendOption {
+	return func(o *sendOptions) { o.Attachments = atts }
 }
 
 // Send sends a user turn and waits for the agent's reply.
@@ -178,7 +192,7 @@ func (s *Session) Stream(ctx context.Context, prompt string, opts ...SendOption)
 }
 
 func (s *Session) buildMessageBody(prompt string, o sendOptions) map[string]any {
-	body := map[string]any{"prompt": prompt}
+	body := serializeTurnInput(prompt, o.Messages, o.Attachments)
 	if s.toolsWire != nil {
 		body["tools"] = s.toolsWire
 	}

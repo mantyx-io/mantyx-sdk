@@ -34,7 +34,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
-from ._schema import ParametersInput
+from ._schema import JsonSchema, ParametersInput
 
 ToolName = str
 
@@ -60,7 +60,7 @@ class OutputSchema(TypedDict, total=False):
     """
 
     name: str
-    schema: Mapping[str, Any]
+    schema: JsonSchema
 
 
 class LoopDetection(TypedDict, total=False):
@@ -757,7 +757,7 @@ _TOOL_BUDGET_MAX_CALLS = 1000
 
 
 def normalize_loop_detection(
-    value: LoopDetection | Mapping[str, Any] | bool | None,
+    value: LoopDetection | bool | None,
 ) -> dict[str, Any] | bool | None:
     """Validate a :class:`LoopDetection` (or ``False``) value and return
     the wire-shaped value.
@@ -788,10 +788,10 @@ def normalize_loop_detection(
             f"or False; got {type(value).__name__}"
         )
     out: dict[str, Any] = {}
-    consec_raw = value.get("consecutiveThreshold")
+    consec_raw: Any = value.get("consecutiveThreshold")
     if consec_raw is None:
         consec_raw = value.get("consecutive_threshold")
-    hard_raw = value.get("hardCutoffThreshold")
+    hard_raw: Any = value.get("hardCutoffThreshold")
     if hard_raw is None:
         hard_raw = value.get("hard_cutoff_threshold")
     if consec_raw is not None:
@@ -825,7 +825,7 @@ def _assert_threshold(label: str, value: Any, *, minimum: int) -> int:
 
 
 def normalize_tool_budgets(
-    value: ToolBudgets | Mapping[str, Mapping[str, Any]] | None,
+    value: ToolBudgets | None,
 ) -> dict[str, dict[str, int]] | None:
     """Validate a :class:`ToolBudgets` value and return the wire-shaped dict.
 
@@ -884,7 +884,7 @@ _SUPERVISOR_INTERVAL_MAX = 100
 
 
 def normalize_supervisor(
-    value: Supervisor | Mapping[str, Any] | bool | None,
+    value: Supervisor | bool | None,
 ) -> bool | dict[str, Any] | None:
     """Validate a :class:`Supervisor` (or ``False``) value and return the
     wire-shaped dict (or ``False``).
@@ -923,7 +923,7 @@ def normalize_supervisor(
 
 
 def normalize_plan(
-    value: PlanSpec | Mapping[str, Any] | None,
+    value: PlanSpec | None,
 ) -> bool | dict[str, Any] | None:
     """Validate a :data:`PlanSpec` value and return the wire shape unchanged.
 
@@ -990,7 +990,7 @@ def parse_task_plan(raw: Any) -> TaskPlan | None:
 
 
 def normalize_output_schema(
-    value: OutputSchema | Mapping[str, Any] | None,
+    value: OutputSchema | None,
 ) -> dict[str, Any] | None:
     """Validate an :class:`OutputSchema` value and return the wire-shaped dict.
 
