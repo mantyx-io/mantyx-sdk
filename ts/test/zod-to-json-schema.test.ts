@@ -39,14 +39,14 @@ describe("zodToJsonSchema", () => {
   });
 
   it("falls back to manual Zod v4 _def.type walker when instance toJSONSchema is absent", () => {
-    const fieldA = { _def: { type: "number" } } as z.ZodType<unknown>;
-    const fieldB = { _def: { type: "number" } } as z.ZodType<unknown>;
+    const fieldA = { _def: { type: "number" } } as unknown as z.ZodType;
+    const fieldB = { _def: { type: "number" } } as unknown as z.ZodType;
     const fakeV4Object = {
       _def: {
         type: "object",
         shape: { a: fieldA, b: fieldB },
       },
-    } as z.ZodType<unknown>;
+    } as unknown as z.ZodType;
     expect(zodToJsonSchema(fakeV4Object)).toEqual({
       type: "object",
       properties: {
