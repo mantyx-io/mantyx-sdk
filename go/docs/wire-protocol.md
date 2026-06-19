@@ -690,6 +690,10 @@ See §8 for the wire-spec field that defines budgets.
 // finalize — the run was forced to wrap up on a tools-disabled turn
 { "seq": 25, "type": "supervisor",
   "data": { "action": "finalize", "reason": "Enough evidence to answer; further tool use is unlikely to help.", "llmCalls": 15 } }
+
+// reasoning — a mid-turn review fired while the agent was still thinking
+{ "seq": 18, "type": "supervisor",
+  "data": { "action": "redirect", "phase": "reasoning", "reason": "Overthinking; looping on the same edge case.", "redirect": "Commit to the straightforward approach and answer.", "llmCalls": 7 } }
 ```
 
 | Field      | Type    | Notes                                                                                                                                                                                                                         |
@@ -698,6 +702,7 @@ See §8 for the wire-spec field that defines budgets.
 | `reason`   | string  | One- or two-sentence explanation from the judge.                                                                                                                                                                              |
 | `redirect` | string  | Present when `action === "redirect"`: the steering message injected into the conversation (same text the agent sees as a user message). Omitted for `on_track` / `finalize`.                                                 |
 | `llmCalls` | integer | Number of LLM calls (`completeTurn` invocations) completed when this review fired. Matches the pipeline's `modelInvocations` counter at the check boundary.                                                                   |
+| `phase`    | string  | Optional. `"turn_boundary"` (default cadence review) or `"reasoning"` (mid-turn review fired while a long reasoning span was still streaming). Absent is equivalent to `"turn_boundary"`.                                     |
 | `model`      | object  | Optional. Resolved judge model (`{ id, provider, vendorModelId }`) — same shape as terminal `result.model` (§4.7.1). Present on platform-hosted runs for cost attribution and debug UIs.                                      |
 
 Observability for the run-supervisor guard (see §8.4). The event fires on
@@ -1160,16 +1165,30 @@ steer the run:
 | `redirect`  | A steering **user message** is injected; tools stay available on the next turn.                                                                    |
 | `finalize`  | The next turn is forced **tools-disabled** so the run lands a clean final answer (optionally prefaced by the supervisor's message).                |
 
-Reviews fire every **`interval` LLM calls** (`completeTurn` invocations),
-measured at the bottom of tool-emitting rounds. Default interval is **5**
-when the field is omitted.
+Reviews fire on two triggers:
+
+- **Cadence** — every **`interval` LLM calls** (`completeTurn` invocations),
+  measured at the bottom of tool-emitting rounds (`phase: "turn_boundary"`).
+  Default interval is **5** when the field is omitted.
+- **Mid-turn reasoning** — while a *single* turn is still streaming reasoning,
+  once the current reasoning span crosses **3000 characters or 30s** (whichever
+  first), a `phase: "reasoning"` review runs on the in-progress reasoning. A
+  `redirect` / `finalize` verdict **aborts the in-flight turn** and steers the
+  next one before the model commits. The aborted turn's spent reasoning tokens
+  are still attributed to usage. Enabled by default; tune or disable via
+  `reasoningTrigger`.
 
 ```jsonc
-"supervisor": true   // enable with platform defaults (interval 5, workspace judge model)
+"supervisor": true   // enable with platform defaults (interval 5, reasoning 3000 chars / 30s)
 
 "supervisor": {
   "interval": 5,              // optional — LLM calls between reviews; default 5
-  "modelId": "platform:demo"  // optional — judge model; see resolution below
+  "modelId": "platform:demo", // optional — judge model; see resolution below
+  "reasoningTrigger": {       // optional — mid-turn reasoning trigger
+    "chars": 3000,            //   optional — reasoning chars per span; default 3000
+    "ms": 30000               //   optional — ms per reasoning span; default 30000
+  }
+  // or "reasoningTrigger": false to disable mid-turn reasoning reviews
 }
 
 // or:
@@ -1178,9 +1197,10 @@ when the field is omitted.
 
 | Field      | Type            | Notes                                                                                                                              |
 | ---------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| (literal `true`) | `true`    | Enables the run supervisor with platform defaults (`interval` 5, workspace judge model).                                             |
+| (literal `true`) | `true`    | Enables the run supervisor with platform defaults (`interval` 5, reasoning trigger 3000 chars / 30s, workspace judge model).        |
 | `interval` | integer ≥ 1     | Optional. Default **5** when omitted. Capped at **100** server-side.                                                                |
 | `modelId`  | string          | Optional. Same selector grammar as top-level `modelId` (§2). When omitted, the platform resolves the judge model from the workspace default supervisor model, then the workspace default model. |
+| `reasoningTrigger` | `false` \| `{ chars?, ms? }` | Optional. Mid-turn reasoning trigger. Defaults to `{ chars: 3000, ms: 30000 }`. `chars` capped at 50000, `ms` at 600000. Pass `false` to only review at tool-round boundaries. |
 | (literal `false`) | `false`  | Disables the run supervisor for this run. Loop detection and tool budgets still apply.                                             |
 
 **Model resolution.** When the supervisor is enabled, the judge model is chosen in order:

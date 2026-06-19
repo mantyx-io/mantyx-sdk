@@ -438,6 +438,44 @@ describe("MantyxClient.runAgent", () => {
     ).rejects.toBeInstanceOf(MantyxError);
   });
 
+  it("forwards supervisor reasoningTrigger and `reasoningTrigger: false`", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      supervisor: { interval: 10, reasoningTrigger: { chars: 5000, ms: 60000 } },
+    });
+    expect(server.lastRunCreateBody?.supervisor).toEqual({
+      interval: 10,
+      reasoningTrigger: { chars: 5000, ms: 60000 },
+    });
+
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "ok" }],
+    };
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      supervisor: { interval: 10, reasoningTrigger: false },
+    });
+    expect(server.lastRunCreateBody?.supervisor).toEqual({
+      interval: 10,
+      reasoningTrigger: false,
+    });
+  });
+
+  it("rejects supervisor reasoningTrigger out of range locally", async () => {
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        supervisor: { reasoningTrigger: { chars: 0 } },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+  });
+
   it("forwards plan auto-classify and plan-only shapes verbatim", async () => {
     const ok: MockRunScript = { events: [{ type: "result", subtype: "success", text: "ok" }] };
 

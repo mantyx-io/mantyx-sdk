@@ -17,6 +17,9 @@ async function main(): Promise<void> {
   for await (const event of stream) {
     if (event.type === "assistant_delta") {
       process.stdout.write((event as { text: string }).text);
+    } else if (event.type === "supervisor") {
+      const phase = "phase" in event && event.phase ? event.phase : "turn_boundary";
+      console.log(`\n[supervisor/${phase}] ${event.action}: ${event.reason}`);
     } else if (event.type === "result") {
       process.stdout.write("\n---\n");
       console.log("done:", JSON.stringify(event));

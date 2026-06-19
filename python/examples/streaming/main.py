@@ -37,6 +37,12 @@ def main() -> None:
     ):
         if event.type == "assistant_delta":
             print(event.text, end="", flush=True)
+        elif event.type == "supervisor":
+            phase = event.data.get("phase") or "turn_boundary"
+            print(
+                f"\n[supervisor/{phase}] "
+                f"{event.data.get('action')}: {event.data.get('reason')}"
+            )
         elif event.type == "result":
             print()
             print("--- terminal event ---")

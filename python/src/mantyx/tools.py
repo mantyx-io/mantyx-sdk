@@ -106,6 +106,13 @@ class ToolBudget(TypedDict):
 ToolBudgets = Mapping[str, ToolBudget]
 
 
+class ReasoningTrigger(TypedDict, total=False):
+    """Mid-turn supervisor review trigger (reasoning span length / duration)."""
+
+    chars: int
+    ms: int
+
+
 class Supervisor(TypedDict, total=False):
     """Run-supervisor configuration for the platform LLM judge.
 
@@ -113,10 +120,15 @@ class Supervisor(TypedDict, total=False):
     ``5`` LLM calls between reviews. Pass ``False`` instead of a mapping
     to disable the platform judge for the run / session entirely.
 
+    ``reasoningTrigger`` controls mid-turn reasoning reviews (default
+    ``{ chars: 3000, ms: 30000 }``). Pass ``False`` to only review at
+    tool-round boundaries.
+
     See ``docs/agent-runs-protocol.md`` §4.8.
     """
 
     interval: int
+    reasoningTrigger: ReasoningTrigger | bool
 
 
 class PlanOptions(TypedDict, total=False):
@@ -881,6 +893,8 @@ def normalize_tool_budgets(
 
 
 _SUPERVISOR_INTERVAL_MAX = 100
+_SUPERVISOR_REASONING_CHARS_MAX = 50000
+_SUPERVISOR_REASONING_MS_MAX = 600000
 
 
 def normalize_supervisor(
@@ -919,6 +933,49 @@ def normalize_supervisor(
                 f"(server-enforced); got {interval_raw}"
             )
         out["interval"] = interval_raw
+    if "reasoningTrigger" in value and value["reasoningTrigger"] is not None:
+        rt_raw = value["reasoningTrigger"]
+        if rt_raw is False:
+            out["reasoningTrigger"] = False
+        elif not isinstance(rt_raw, Mapping):
+            raise ValueError(
+                "supervisor.reasoningTrigger must be False or a mapping "
+                "{ chars?: int, ms?: int }; "
+                f"got {type(rt_raw).__name__}"
+            )
+        else:
+            rt_out: dict[str, Any] = {}
+            if "chars" in rt_raw and rt_raw["chars"] is not None:
+                chars_raw = rt_raw["chars"]
+                if not isinstance(chars_raw, int) or isinstance(chars_raw, bool):
+                    raise ValueError(
+                        f"supervisor.reasoningTrigger.chars must be an integer; got {chars_raw!r}"
+                    )
+                if chars_raw < 1:
+                    raise ValueError(
+                        f"supervisor.reasoningTrigger.chars must be >= 1; got {chars_raw}"
+                    )
+                if chars_raw > _SUPERVISOR_REASONING_CHARS_MAX:
+                    raise ValueError(
+                        f"supervisor.reasoningTrigger.chars must be <= {_SUPERVISOR_REASONING_CHARS_MAX} "
+                        f"(server-enforced); got {chars_raw}"
+                    )
+                rt_out["chars"] = chars_raw
+            if "ms" in rt_raw and rt_raw["ms"] is not None:
+                ms_raw = rt_raw["ms"]
+                if not isinstance(ms_raw, int) or isinstance(ms_raw, bool):
+                    raise ValueError(
+                        f"supervisor.reasoningTrigger.ms must be an integer; got {ms_raw!r}"
+                    )
+                if ms_raw < 1:
+                    raise ValueError(f"supervisor.reasoningTrigger.ms must be >= 1; got {ms_raw}")
+                if ms_raw > _SUPERVISOR_REASONING_MS_MAX:
+                    raise ValueError(
+                        f"supervisor.reasoningTrigger.ms must be <= {_SUPERVISOR_REASONING_MS_MAX} "
+                        f"(server-enforced); got {ms_raw}"
+                    )
+                rt_out["ms"] = ms_raw
+            out["reasoningTrigger"] = rt_out
     return out
 
 

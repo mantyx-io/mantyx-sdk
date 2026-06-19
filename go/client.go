@@ -539,7 +539,36 @@ type Supervisor struct {
 	// Server-side upper bound: 100.
 	Interval int
 
-	disabled bool
+	// ReasoningTrigger configures mid-turn reasoning reviews. nil leaves
+	// the field unset (server default: 3000 chars / 30s). Set
+	// reasoningTriggerDisabled to send the literal `false`.
+	ReasoningTrigger *ReasoningTrigger
+
+	reasoningTriggerDisabled bool
+	disabled                 bool
+}
+
+// ReasoningTrigger configures mid-turn supervisor reviews while a single
+// turn is still streaming reasoning.
+type ReasoningTrigger struct {
+	// Chars is the reasoning span length before review. Default 3000 when
+	// unset. Server-side upper bound: 50000.
+	Chars int
+	// Ms is the reasoning span duration in milliseconds before review.
+	// Default 30000 when unset. Server-side upper bound: 600000.
+	Ms int
+}
+
+// DisableReasoningTrigger returns a copy of s with mid-turn reasoning
+// reviews disabled (wire shape `reasoningTrigger: false`).
+func (s *Supervisor) DisableReasoningTrigger() *Supervisor {
+	if s == nil {
+		s = &Supervisor{}
+	}
+	out := *s
+	out.reasoningTriggerDisabled = true
+	out.ReasoningTrigger = nil
+	return &out
 }
 
 // SupervisorInterval builds a Supervisor with the supplied review interval.
@@ -560,6 +589,8 @@ func SupervisorDisabled() *Supervisor {
 }
 
 const supervisorIntervalMax = 100
+const supervisorReasoningCharsMax = 50000
+const supervisorReasoningMsMax = 600000
 
 func (s *Supervisor) validate() error {
 	if s == nil || s.disabled {
@@ -571,6 +602,24 @@ func (s *Supervisor) validate() error {
 		}
 		if s.Interval > supervisorIntervalMax {
 			return &Error{Code: "invalid_request", Message: fmt.Sprintf("Supervisor.Interval must be <= %d, got %d", supervisorIntervalMax, s.Interval)}
+		}
+	}
+	if s.ReasoningTrigger != nil {
+		if s.ReasoningTrigger.Chars != 0 {
+			if s.ReasoningTrigger.Chars < 1 {
+				return &Error{Code: "invalid_request", Message: fmt.Sprintf("Supervisor.ReasoningTrigger.Chars must be >= 1, got %d", s.ReasoningTrigger.Chars)}
+			}
+			if s.ReasoningTrigger.Chars > supervisorReasoningCharsMax {
+				return &Error{Code: "invalid_request", Message: fmt.Sprintf("Supervisor.ReasoningTrigger.Chars must be <= %d, got %d", supervisorReasoningCharsMax, s.ReasoningTrigger.Chars)}
+			}
+		}
+		if s.ReasoningTrigger.Ms != 0 {
+			if s.ReasoningTrigger.Ms < 1 {
+				return &Error{Code: "invalid_request", Message: fmt.Sprintf("Supervisor.ReasoningTrigger.Ms must be >= 1, got %d", s.ReasoningTrigger.Ms)}
+			}
+			if s.ReasoningTrigger.Ms > supervisorReasoningMsMax {
+				return &Error{Code: "invalid_request", Message: fmt.Sprintf("Supervisor.ReasoningTrigger.Ms must be <= %d, got %d", supervisorReasoningMsMax, s.ReasoningTrigger.Ms)}
+			}
 		}
 	}
 	return nil
@@ -589,6 +638,18 @@ func (s *Supervisor) MarshalJSON() ([]byte, error) {
 	out := map[string]any{}
 	if s.Interval != 0 {
 		out["interval"] = s.Interval
+	}
+	if s.reasoningTriggerDisabled {
+		out["reasoningTrigger"] = false
+	} else if s.ReasoningTrigger != nil {
+		rt := map[string]any{}
+		if s.ReasoningTrigger.Chars != 0 {
+			rt["chars"] = s.ReasoningTrigger.Chars
+		}
+		if s.ReasoningTrigger.Ms != 0 {
+			rt["ms"] = s.ReasoningTrigger.Ms
+		}
+		out["reasoningTrigger"] = rt
 	}
 	return json.Marshal(out)
 }

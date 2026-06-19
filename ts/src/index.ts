@@ -57,6 +57,8 @@ export type {
   ToolBudgets,
   Supervisor,
   SupervisorAction,
+  SupervisorPhase,
+  ReasoningTrigger,
   PlanOptions,
   PlanSpec,
   TaskPlan,

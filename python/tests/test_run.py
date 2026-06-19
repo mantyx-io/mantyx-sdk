@@ -448,6 +448,43 @@ def test_run_agent_supervisor_invalid_interval(mantyx_client: MantyxClient) -> N
         )
 
 
+def test_run_agent_supervisor_reasoning_trigger(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        supervisor={
+            "interval": 10,
+            "reasoningTrigger": {"chars": 5000, "ms": 60000},
+        },
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["supervisor"] == {
+        "interval": 10,
+        "reasoningTrigger": {"chars": 5000, "ms": 60000},
+    }
+
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        supervisor={"interval": 10, "reasoningTrigger": False},
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["supervisor"] == {"interval": 10, "reasoningTrigger": False}
+
+
+def test_run_agent_supervisor_invalid_reasoning_trigger(mantyx_client: MantyxClient) -> None:
+    with pytest.raises(ValueError):
+        mantyx_client.run_agent(
+            system_prompt="x",
+            prompt="y",
+            supervisor={"reasoningTrigger": {"chars": 0}},
+        )
+
+
 def test_run_agent_plan_forwarded_and_run_plan(
     mantyx_client: MantyxClient, mock_server: MockServer
 ) -> None:

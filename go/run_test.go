@@ -437,6 +437,56 @@ func TestRunAgent_SupervisorRejectsBadInterval(t *testing.T) {
 	_ = SupervisorInterval(101)
 }
 
+func TestRunAgent_SupervisorReasoningTriggerForwarded(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{
+		APIKey:        "k",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		Supervisor: &Supervisor{
+			Interval:         10,
+			ReasoningTrigger: &ReasoningTrigger{Chars: 5000, Ms: 60000},
+		},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	sv, _ := body["supervisor"].(map[string]any)
+	rt, _ := sv["reasoningTrigger"].(map[string]any)
+	if sv["interval"].(float64) != 10 || rt["chars"].(float64) != 5000 || rt["ms"].(float64) != 60000 {
+		t.Fatalf("supervisor reasoningTrigger not forwarded: %#v", body["supervisor"])
+	}
+
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		Supervisor:   SupervisorInterval(10).DisableReasoningTrigger(),
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatalf("parse body: %v", err)
+	}
+	sv, _ = body["supervisor"].(map[string]any)
+	if sv["interval"].(float64) != 10 || sv["reasoningTrigger"] != false {
+		t.Fatalf("supervisor reasoningTrigger disable not forwarded: %#v", body["supervisor"])
+	}
+}
+
 func TestRunAgent_PlanIsForwarded(t *testing.T) {
 	server := newMockServer()
 	defer server.close()

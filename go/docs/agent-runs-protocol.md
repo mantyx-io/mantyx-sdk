@@ -919,15 +919,25 @@ results, visible text) and may steer the run:
 - **`finalize`** — the next turn is forced tools-disabled so the run lands a
   clean final answer.
 
-Reviews fire every **`interval` LLM calls** (`completeTurn` invocations) at
-the bottom of tool-emitting rounds. Default interval is **5** when enabled.
+Reviews fire on two triggers:
+
+- **Cadence** — every **`interval` LLM calls** (`completeTurn` invocations) at
+  the bottom of tool-emitting rounds (`phase: "turn_boundary"`). Default
+  interval is **5** when enabled.
+- **Mid-turn reasoning** — while a single turn is still streaming reasoning,
+  once the current reasoning span crosses **3000 chars or 30s** (whichever
+  first), a `phase: "reasoning"` review runs on the in-progress reasoning. A
+  `redirect` / `finalize` verdict aborts the in-flight turn and steers the next
+  one. Enabled by default; tune or disable with `reasoningTrigger`. The aborted
+  turn's spent reasoning tokens are still attributed to usage.
 
 ```jsonc
 "supervisor": true   // enable with platform defaults
 
 "supervisor": {
   "interval": 5,
-  "modelId": "platform:demo"
+  "modelId": "platform:demo",
+  "reasoningTrigger": { "chars": 3000, "ms": 30000 }  // or false to disable mid-turn reviews
 }
 
 // or:
@@ -936,9 +946,10 @@ the bottom of tool-emitting rounds. Default interval is **5** when enabled.
 
 | Field             | Type            | Required | Notes                                                                                                                        |
 | ----------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| (literal `true`)  | `true`          | no       | Enables the run supervisor with platform defaults (`interval` 5, workspace judge model).                                       |
+| (literal `true`)  | `true`          | no       | Enables the run supervisor with platform defaults (`interval` 5, reasoning trigger 3000 chars / 30s, workspace judge model).   |
 | `interval`        | integer ≥ 1     | no       | Defaults to **5** when the supervisor is enabled and `interval` is omitted. Capped at **100** server-side.                   |
 | `modelId`         | string          | no       | Judge model selector (same grammar as `modelId`). Falls back to workspace `defaultSupervisorModelId`, then workspace default model. |
+| `reasoningTrigger` | `false` \| `{ chars?, ms? }` | no | Mid-turn reasoning trigger. Defaults to `{ chars: 3000, ms: 30000 }`. `chars` capped at 50000, `ms` at 600000. Pass `false` to only review at tool-round boundaries. |
 | (literal `false`) | `false`         | no       | Disables the run supervisor for this run. `loopDetection` and `toolBudgets` still apply.                                       |
 
 **Defaults.** When `supervisor` is **omitted** (or `false`), MANTYX does **not**
@@ -1265,6 +1276,8 @@ data: <utf-8 JSON>
 { "seq": 7, "type": "supervisor", "data": { "action": "on_track", "reason": "Agent is making progress.", "llmCalls": 5, "model": { "id": "platform:demo", "provider": "openai", "vendorModelId": "gpt-4o-mini" } } }
 { "seq": 8, "type": "supervisor", "data": { "action": "redirect", "reason": "Stuck re-querying.", "redirect": "Answer from the data you already have.", "llmCalls": 10 } }
 { "seq": 9, "type": "supervisor", "data": { "action": "finalize", "reason": "Enough to answer.", "llmCalls": 15 } }
+// mid-turn reasoning review (phase: "reasoning") — fired while the agent was still thinking
+{ "seq": 6, "type": "supervisor", "data": { "action": "redirect", "phase": "reasoning", "reason": "Overthinking a simple case.", "redirect": "Commit and answer.", "llmCalls": 4 } }
 
 // in-product task plan (see §4.9). Emitted only when the run carries a `plan` spec
 // field: once after classify / caller-supplied plan, then on each tracker advance.

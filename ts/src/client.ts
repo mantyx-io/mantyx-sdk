@@ -401,14 +401,31 @@ export type ToolBudgets = Record<string, ToolBudget>;
  *
  * `interval` is optional; when omitted the MANTYX runtime default is **5**
  * LLM calls between reviews. Server-side upper bound: `100`.
+ *
+ * `reasoningTrigger` controls mid-turn reasoning reviews (default
+ * `{ chars: 3000, ms: 30000 }`). Pass `false` to only review at tool-round
+ * boundaries.
  */
 export interface Supervisor {
   /** LLM calls (`completeTurn` invocations) between supervisor reviews. */
   interval?: number;
+  /** Mid-turn reasoning trigger, or `false` to disable. */
+  reasoningTrigger?: ReasoningTrigger | false;
+}
+
+/** Mid-turn supervisor review trigger (reasoning span length / duration). */
+export interface ReasoningTrigger {
+  /** Reasoning characters per span before review. Default `3000`, max `50000`. */
+  chars?: number;
+  /** Milliseconds per reasoning span before review. Default `30000`, max `600000`. */
+  ms?: number;
 }
 
 /** Verdict from a run-supervisor review. */
 export type SupervisorAction = "on_track" | "redirect" | "finalize";
+
+/** When a supervisor review fired relative to the model turn. */
+export type SupervisorPhase = "turn_boundary" | "reasoning";
 
 /** Status of one step in an in-product task plan. */
 export type TaskPlanStepStatus = "pending" | "in_progress" | "done";
@@ -729,6 +746,12 @@ export interface SupervisorEvent extends RunEventBase {
    * pipeline's `modelInvocations` counter at the check boundary.
    */
   llmCalls: number;
+  /**
+   * `"turn_boundary"` (default cadence review) or `"reasoning"` (mid-turn
+   * review while a long reasoning span was still streaming). Omitted is
+   * equivalent to `"turn_boundary"`.
+   */
+  phase?: SupervisorPhase;
 }
 
 /**
@@ -2029,17 +2052,15 @@ function normalizeLoopDetection(
   return out;
 }
 
-function assertThreshold(label: string, value: number, min: number): number {
+function assertThreshold(label: string, value: number, min: number, max = LOOP_DETECTION_THRESHOLD_MAX): number {
   if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
     throw new MantyxError(`${label} must be an integer, got ${JSON.stringify(value)}`);
   }
   if (value < min) {
     throw new MantyxError(`${label} must be >= ${min}, got ${value}`);
   }
-  if (value > LOOP_DETECTION_THRESHOLD_MAX) {
-    throw new MantyxError(
-      `${label} must be <= ${LOOP_DETECTION_THRESHOLD_MAX} (server-enforced), got ${value}`,
-    );
+  if (value > max) {
+    throw new MantyxError(`${label} must be <= ${max} (server-enforced), got ${value}`);
   }
   return value;
 }
@@ -2048,6 +2069,8 @@ const TOOL_BUDGETS_MAX_ENTRIES = 32;
 const TOOL_BUDGET_MAX_NAME_LEN = 120;
 const TOOL_BUDGET_MAX_CALLS = 1000;
 const SUPERVISOR_INTERVAL_MAX = 100;
+const SUPERVISOR_REASONING_CHARS_MAX = 50000;
+const SUPERVISOR_REASONING_MS_MAX = 600000;
 
 /**
  * Validate a {@link Supervisor} (or `false`) value and return the wire-shaped
@@ -2063,7 +2086,39 @@ function normalizeSupervisor(value: Supervisor | false): false | Record<string, 
   }
   const out: Record<string, unknown> = {};
   if (value.interval !== undefined) {
-    out.interval = assertThreshold("supervisor.interval", value.interval, 1);
+    out.interval = assertThreshold("supervisor.interval", value.interval, 1, SUPERVISOR_INTERVAL_MAX);
+  }
+  if (value.reasoningTrigger !== undefined) {
+    if (value.reasoningTrigger === false) {
+      out.reasoningTrigger = false;
+    } else if (
+      !value.reasoningTrigger ||
+      typeof value.reasoningTrigger !== "object" ||
+      Array.isArray(value.reasoningTrigger)
+    ) {
+      throw new MantyxError(
+        `supervisor.reasoningTrigger must be \`false\` or an object { chars?, ms? }, got ${JSON.stringify(value.reasoningTrigger)}`,
+      );
+    } else {
+      const rt: Record<string, number> = {};
+      if (value.reasoningTrigger.chars !== undefined) {
+        rt.chars = assertThreshold(
+          "supervisor.reasoningTrigger.chars",
+          value.reasoningTrigger.chars,
+          1,
+          SUPERVISOR_REASONING_CHARS_MAX,
+        );
+      }
+      if (value.reasoningTrigger.ms !== undefined) {
+        rt.ms = assertThreshold(
+          "supervisor.reasoningTrigger.ms",
+          value.reasoningTrigger.ms,
+          1,
+          SUPERVISOR_REASONING_MS_MAX,
+        );
+      }
+      out.reasoningTrigger = rt;
+    }
   }
   return out;
 }

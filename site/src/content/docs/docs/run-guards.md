@@ -188,13 +188,26 @@ The optional **run supervisor** is a platform LLM judge that periodically review
 | `redirect` | A steering user message is injected; tools stay available on the next turn. |
 | `finalize` | The next turn is forced tools-disabled so the run lands a clean final answer. |
 
-Reviews fire every **`interval` LLM calls** (default **5** when enabled). Pass `supervisor: false` to disable the platform judge for a run.
+Reviews fire on two triggers:
+
+- **Cadence** — every **`interval` LLM calls** (default **5** when enabled) at tool-round boundaries (`phase: "turn_boundary"`).
+- **Mid-turn reasoning** — while a single turn is still streaming reasoning, once the span crosses **3000 characters or 30s** (whichever first), a `phase: "reasoning"` review runs. A `redirect` / `finalize` verdict aborts the in-flight turn. Enabled by default; tune or disable with `reasoningTrigger`.
 
 ```ts
 await client.runAgent({
   systemPrompt: "...",
   prompt: "...",
-  supervisor: { interval: 10 },   // review every 10 model invocations
+  supervisor: {
+    interval: 10,
+    reasoningTrigger: { chars: 5000, ms: 60000 },
+  },
+});
+
+// only review at tool-round boundaries:
+await client.runAgent({
+  systemPrompt: "...",
+  prompt: "...",
+  supervisor: { interval: 10, reasoningTrigger: false },
 });
 
 // opt out for this run:
@@ -202,7 +215,16 @@ await client.runAgent({ systemPrompt: "...", prompt: "...", supervisor: false })
 ```
 
 ```python
-client.run_agent(system_prompt="...", prompt="...", supervisor={"interval": 10})
+client.run_agent(
+    system_prompt="...",
+    prompt="...",
+    supervisor={"interval": 10, "reasoningTrigger": {"chars": 5000, "ms": 60000}},
+)
+client.run_agent(
+    system_prompt="...",
+    prompt="...",
+    supervisor={"interval": 10, "reasoningTrigger": False},
+)
 client.run_agent(system_prompt="...", prompt="...", supervisor=False)
 ```
 
@@ -210,7 +232,16 @@ client.run_agent(system_prompt="...", prompt="...", supervisor=False)
 client.RunAgent(ctx, mantyx.RunSpec{
     SystemPrompt: "...",
     Prompt:       "...",
-    Supervisor:   mantyx.SupervisorInterval(10),
+    Supervisor: mantyx.SupervisorInterval(10).DisableReasoningTrigger(),
+})
+// custom mid-turn trigger:
+client.RunAgent(ctx, mantyx.RunSpec{
+    SystemPrompt: "...",
+    Prompt:       "...",
+    Supervisor: &mantyx.Supervisor{
+        Interval: 10,
+        ReasoningTrigger: &mantyx.ReasoningTrigger{Chars: 5000, Ms: 60000},
+    },
 })
 // opt out:
 client.RunAgent(ctx, mantyx.RunSpec{..., Supervisor: mantyx.SupervisorDisabled()})
@@ -258,6 +289,7 @@ Every intervention emits a dedicated SSE event so the SDK can render status note
   "type": "supervisor",
   "data": {
     "action": "redirect",              // on_track | redirect | finalize
+    "phase": "turn_boundary",          // or "reasoning" for mid-turn reviews
     "reason": "Stuck re-querying.",
     "redirect": "Answer from the data you already have.",  // present when action=redirect
     "llmCalls": 10
@@ -277,7 +309,8 @@ await client.runAgent({
     } else if (ev.type === "tool_budget_exceeded") {
       console.warn(`tool ${ev.tool} hit cap ${ev.maxCalls} on call #${ev.callIndex}`);
     } else if (ev.type === "supervisor") {
-      console.warn(`supervisor ${ev.action}: ${ev.reason}`);
+      const phase = ev.phase ?? "turn_boundary";
+      console.warn(`supervisor [${phase}] ${ev.action}: ${ev.reason}`);
     }
   },
 });
@@ -293,6 +326,8 @@ await client.runAgent({
 | `toolBudgets[<name>]` key length                             | `1..120` chars |
 | `toolBudgets[<name>].maxCalls`                               | `0 ≤ n ≤ 1000` (functionally unlimited; `maxToolTurns: 100` fires first) |
 | `supervisor.interval`                                        | `1 ≤ n ≤ 100` (default **5** when enabled and omitted) |
+| `supervisor.reasoningTrigger.chars`                          | `1 ≤ n ≤ 50000` (default **3000** when enabled and omitted) |
+| `supervisor.reasoningTrigger.ms`                             | `1 ≤ n ≤ 600000` (default **30000** when enabled and omitted) |
 
 The reference SDKs mirror these checks locally so callers see an early typed error rather than a server round-trip.
 

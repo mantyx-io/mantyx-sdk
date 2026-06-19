@@ -87,7 +87,7 @@ for ev := range ch {
 | `local_tool_result_in` | Echo of the SDK's result | `{ toolUseId, output }` |
 | `loop_detected` | The [loop-detection guard](/docs/run-guards/#loop-detection) intervened | `{ consecutiveCount, hardCutoff, tools }` |
 | `tool_budget_exceeded` | A tool call hit its [`toolBudgets`](/docs/run-guards/#tool-budgets) cap | `{ tool, maxCalls, callIndex }` |
-| `supervisor` | The [run supervisor](/docs/run-guards/#supervisor) reviewed the transcript | `{ action, reason, redirect?, llmCalls }` |
+| `supervisor` | The [run supervisor](/docs/run-guards/#supervisor) reviewed the transcript | `{ action, reason, redirect?, llmCalls, phase? }` |
 | `task_plan` | The [task plan](/docs/planning/) checklist was emitted or advanced | `{ brief?, steps: [{ title, status }] }` |
 | `result` | Terminal | `{ subtype, text?, error?, plan? }` |
 | `cancelled` | Terminal (after `cancelRun`) | `{}` |

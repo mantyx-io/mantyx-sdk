@@ -31,6 +31,12 @@ func main() {
 			if t, ok := ev.Data["text"].(string); ok {
 				fmt.Print(t)
 			}
+		case "supervisor":
+			phase, _ := ev.Data["phase"].(string)
+			if phase == "" {
+				phase = "turn_boundary"
+			}
+			fmt.Printf("\n[supervisor/%s] %v: %v\n", phase, ev.Data["action"], ev.Data["reason"])
 		case "result":
 			fmt.Println()
 			fmt.Println("---")
