@@ -49,10 +49,22 @@ Then re-run the checks above (at minimum the two `--check` scripts and any SDK/s
 
 ## Optional: pre-commit hook
 
-Enable once per clone to run the drift checks automatically on commit:
+Enable once per clone to run drift checks and Python lint/format automatically on commit:
 
 ```bash
 git config core.hooksPath githooks
+```
+
+The hook runs:
+
+- `scripts/sync-version.mjs --check`
+- `scripts/sync-agent-runs-doc.mjs --check`
+- `ruff check .` and `ruff format --check .` in `python/` (via `uv run` when available)
+
+To fix formatting locally before committing:
+
+```bash
+cd python && uv run ruff format .
 ```
 
 See [`githooks/README.md`](githooks/README.md) for details.

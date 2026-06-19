@@ -11,3 +11,18 @@ node scripts/sync-version.mjs --check
 
 echo "pre-commit: sync-agent-runs-doc --check"
 node scripts/sync-agent-runs-doc.mjs --check
+
+echo "pre-commit: ruff check + format (python/)"
+(
+  cd "$ROOT/python"
+  if command -v uv >/dev/null 2>&1; then
+    uv run ruff check .
+    uv run ruff format --check .
+  elif python3 -m ruff --version >/dev/null 2>&1; then
+    python3 -m ruff check .
+    python3 -m ruff format --check .
+  else
+    echo "pre-commit: ruff not found — install dev deps: cd python && pip install -e '.[dev]'" >&2
+    exit 1
+  fi
+)
