@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [python/v0.17.0] — 2026-06-26
+
+### Added
+
+- Parallel tool call
+
 ## [python/v0.16.0] — 2026-06-19
 
 ### Added
@@ -128,6 +134,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changelog generation
 
+[python/v0.17.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.16.0..python/v0.17.0
 [python/v0.16.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.15.0..python/v0.16.0
 [python/v0.15.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.14.0..python/v0.15.0
 [python/v0.14.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.13.0..python/v0.14.0
