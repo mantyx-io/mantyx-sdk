@@ -583,3 +583,45 @@ describe("MantyxClient.runAgent", () => {
     ]);
   });
 });
+
+describe("MantyxClient.submitRunFeedback", () => {
+  it("submits feedback and returns the server response", async () => {
+    const result = await client.submitRunFeedback("run_abc", {
+      verdict: "UP",
+      explanation: "Nailed it",
+      contentSnapshot: "final answer",
+    });
+    expect(result).toEqual({
+      id: expect.stringMatching(/^fb_/),
+      verdict: "UP",
+      targetKind: "agent_run",
+      agentRunId: "run_abc",
+    });
+    expect(server.lastFeedbackBody).toEqual({
+      verdict: "UP",
+      explanation: "Nailed it",
+      contentSnapshot: "final answer",
+    });
+    expect(server.lastFeedbackCreated).toBe(true);
+  });
+
+  it("updates existing feedback idempotently", async () => {
+    const first = await client.submitRunFeedback("run_xyz", { verdict: "UP" });
+    const second = await client.submitRunFeedback("run_xyz", {
+      verdict: "DOWN",
+      explanation: "changed mind",
+    });
+    expect(second.id).toBe(first.id);
+    expect(server.lastFeedbackCreated).toBe(false);
+    expect(server.lastFeedbackBody).toEqual({
+      verdict: "DOWN",
+      explanation: "changed mind",
+    });
+  });
+
+  it("rejects invalid verdict locally", async () => {
+    await expect(
+      client.submitRunFeedback("run_abc", { verdict: "MAYBE" as "UP" }),
+    ).rejects.toThrow(/verdict must be/);
+  });
+});

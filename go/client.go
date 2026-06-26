@@ -1550,6 +1550,56 @@ func (c *Client) CancelRun(ctx context.Context, runID string) error {
 	return c.do(ctx, "POST", path, nil, nil)
 }
 
+// RunFeedbackVerdict is thumbs up/down on an agent run.
+type RunFeedbackVerdict string
+
+const (
+	RunFeedbackUp   RunFeedbackVerdict = "UP"
+	RunFeedbackDown RunFeedbackVerdict = "DOWN"
+)
+
+// RunFeedbackInput is the body for POST /agent-runs/:runId/feedback.
+// See `docs/agent-runs-protocol.md` §9a.
+type RunFeedbackInput struct {
+	Verdict         RunFeedbackVerdict `json:"verdict"`
+	Explanation     string             `json:"explanation,omitempty"`
+	ContentSnapshot string             `json:"contentSnapshot,omitempty"`
+}
+
+// RunFeedbackResult is the response from POST /agent-runs/:runId/feedback.
+type RunFeedbackResult struct {
+	ID          string `json:"id"`
+	Verdict     string `json:"verdict"`
+	TargetKind  string `json:"targetKind"`
+	AgentRunID  string `json:"agentRunId"`
+}
+
+const runFeedbackExplanationMax = 8000
+
+// SubmitRunFeedback records thumbs up/down feedback on a run. Requires the
+// `feedback:write` OAuth scope (workspace API keys have implicit access).
+// Idempotent per run — the first call returns HTTP 201, updates return 200.
+func (c *Client) SubmitRunFeedback(ctx context.Context, runID string, input RunFeedbackInput) (*RunFeedbackResult, error) {
+	if input.Verdict != RunFeedbackUp && input.Verdict != RunFeedbackDown {
+		return nil, &Error{
+			Code:    "invalid_request",
+			Message: fmt.Sprintf(`feedback verdict must be "UP" or "DOWN", got %q`, input.Verdict),
+		}
+	}
+	if len(input.Explanation) > runFeedbackExplanationMax {
+		return nil, &Error{
+			Code:    "invalid_request",
+			Message: fmt.Sprintf("feedback explanation must be <= %d characters", runFeedbackExplanationMax),
+		}
+	}
+	path := fmt.Sprintf("/agent-runs/%s/feedback", pathEscape(runID))
+	var out RunFeedbackResult
+	if err := c.do(ctx, "POST", path, input, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ----- HTTP plumbing --------------------------------------------------------
 
 // openSSEStream opens the SSE stream against `path` with at-most-one

@@ -16,6 +16,11 @@
       "types": "./dist/a2a-server.d.ts",
       "import": "./dist/a2a-server.js",
       "require": "./dist/a2a-server.cjs"
+    },
+    "./playwright": {
+      "types": "./dist/playwright.d.ts",
+      "import": "./dist/playwright.js",
+      "require": "./dist/playwright.cjs"
     }
   },
   "files": [
@@ -44,13 +49,17 @@
   },
   "peerDependencies": {
     "@a2a-js/sdk": "^0.3.0",
-    "express": "^4.0.0 || ^5.0.0"
+    "express": "^4.0.0 || ^5.0.0",
+    "playwright": "^1.40.0"
   },
   "peerDependenciesMeta": {
     "@a2a-js/sdk": {
       "optional": true
     },
     "express": {
+      "optional": true
+    },
+    "playwright": {
       "optional": true
     }
   },
@@ -59,6 +68,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "express": "^5.0.0",
+    "playwright": "^1.48.0",
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

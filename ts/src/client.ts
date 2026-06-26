@@ -90,6 +90,28 @@ export function inputFileUrlAttachment(opts: {
   return { type: "input_file_url", ...opts };
 }
 
+/** Thumbs up/down verdict for {@link MantyxClient.submitRunFeedback}. */
+export type RunFeedbackVerdict = "UP" | "DOWN";
+
+/** Body for `POST /agent-runs/:runId/feedback`. See §9a. */
+export interface RunFeedbackInput {
+  verdict: RunFeedbackVerdict;
+  /** Optional free-text note (≤ 8000 characters). */
+  explanation?: string;
+  /** Optional snapshot of the rated content; defaults to the run's final text. */
+  contentSnapshot?: string;
+}
+
+/** Response from `POST /agent-runs/:runId/feedback`. */
+export interface RunFeedbackResult {
+  id: string;
+  verdict: RunFeedbackVerdict;
+  targetKind: string;
+  agentRunId: string;
+}
+
+const RUN_FEEDBACK_EXPLANATION_MAX = 8000;
+
 export interface MantyxClientOptions {
   /**
    * Workspace API key (token prefix `mantyx_`) **or** a MANTYX OAuth 2.0
@@ -123,7 +145,7 @@ export interface MantyxClientOptions {
    *
    * OAuth tokens additionally enforce per-route **scopes**
    * (`runs:read`, `runs:write`, `sessions:read`, `sessions:write`,
-   * `models:read`, `mantyx.identity:read`); see
+   * `models:read`, `feedback:write`, `mantyx.identity:read`); see
    * `docs/agent-runs-protocol.md` §2.2 for the table. Missing scopes
    * land as {@link MantyxScopeError} so callers can route the user
    * back to a re-consent flow.
@@ -1375,6 +1397,33 @@ export class MantyxClient {
     });
   }
 
+  /**
+   * Record thumbs up/down feedback on a run. Requires the `feedback:write`
+   * OAuth scope (workspace API keys have implicit access). Idempotent per
+   * run — the first call returns HTTP 201, updates return 200; both carry
+   * the same response body. See `docs/agent-runs-protocol.md` §9a.
+   */
+  async submitRunFeedback(runId: string, input: RunFeedbackInput): Promise<RunFeedbackResult> {
+    if (input.verdict !== "UP" && input.verdict !== "DOWN") {
+      throw new MantyxError(
+        `feedback verdict must be "UP" or "DOWN", got ${JSON.stringify(input.verdict)}`,
+      );
+    }
+    if (input.explanation !== undefined && input.explanation.length > RUN_FEEDBACK_EXPLANATION_MAX) {
+      throw new MantyxError(
+        `feedback explanation must be <= ${RUN_FEEDBACK_EXPLANATION_MAX} characters`,
+      );
+    }
+    const body: Record<string, string> = { verdict: input.verdict };
+    if (input.explanation !== undefined) body.explanation = input.explanation;
+    if (input.contentSnapshot !== undefined) body.contentSnapshot = input.contentSnapshot;
+    return this.request<RunFeedbackResult>({
+      method: "POST",
+      path: `/agent-runs/${encodeURIComponent(runId)}/feedback`,
+      body,
+    });
+  }
+
   // -------------------------------------------------------------- HTTP
 
   private absoluteUrl(path: string): string {
@@ -1843,6 +1892,7 @@ function serializeToolRefs(tools: ToolRef[]): unknown[] {
             ? { outputSchema: toToolParametersWire(t.outputSchema) }
             : {}),
           ...(t.longRunning ? { longRunning: true } : {}),
+          ...(t.readOnly ? { readOnly: true } : {}),
         };
       case "a2a":
         return {

@@ -7,6 +7,12 @@ They mirror [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 Prerequisites: Node 20+, Go 1.24+, Python 3.12+ with `uv` or `pip`, and dependencies installed in each package (`npm install` in `ts/` and `site/`, `pip install -e ".[dev]"` in `python/`).
 
+To build all publishable artifacts (Go compile, TS `dist/`, Python wheel/sdist, docs site):
+
+```bash
+./scripts/build-all.sh
+```
+
 ```bash
 # Drift checks (also run by the pre-commit hook)
 node scripts/sync-version.mjs --check
@@ -40,6 +46,7 @@ Then re-run the checks above (at minimum the two `--check` scripts and any SDK/s
 
 | Area | Directory | What CI runs |
 | ---- | --------- | ------------ |
+| All packages | repo root | `./scripts/build-all.sh` |
 | Version pins | repo root | `node scripts/sync-version.mjs --check` |
 | Protocol mirrors | repo root | `node scripts/sync-agent-runs-doc.mjs --check` |
 | Go SDK | `go/` | `go test ./... -race -count=1` |

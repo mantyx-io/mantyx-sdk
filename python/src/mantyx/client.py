@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import (
     Any,
+    Literal,
     cast,
 )
 
@@ -170,6 +171,19 @@ class RunModelInfo:
     # doesn't expose a reasoning-level knob or the run didn't
     # request one.
     reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True)
+class RunFeedbackResult:
+    """Response from ``POST /agent-runs/:runId/feedback``. See §9a."""
+
+    id: str
+    verdict: Literal["UP", "DOWN"]
+    target_kind: str
+    agent_run_id: str
+
+
+_RUN_FEEDBACK_EXPLANATION_MAX = 8000
 
 
 @dataclass
@@ -498,6 +512,34 @@ class MantyxClient:
 
     def cancel_run(self, run_id: str) -> None:
         self._request("POST", f"/agent-runs/{_quote(run_id)}/cancel")
+
+    def submit_run_feedback(
+        self,
+        run_id: str,
+        verdict: Literal["UP", "DOWN"],
+        *,
+        explanation: str | None = None,
+        content_snapshot: str | None = None,
+    ) -> RunFeedbackResult:
+        """Record thumbs up/down feedback on a run.
+
+        Requires the ``feedback:write`` OAuth scope (workspace API keys have
+        implicit access). Idempotent per run — the first call returns HTTP
+        201, updates return 200. See ``docs/agent-runs-protocol.md`` §9a.
+        """
+        if verdict not in ("UP", "DOWN"):
+            raise MantyxError(f'feedback verdict must be "UP" or "DOWN", got {verdict!r}')
+        if explanation is not None and len(explanation) > _RUN_FEEDBACK_EXPLANATION_MAX:
+            raise MantyxError(
+                f"feedback explanation must be <= {_RUN_FEEDBACK_EXPLANATION_MAX} characters"
+            )
+        wire: dict[str, str] = {"verdict": verdict}
+        if explanation is not None:
+            wire["explanation"] = explanation
+        if content_snapshot is not None:
+            wire["contentSnapshot"] = content_snapshot
+        data = self._request("POST", f"/agent-runs/{_quote(run_id)}/feedback", wire) or {}
+        return _parse_run_feedback(data, run_id)
 
     # ----------------------------------------------------------- Sessions
 
@@ -1498,6 +1540,18 @@ def _parse_session_info(body: Mapping[str, Any]) -> SessionInfo:
         agent_spec=cast(AgentSpec, body.get("agentSpec") or {}),
         messages=messages,
         metadata=metadata,
+    )
+
+
+def _parse_run_feedback(raw: Mapping[str, Any], run_id: str) -> RunFeedbackResult:
+    verdict_raw = raw.get("verdict")
+    if verdict_raw not in ("UP", "DOWN"):
+        raise MantyxError(f"invalid feedback verdict in response: {verdict_raw!r}")
+    return RunFeedbackResult(
+        id=str(raw.get("id") or ""),
+        verdict=cast(Literal["UP", "DOWN"], verdict_raw),
+        target_kind=str(raw.get("targetKind") or ""),
+        agent_run_id=str(raw.get("agentRunId") or run_id),
     )
 
 

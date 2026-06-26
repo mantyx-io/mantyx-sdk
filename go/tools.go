@@ -98,6 +98,14 @@ type LocalToolSpec struct {
 	// without the hint, models routinely fire repeat calls and waste
 	// turns. Pure declarative — MANTYX does not change scheduling.
 	LongRunning bool
+	// ReadOnly, when true, lets MANTYX run this tool in parallel with other
+	// read-only tools the model emits in the same turn: every such
+	// `local_tool_call` is published concurrently and resolved together
+	// instead of one-at-a-time in model-emit order. Set this only for
+	// side-effect-free tools whose results don't depend on each other.
+	// Mutating tools (the default, false) stay strictly sequential. See
+	// `docs/agent-runs-protocol.md` §4.1.1.
+	ReadOnly bool
 	// Execute is invoked when the LLM calls this tool. It must be a function
 	// with the signature:
 	//
@@ -142,6 +150,9 @@ func (t *localTool) toolWire() map[string]any {
 	}
 	if t.spec.LongRunning {
 		out["longRunning"] = true
+	}
+	if t.spec.ReadOnly {
+		out["readOnly"] = true
 	}
 	return out
 }

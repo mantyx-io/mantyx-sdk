@@ -73,6 +73,7 @@ export default defineConfig({
             { label: "Plugin tools", link: "/docs/tools/plugin/" },
             { label: "Agent2Agent (A2A)", link: "/docs/tools/a2a/" },
             { label: "MCP connectors", link: "/docs/tools/mcp/" },
+            { label: "Computer use", link: "/docs/tools/computer-use/" },
           ],
         },
         {

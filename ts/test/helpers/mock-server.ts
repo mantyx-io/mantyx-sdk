@@ -169,6 +169,11 @@ export class MockServer {
   };
   /** Latest body posted to /tool-results endpoints. */
   lastToolResult: { runId: string; payload: Record<string, unknown> } | null = null;
+  /** Latest body posted to POST /agent-runs/:id/feedback. */
+  lastFeedbackBody: Record<string, unknown> | null = null;
+  /** Whether the latest feedback POST created (201) vs updated (200). */
+  lastFeedbackCreated = false;
+  private feedbackByRun = new Map<string, { id: string; body: Record<string, unknown> }>();
   /** Latest body posted to POST /agent-runs (one-shot create). */
   lastRunCreateBody: Record<string, unknown> | null = null;
   /** Latest body posted to POST /agent-sessions (session create). */
@@ -444,6 +449,27 @@ export class MockServer {
       }
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ ok: true, status: "cancelled" }));
+      return;
+    }
+    if (rest.length === 2 && rest[1] === "feedback" && req.method === "POST") {
+      const runId = rest[0]!;
+      const body = (await readJson(req)) as Record<string, unknown>;
+      const existing = this.feedbackByRun.get(runId);
+      const created = existing === undefined;
+      const id = existing?.id ?? `fb_${randomUUID()}`;
+      this.feedbackByRun.set(runId, { id, body });
+      this.lastFeedbackBody = body;
+      this.lastFeedbackCreated = created;
+      res.statusCode = created ? 201 : 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          id,
+          verdict: body.verdict,
+          targetKind: "agent_run",
+          agentRunId: runId,
+        }),
+      );
       return;
     }
     res.statusCode = 404;

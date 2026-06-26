@@ -217,6 +217,14 @@ class LocalTool:
     #: the hint, models routinely fire repeat calls and waste turns. Pure
     #: declarative — MANTYX does not change scheduling.
     long_running: bool = False
+    #: When ``True``, this tool may run **in parallel** with other
+    #: read-only tools the model emits in the same turn: MANTYX publishes
+    #: every such ``local_tool_call`` concurrently and resolves them
+    #: together instead of one-at-a-time in model-emit order. Set this only
+    #: for side-effect-free tools whose results don't depend on each other.
+    #: Mutating tools (the default, ``False``) stay strictly sequential.
+    #: See ``docs/agent-runs-protocol.md`` §4.1.1.
+    read_only: bool = False
     execute: Callable[..., Any] = field(default=lambda *_: "")
     kind: str = "local"
 
@@ -385,6 +393,7 @@ def define_local_tool(
     parameters: ParametersInput = None,
     output_schema: ParametersInput = None,
     long_running: bool = False,
+    read_only: bool = False,
 ) -> LocalTool:
     """Define a tool whose handler runs in *this* Python process.
 
@@ -407,6 +416,10 @@ def define_local_tool(
             calls while a previous invocation is still pending. Useful
             for tools that may yield a ``pending`` / status response and
             the SDK polls on its own.
+        read_only: When ``True``, MANTYX may run this tool in parallel with
+            other read-only tools the model emits in the same turn. Set it
+            only for side-effect-free tools whose results don't depend on
+            each other. Mutating tools (the default) stay sequential.
     """
     _assert_tool_name(name)
     return LocalTool(
@@ -415,6 +428,7 @@ def define_local_tool(
         parameters=parameters,
         output_schema=output_schema,
         long_running=bool(long_running),
+        read_only=bool(read_only),
         execute=execute,
     )
 
@@ -667,6 +681,8 @@ def serialize_tool_refs(tools: list[ToolRef] | None) -> list[dict[str, Any]]:
                 local_entry["outputSchema"] = to_tool_parameters_wire(t.output_schema)
             if t.long_running:
                 local_entry["longRunning"] = True
+            if t.read_only:
+                local_entry["readOnly"] = True
             out.append(local_entry)
         elif isinstance(t, MantyxA2AToolRef):
             entry: dict[str, Any] = {

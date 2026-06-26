@@ -72,6 +72,16 @@ export interface LocalTool<TArgs = Record<string, unknown>> {
    * declarative — MANTYX does not change scheduling.
    */
   readonly longRunning: boolean;
+  /**
+   * When `true`, this tool may run **in parallel** with other read-only
+   * tools the model emits in the same turn: MANTYX publishes every such
+   * `local_tool_call` concurrently and resolves them together instead of
+   * one-at-a-time in model-emit order. Set this only for side-effect-free
+   * tools whose results don't depend on each other. Mutating tools (the
+   * default, `false`) stay strictly sequential. See
+   * `docs/agent-runs-protocol.md` §4.1.1.
+   */
+  readonly readOnly: boolean;
   readonly execute: (args: TArgs) => Promise<string> | string;
 }
 
@@ -91,6 +101,12 @@ export interface DefineLocalToolOptions<T extends ZodLikeObject | undefined> {
    * {@link LocalTool.longRunning}.
    */
   longRunning?: boolean;
+  /**
+   * Mark the tool as read-only so MANTYX may run it in parallel with other
+   * read-only tools the model emits in the same turn. See
+   * {@link LocalTool.readOnly}.
+   */
+  readOnly?: boolean;
   execute: (
     args: T extends ZodLikeObject ? z.infer<T> : Record<string, unknown>,
   ) => Promise<string> | string;
@@ -107,6 +123,7 @@ export function defineLocalTool<T extends ZodLikeObject | undefined>(
     parameters: opts.parameters,
     outputSchema: opts.outputSchema,
     longRunning: opts.longRunning ?? false,
+    readOnly: opts.readOnly ?? false,
     execute: opts.execute as LocalTool["execute"],
   };
 }

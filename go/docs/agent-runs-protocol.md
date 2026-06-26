@@ -28,7 +28,7 @@ array:
 | --------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mantyx`        | server      | A workspace `Tool` row referenced by id (HTTP / Code / Plugin).                                                                                                                                                                             |
 | `mantyx_plugin` | server      | A platform plugin tool referenced by name.                                                                                                                                                                                                  |
-| `local`         | client      | A custom tool defined and executed in the SDK's process. Carries `parameters` (input JSON Schema) plus optional `outputSchema` (return-value JSON Schema) and `longRunning` flag — see §4.1.1.                                              |
+| `local`         | client      | A custom tool defined and executed in the SDK's process. Carries `parameters` (input JSON Schema) plus optional `outputSchema` (return-value JSON Schema), `longRunning`, and `readOnly` (parallel-batch) flags — see §4.1.1.                                              |
 | `a2a`           | server      | A _remote_ Agent2Agent peer MANTYX can reach; invoked via `message/send` and the reply is surfaced as the tool result.                                                                                                                      |
 | `a2a_local`     | client      | An A2A peer MANTYX **cannot** reach. SDK resolves the [Agent Card](https://google.github.io/A2A/specification/#agent-card) locally and ships it inline; MANTYX uses it for the model description and routes calls back to the SDK over SSE. |
 | `mcp`           | server      | A _remote_ MCP server (Streamable HTTP). At run start MANTYX lists the catalog and exposes every tool as `<server>_<tool>` (subject to `toolFilter`).                                                                                       |
@@ -123,6 +123,7 @@ two differences:
    | `GET    .../agent-runs/{runId}/stream`           | `runs:read`            |
    | `POST   .../agent-runs/{runId}/cancel`           | `runs:write`           |
    | `POST   .../agent-runs/{runId}/tool-results`     | `runs:write`           |
+   | `POST   .../agent-runs/{runId}/feedback`         | `feedback:write`       |
    | `POST   .../agent-sessions`                      | `sessions:write`       |
    | `GET    .../agent-sessions`                      | `sessions:read`        |
    | `GET    .../agent-sessions/{sessionId}`          | `sessions:read`        |
@@ -281,6 +282,7 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
         "required": ["bytes"],
       },
       "longRunning": false, // optional — default false
+      "readOnly": false, // optional — default false; true ⇒ may run in parallel with other reads
     },
     {
       "kind": "a2a",
@@ -476,12 +478,14 @@ for the SDK to POST a tool-result.
 | `parameters`   | no       | JSON Schema for the tool's input. Must be a `type: "object"` schema with `properties`; non-object roots are coerced to an empty object schema server-side. Forwarded **verbatim** to the LLM provider so nested constraints (`array.items`, `enum`, `anyOf`, numeric formats, …) survive. Args that fail server-side validation produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the call.                                |
 | `outputSchema` | no       | JSON Schema for the structured value the tool returns. When present, forwarded to providers that accept per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. Helps the model emit follow-up arguments that round-trip cleanly. Must be an object schema; non-object roots are dropped server-side.                                                        |
 | `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the model-facing description so every provider treats the tool as long-running:<br>_"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."_<br>Useful for tools that return `pending` and rely on SDK-side polling — without the hint the model routinely fires repeat calls and burns turns. Pure declarative — MANTYX does not change scheduling. |
+| `readOnly`     | no       | When `true`, the tool may run **in parallel** with other read-only tools the model emits in the same turn — MANTYX publishes every such `local_tool_call` concurrently and resolves them together, instead of one-at-a-time in model-emit order. Set this only for side-effect-free tools whose results don't depend on each other, and make sure your SDK can service several outstanding `local_tool_call` events at once (each carries its own `toolUseId`; post a tool-result per id in any order). Mutating tools (the default, `false`) stay strictly sequential. |
 
-The `outputSchema` and `longRunning` fields are **additive** since wire
-protocol v1: SDKs that don't ship them keep working unchanged. Providers
-without per-tool response-schema support (OpenAI, Anthropic, Bedrock,
-Grok) accept the new fields silently — the schema is treated as a
-description hint and host-side validation still runs.
+The `outputSchema`, `longRunning`, and `readOnly` fields are **additive**
+since wire protocol v1: SDKs that don't ship them keep working unchanged.
+Providers without per-tool response-schema support (OpenAI, Anthropic,
+Bedrock, Grok) accept the new fields silently — the schema is treated as a
+description hint and host-side validation still runs. `readOnly` defaults to
+`false`, so omitting it preserves the original sequential behavior.
 
 ### 4.2 A2A tool refs
 
@@ -1067,6 +1071,7 @@ GET    /api/v1/workspaces/{slug}/agent-runs/{runId}
 GET    /api/v1/workspaces/{slug}/agent-runs/{runId}/stream
 POST   /api/v1/workspaces/{slug}/agent-runs/{runId}/tool-results
 POST   /api/v1/workspaces/{slug}/agent-runs/{runId}/cancel
+POST   /api/v1/workspaces/{slug}/agent-runs/{runId}/feedback
 ```
 
 `POST /agent-runs` returns `202 Accepted` immediately:
@@ -1464,6 +1469,41 @@ POST /api/v1/workspaces/{slug}/agent-runs/{runId}/cancel
 Idempotent. The run will produce a terminal `cancelled` event on the SSE
 stream. In-flight `tool-results` posted after cancellation are accepted with
 `200 OK` but ignored.
+
+## 9a. Run feedback
+
+```
+POST /api/v1/workspaces/{slug}/agent-runs/{runId}/feedback
+```
+
+Record thumbs up/down feedback on a completed (or in-flight) run — the same
+`ReplyFeedback` signal the web product collects on chat replies and artifacts,
+extended to ephemeral SDK runs. Requires the `feedback:write` scope.
+
+Request body:
+
+```jsonc
+{
+  "verdict": "UP",            // "UP" | "DOWN" (required)
+  "explanation": "Nailed it", // optional free-text note (≤ 8000 chars)
+  "contentSnapshot": "..."    // optional; defaults to the run's finalText
+}
+```
+
+The feedback is **idempotent per run**: one verdict per `(workspace, run)`. A
+repeated call updates the existing row (last-write-wins) and returns `200`; the
+first call returns `201`. Response:
+
+```jsonc
+{ "id": "fb_…", "verdict": "UP", "targetKind": "agent_run", "agentRunId": "run_…" }
+```
+
+The author is attributed to the calling workspace **API key** (`apiKeyId`); OAuth
+tokens leave the author null. Recorded feedback surfaces in the workspace
+**API feedback** dashboard (Developer area) and the read-only
+`GET .../reply-feedback` listing (scope `feedback:read`; **agent-run feedback
+only** — in-product chat and artifact feedback is workspace-admin only). Unknown
+runs return `404 { "error": "Run not found" }`.
 
 ## 10. Errors
 

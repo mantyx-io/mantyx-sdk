@@ -376,7 +376,10 @@ defineLocalTool({
 (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines
 surface it via the description. `longRunning` is a pure annotation —
 MANTYX appends a stable hint and does *not* alter scheduling or
-timeouts. See [`docs/tools/local`](https://docs.mantyx.com/docs/tools/local/)
+timeouts. A `readOnly: true` flag marks a side-effect-free tool so
+MANTYX may run it in parallel with other read-only tools the model emits
+in the same turn (mutating tools stay sequential). See
+[`docs/tools/local`](https://docs.mantyx.com/docs/tools/local/)
 for the full guide.
 
 ## Picking a model

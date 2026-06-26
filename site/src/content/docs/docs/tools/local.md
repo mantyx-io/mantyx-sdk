@@ -197,6 +197,38 @@ mantyx.LocalTool(mantyx.LocalToolSpec{
 })
 ```
 
+## Read-only (parallel) tools
+
+Set `readOnly: true` (TypeScript / Python: `read_only=True`; Go: `ReadOnly: true`) on a tool that has no side effects and whose result doesn't depend on other tools. When the model emits several read-only tool calls in the same turn, MANTYX publishes those `local_tool_call` events **concurrently** and resolves them together, instead of one-at-a-time in model-emit order. Mutating tools (the default, `false`) stay strictly sequential.
+
+```ts
+defineLocalTool({
+  name: "read_file",
+  parameters: z.object({ path: z.string() }),
+  readOnly: true,
+  execute: async ({ path }) => (await import("node:fs/promises")).readFile(path, "utf8"),
+});
+```
+
+```python
+define_local_tool(
+    name="read_file",
+    parameters=ReadFileArgs,
+    read_only=True,
+    execute=lambda args: open(args.path).read(),
+)
+```
+
+```go
+mantyx.LocalTool(mantyx.LocalToolSpec{
+    Name:     "read_file",
+    ReadOnly: true,
+    Execute:  readFile,
+})
+```
+
+The SDK already dispatches each `local_tool_call` independently (every event carries its own `toolUseId`, and you POST one tool-result per id in any order), so no extra wiring is needed on your side — flipping `readOnly` on parallel-safe reads simply lets MANTYX fan them out. The field is additive: omit it to keep the original sequential behavior. See [the protocol reference](/docs/protocol/) §4.1.1.
+
 ## Timeouts
 
 The server enforces a tool-result timeout (default 60s) for each `local_tool_call`. If the SDK doesn't POST a result in time, the run terminates with `result.subtype = "error_local_tool_timeout"`.

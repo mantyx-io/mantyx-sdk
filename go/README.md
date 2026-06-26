@@ -425,7 +425,9 @@ or to attach one explicitly when `Execute` returns `string` — set
 
 `LongRunning` is a pure annotation — MANTYX appends a stable hint to
 the description and does *not* alter scheduling, the per-call timeout,
-or the tool's lifecycle. See [`docs/tools/local`](https://docs.mantyx.com/docs/tools/local/)
+or the tool's lifecycle. A `ReadOnly: true` flag marks a side-effect-free
+tool so MANTYX may run it in parallel with other read-only tools the
+model emits in the same turn (mutating tools stay sequential). See [`docs/tools/local`](https://docs.mantyx.com/docs/tools/local/)
 for the full guide.
 
 ## Picking a model

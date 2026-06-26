@@ -1471,6 +1471,34 @@ func TestLocalTool_LongRunning_OmittedByDefault(t *testing.T) {
 	if _, has := got["longRunning"]; has {
 		t.Fatalf("expected longRunning omitted by default, got %#v", got["longRunning"])
 	}
+	if _, has := got["readOnly"]; has {
+		t.Fatalf("expected readOnly omitted by default, got %#v", got["readOnly"])
+	}
+}
+
+func TestLocalTool_ReadOnly_AddsWireField(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:     "read_file",
+		ReadOnly: true,
+		Execute: func(ctx context.Context, _ struct{}) (string, error) {
+			return "contents", nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if got["readOnly"] != true {
+		t.Fatalf("expected readOnly=true on wire, got %#v", got["readOnly"])
+	}
 }
 
 func TestLocalTool_PanicsOnInvalidExecuteSignature(t *testing.T) {

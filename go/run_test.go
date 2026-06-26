@@ -967,3 +967,70 @@ func TestListModels(t *testing.T) {
 		t.Fatalf("expected default %q, got %q", "platform:demo", out.DefaultModelID)
 	}
 }
+
+func TestSubmitRunFeedback_CreateAndUpdate(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{
+		APIKey:        "test-key",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+
+	first, err := client.SubmitRunFeedback(context.Background(), "run_abc", RunFeedbackInput{
+		Verdict:         RunFeedbackUp,
+		Explanation:     "Nailed it",
+		ContentSnapshot: "final answer",
+	})
+	if err != nil {
+		t.Fatalf("SubmitRunFeedback: %v", err)
+	}
+	if first.Verdict != "UP" || first.TargetKind != "agent_run" || first.AgentRunID != "run_abc" {
+		t.Fatalf("unexpected first result: %+v", first)
+	}
+	if !server.lastFeedbackCreated {
+		t.Fatal("expected first feedback POST to create")
+	}
+
+	second, err := client.SubmitRunFeedback(context.Background(), "run_abc", RunFeedbackInput{
+		Verdict:     RunFeedbackDown,
+		Explanation: "changed mind",
+	})
+	if err != nil {
+		t.Fatalf("SubmitRunFeedback update: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("expected same feedback id on update, got %q then %q", first.ID, second.ID)
+	}
+	if server.lastFeedbackCreated {
+		t.Fatal("expected second feedback POST to update")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(server.lastFeedbackBody, &body); err != nil {
+		t.Fatalf("feedback body: %v", err)
+	}
+	if body["verdict"] != "DOWN" || body["explanation"] != "changed mind" {
+		t.Fatalf("unexpected feedback body: %#v", body)
+	}
+}
+
+func TestSubmitRunFeedback_InvalidVerdict(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	client := NewClient(Options{
+		APIKey:        "test-key",
+		WorkspaceSlug: "demo",
+		BaseURL:       server.baseURL(),
+	})
+	_, err := client.SubmitRunFeedback(context.Background(), "run_abc", RunFeedbackInput{
+		Verdict: RunFeedbackVerdict("MAYBE"),
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid verdict")
+	}
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "invalid_request" {
+		t.Fatalf("expected invalid_request, got %v", err)
+	}
+}

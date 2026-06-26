@@ -35,6 +35,12 @@ type mockServer struct {
 	authHeaderHistory      []string
 	lastToolResultBody     []byte
 	lastRunCreateBody      []byte
+	lastFeedbackBody       []byte
+	lastFeedbackCreated    bool
+	feedbackByRun          map[string]struct {
+		id   string
+		body []byte
+	}
 	lastSessionCreateBody  []byte
 	lastSessionMessageBody []byte
 	models                 ModelCatalog
@@ -98,9 +104,13 @@ type runState struct {
 
 func newMockServer() *mockServer {
 	m := &mockServer{
-		runs:                   map[string]*runState{},
-		sessions:               map[string]*mockSession{},
-		sessionScripts:         map[string]*runScript{},
+		runs:           map[string]*runState{},
+		sessions:       map[string]*mockSession{},
+		sessionScripts: map[string]*runScript{},
+		feedbackByRun: map[string]struct {
+			id   string
+			body []byte
+		}{},
 		oauthAccessToken:       "mantyx_at_mock_initial",
 		oauthRefreshToken:      "mantyx_rt_mock_initial",
 		oauthExpiresIn:         3600,
@@ -251,6 +261,35 @@ func (m *mockServer) handleAgentRuns(w http.ResponseWriter, r *http.Request, res
 			state.mu.Unlock()
 		}
 		m.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "cancelled"})
+	case len(rest) == 2 && rest[1] == "feedback" && r.Method == http.MethodPost:
+		raw, _ := io.ReadAll(r.Body)
+		runID := rest[0]
+		m.mu.Lock()
+		m.lastFeedbackBody = raw
+		existing, ok := m.feedbackByRun[runID]
+		created := !ok
+		m.lastFeedbackCreated = created
+		id := existing.id
+		if created {
+			id = newID("fb")
+		}
+		m.feedbackByRun[runID] = struct {
+			id   string
+			body []byte
+		}{id: id, body: raw}
+		m.mu.Unlock()
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		m.writeJSON(w, status, map[string]any{
+			"id":          id,
+			"verdict":     body["verdict"],
+			"targetKind":  "agent_run",
+			"agentRunId":  runID,
+		})
 	default:
 		http.NotFound(w, r)
 	}

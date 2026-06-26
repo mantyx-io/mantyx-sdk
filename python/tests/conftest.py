@@ -87,6 +87,9 @@ class MockServer:
         self.last_session_create_body: dict[str, Any] | None = None
         self.last_session_message_body: dict[str, Any] | None = None
         self.last_tool_result_body: dict[str, Any] | None = None
+        self.last_feedback_body: dict[str, Any] | None = None
+        self.last_feedback_created: bool = False
+        self.feedback_by_run: dict[str, dict[str, Any]] = {}
         self.script_for_next_run: RunScript | None = None
         self.session_scripts: dict[str, RunScript] = {}
         # Each session: {"messages": [...], "metadata": {...}, "createdAt": str}
@@ -241,6 +244,26 @@ class MockServer:
                 if state is not None:
                     state.cancel()
             return httpx.Response(200, json={"ok": True, "status": "cancelled"})
+        if len(rest) == 2 and rest[1] == "feedback" and method == "POST":
+            body = json.loads(request.content or b"{}")
+            run_id = rest[0]
+            with self.lock:
+                existing = self.feedback_by_run.get(run_id)
+                created = existing is None
+                fb_id = existing["id"] if existing else _new_id("fb")
+                self.feedback_by_run[run_id] = {"id": fb_id, "body": body}
+                self.last_feedback_body = body
+                self.last_feedback_created = created
+            status = 201 if created else 200
+            return httpx.Response(
+                status,
+                json={
+                    "id": fb_id,
+                    "verdict": body.get("verdict"),
+                    "targetKind": "agent_run",
+                    "agentRunId": run_id,
+                },
+            )
         return httpx.Response(404, json={"error": "not_found"})
 
     # ----- agent-sessions ----------------------------------------------

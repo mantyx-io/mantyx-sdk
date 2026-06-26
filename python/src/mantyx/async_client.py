@@ -10,6 +10,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import (
     Any,
+    Literal,
     cast,
 )
 
@@ -28,6 +29,7 @@ from .client import (
     DEFAULT_TIMEOUT_S,
     ModelCatalog,
     RunEvent,
+    RunFeedbackResult,
     RunModelInfo,
     RunResult,
     RunTokenUsage,
@@ -36,6 +38,7 @@ from .client import (
     _describe_handler,
     _parse_model_catalog,
     _parse_required_scopes,
+    _parse_run_feedback,
     _parse_run_model,
     _parse_run_tokens,
     _parse_run_turns,
@@ -318,6 +321,27 @@ class AsyncMantyxClient:
 
     async def cancel_run(self, run_id: str) -> None:
         await self._request("POST", f"/agent-runs/{_quote(run_id)}/cancel")
+
+    async def submit_run_feedback(
+        self,
+        run_id: str,
+        verdict: Literal["UP", "DOWN"],
+        *,
+        explanation: str | None = None,
+        content_snapshot: str | None = None,
+    ) -> RunFeedbackResult:
+        """Async variant of :meth:`MantyxClient.submit_run_feedback`."""
+        if verdict not in ("UP", "DOWN"):
+            raise MantyxError(f'feedback verdict must be "UP" or "DOWN", got {verdict!r}')
+        if explanation is not None and len(explanation) > 8000:
+            raise MantyxError("feedback explanation must be <= 8000 characters")
+        wire: dict[str, str] = {"verdict": verdict}
+        if explanation is not None:
+            wire["explanation"] = explanation
+        if content_snapshot is not None:
+            wire["contentSnapshot"] = content_snapshot
+        data = await self._request("POST", f"/agent-runs/{_quote(run_id)}/feedback", wire) or {}
+        return _parse_run_feedback(data, run_id)
 
     # ----------------------------------------------------------- Sessions
 
