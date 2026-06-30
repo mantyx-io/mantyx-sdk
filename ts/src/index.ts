@@ -113,6 +113,9 @@ export {
 } from "./tools.js";
 export type {
   LocalTool,
+  LocalToolResult,
+  LocalToolOutput,
+  ToolResultFile,
   MantyxToolRef,
   MantyxPluginToolRef,
   ToolRef,

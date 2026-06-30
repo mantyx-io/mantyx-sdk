@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from mantyx import (
     MantyxClient,
     MantyxRunError,
+    ToolResult,
+    ToolResultFile,
     define_local_tool,
     mantyx_plugin_tool,
     mantyx_tool,
@@ -70,6 +72,46 @@ def test_run_agent_with_local_tool(mantyx_client: MantyxClient, mock_server: Moc
     assert mock_server.last_tool_result_body is not None
     assert mock_server.last_tool_result_body["toolUseId"] == "tu_1"
     assert mock_server.last_tool_result_body["result"] == "contents-of:/etc/host"
+
+
+def test_run_agent_local_tool_returns_files(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    class Args(BaseModel):
+        kind: str
+
+    def execute(args: Args) -> ToolResult:
+        return ToolResult(
+            result=f"rendered a {args.kind} chart",
+            files=[
+                ToolResultFile(filename="chart.png", mime_type="image/png", data="aW1n"),
+            ],
+        )
+
+    tool = define_local_tool(name="render_chart", parameters=Args, execute=execute)
+
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="local_tool_call",
+                data={"toolUseId": "tu_f", "name": "render_chart", "args": {"kind": "bar"}},
+                wait_for_result=True,
+            ),
+            ScriptEvent(kind="result", data={"subtype": "success", "text": "done"}),
+        ]
+    )
+
+    result = mantyx_client.run_agent(
+        system_prompt="You are an assistant.",
+        prompt="Make a chart.",
+        tools=[tool],
+    )
+    assert result.text == "done"
+    assert mock_server.last_tool_result_body is not None
+    assert mock_server.last_tool_result_body["result"] == "rendered a bar chart"
+    assert mock_server.last_tool_result_body["files"] == [
+        {"filename": "chart.png", "mimeType": "image/png", "data": "aW1n"}
+    ]
 
 
 def test_run_agent_error_terminates(mantyx_client: MantyxClient, mock_server: MockServer) -> None:

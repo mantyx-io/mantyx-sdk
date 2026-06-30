@@ -24,5 +24,6 @@ To run any example after publishing the SDK as a real Go module, delete the
 | `mcp-tools/`     | Combine remote (`MantyxMcp`) + local (`LocalMcp`) MCP servers.                         |
 | `plan-only/`     | Plan-only run via `RunPlan` — structured checklist, no agent loop.                     |
 | `message-attachments/` | File inputs via `Attachments`, `Messages`, and `WithAttachments`.                |
+| `tool-files/`    | A local tool that returns a file (SVG chart) alongside its text result via `ToolResult`. |
 
 All examples use `MANTYX_API_KEY` and `MANTYX_WORKSPACE_SLUG` env vars.

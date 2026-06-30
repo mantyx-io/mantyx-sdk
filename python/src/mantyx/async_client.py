@@ -6,7 +6,6 @@ Mirrors :mod:`mantyx.client` but exposes coroutines and async iterators.
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import (
     Any,
@@ -693,9 +692,11 @@ class AsyncMantyxClient:
                 handler.parameters,
                 cast(dict[str, Any] | None, ev.data.get("args") or ev.data.get("input")),
             )
+            from .tools import normalize_local_tool_output
+
             out = await maybe_await(handler.execute(args))
-            text = out if isinstance(out, str) else json.dumps(out)
-            await self._post_tool_result(run_id, tool_use_id, result=text)
+            text, files = normalize_local_tool_output(out)
+            await self._post_tool_result(run_id, tool_use_id, result=text, files=files)
         except Exception as e:
             await self._post_tool_result(
                 run_id,
@@ -710,12 +711,15 @@ class AsyncMantyxClient:
         *,
         result: str | None = None,
         error: str | None = None,
+        files: list[dict[str, str]] | None = None,
     ) -> None:
         body: dict[str, Any] = {"toolUseId": tool_use_id}
         if result is not None:
             body["result"] = result
         if error is not None:
             body["error"] = error
+        if files:
+            body["files"] = files
         try:
             await self._request("POST", f"/agent-runs/{_quote(run_id)}/tool-results", body)
         except MantyxError:

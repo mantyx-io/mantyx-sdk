@@ -1520,24 +1520,43 @@ func (c *Client) dispatchLocalTool(ctx context.Context, runID string, ev RunEven
 			return
 		}
 		rawArgs, _ := json.Marshal(ev.Data["args"])
-		out, err := tool.invoke(ctx, rawArgs)
+		out, files, err := tool.invoke(ctx, rawArgs)
 		if err != nil {
 			_ = c.PostToolResult(ctx, runID, toolUseID, "", err.Error())
 			return
 		}
-		_ = c.PostToolResult(ctx, runID, toolUseID, out, "")
+		_ = c.PostToolResultWithFiles(ctx, runID, toolUseID, out, files)
 	}
 }
 
 // PostToolResult sends the SDK's response for a `local_tool_call` event back to
 // the server. Either `result` (success) or `errMsg` (failure) should be set.
 func (c *Client) PostToolResult(ctx context.Context, runID, toolUseID, result, errMsg string) error {
+	return c.postToolResult(ctx, runID, toolUseID, result, errMsg, nil)
+}
+
+// PostToolResultWithFiles is like PostToolResult but also attaches files the
+// client-resolved tool produced. The bytes are surfaced to the model on the
+// next turn as native file parts (see ToolResultFile). Files are only honored
+// alongside a successful result; pass them with an empty errMsg.
+func (c *Client) PostToolResultWithFiles(ctx context.Context, runID, toolUseID, result string, files []ToolResultFile) error {
+	return c.postToolResult(ctx, runID, toolUseID, result, "", files)
+}
+
+func (c *Client) postToolResult(ctx context.Context, runID, toolUseID, result, errMsg string, files []ToolResultFile) error {
 	body := map[string]any{"toolUseId": toolUseID}
-	if result != "" {
-		body["result"] = result
-	}
 	if errMsg != "" {
 		body["error"] = errMsg
+	} else {
+		// `files` are only honored alongside a `result`; when files are
+		// present we always include `result` (even empty) so the server
+		// treats the post as a success with attachments rather than a no-op.
+		if result != "" || len(files) > 0 {
+			body["result"] = result
+		}
+		if len(files) > 0 {
+			body["files"] = files
+		}
 	}
 	path := fmt.Sprintf("/agent-runs/%s/tool-results", pathEscape(runID))
 	return c.do(ctx, "POST", path, body, nil)

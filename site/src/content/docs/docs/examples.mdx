@@ -53,6 +53,28 @@ Multi-role `messages` arrays and file inputs on runs and session turns. For inli
   />
 </CardGrid>
 
+## Tools that return files
+
+Local tools that hand a file back to the model alongside their textual result. For inline snippets see [Local tools › Returning files](/docs/tools/local/#returning-files).
+
+<CardGrid>
+  <LinkCard
+    title="tool-files (TypeScript)"
+    description="A local tool returns an SVG chart via LocalToolResult { result, files }."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/tool-files"
+  />
+  <LinkCard
+    title="tool-files (Go)"
+    description="A local tool returns an SVG chart via mantyx.ToolResult."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/tool-files"
+  />
+  <LinkCard
+    title="tool-files (Python)"
+    description="A local tool returns an SVG chart via ToolResult / ToolResultFile."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/tool-files"
+  />
+</CardGrid>
+
 ## TypeScript
 
 <CardGrid>
@@ -105,6 +127,11 @@ Multi-role `messages` arrays and file inputs on runs and session turns. For inli
     title="message-attachments"
     description="File inputs on runs and sessions (prompt, messages, session.send)."
     href="https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/message-attachments"
+  />
+  <LinkCard
+    title="tool-files"
+    description="A local tool returns a file (SVG chart) alongside its text result."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/tool-files"
   />
   <LinkCard
     title="computer-use"
@@ -166,6 +193,11 @@ Multi-role `messages` arrays and file inputs on runs and session turns. For inli
     description="File inputs on runs and sessions (Attachments, Messages, WithAttachments)."
     href="https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/message-attachments"
   />
+  <LinkCard
+    title="tool-files"
+    description="A local tool returns a file (SVG chart) alongside its text result via ToolResult."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/tool-files"
+  />
 </CardGrid>
 
 ## Python
@@ -220,5 +252,10 @@ Multi-role `messages` arrays and file inputs on runs and session turns. For inli
     title="message-attachments"
     description="Typed attachments, messages array, and session replay metadata."
     href="https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/message-attachments"
+  />
+  <LinkCard
+    title="tool-files"
+    description="A local tool returns a file (SVG chart) alongside its text result via ToolResult."
+    href="https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/tool-files"
   />
 </CardGrid>

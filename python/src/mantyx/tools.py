@@ -190,6 +190,51 @@ def _prefixed_mcp_tool_name(server_name: str, tool_name: str) -> str:
     return prefix + tool_name
 
 
+# ------------------------------------------------------------- Tool-result files
+
+
+@dataclass(frozen=True)
+class ToolResultFile:
+    """A file produced by a client-resolved tool, returned alongside the
+    textual ``result``.
+
+    The bytes are surfaced to the model on the next turn as native file parts
+    (Anthropic / Gemini / Bedrock inside the ``tool_result``; OpenAI as a
+    synthetic follow-up user turn) — the same pipeline used by server-resolved
+    tools that return files.
+
+    Limits (enforced server-side): up to 20 files per result, ``mime_type``
+    must be an allowed attachment type, and the combined decoded size is
+    capped (currently 5 MB). Files over the inline threshold are persisted to
+    object storage and forwarded by reference. For larger artifacts, upload
+    them out of band and reference a URL in ``result`` instead. See
+    ``docs/agent-runs-protocol.md`` §8.
+    """
+
+    #: Display filename surfaced to the model (e.g. ``"chart.png"``).
+    filename: str
+    #: Allowed attachment MIME type (e.g. ``"image/png"``, ``"text/plain"``).
+    mime_type: str
+    #: Base64-encoded file bytes — **no** ``data:`` URL prefix.
+    data: str
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """Rich return value for a :class:`LocalTool`'s ``execute``.
+
+    Return this (instead of a bare string) when the tool needs to hand files
+    back to the model in addition to — or instead of — its textual result.
+    ``result`` is the same string a tool would normally return; leave it
+    empty when the files are the whole payload. ``files`` is ignored when the
+    handler raises — errors are surfaced to the model as a tool-error
+    response with no attachments.
+    """
+
+    result: str = ""
+    files: list[ToolResultFile] | None = None
+
+
 # ----------------------------------------------------------- Generic local tool
 
 
@@ -401,8 +446,10 @@ def define_local_tool(
         name: ``[a-zA-Z0-9_]{1,64}`` — what the model addresses the tool by.
         execute: Sync or async callable. Receives parsed args (a Pydantic
             model instance if ``parameters`` is a model, otherwise a
-            ``dict``). Must return a string. Non-string returns are
-            JSON-serialised by the SDK before being POSTed back.
+            ``dict``). Return a string, or a :class:`ToolResult` to hand
+            files back to the model alongside the textual result. Other
+            (non-string) returns are JSON-serialised by the SDK before being
+            POSTed back.
         description: Free-form description for the model.
         parameters: A Pydantic v2 ``BaseModel`` subclass, a JSON Schema
             dict, or ``None`` for "any object".
@@ -633,6 +680,38 @@ def call_handler_sync(handler: Callable[..., Any], parsed_args: Any) -> Any:
     if inspect.isawaitable(out):
         return asyncio.run(maybe_await(out))
     return out
+
+
+def normalize_local_tool_output(out: Any) -> tuple[str, list[dict[str, str]] | None]:
+    """Coerce whatever a local tool's ``execute`` returned into the
+    ``(result, files)`` pair the SDK POSTs back.
+
+    * ``str``                  → ``(out, None)``
+    * :class:`ToolResult`      → ``(result, wire_files)`` (files serialised to
+      the camelCase wire shape ``{filename, mimeType, data}``)
+    * anything else            → ``(json.dumps(out), None)`` — preserving the
+      long-standing "non-string returns are JSON-serialised" contract.
+    """
+    if isinstance(out, str):
+        return out, None
+    if isinstance(out, ToolResult):
+        files = _serialize_tool_result_files(out.files)
+        result = out.result if isinstance(out.result, str) else ""
+        return result, files
+    return json.dumps(out), None
+
+
+def _serialize_tool_result_files(
+    files: Sequence[ToolResultFile] | None,
+) -> list[dict[str, str]] | None:
+    if not files:
+        return None
+    out: list[dict[str, str]] = []
+    for f in files:
+        if not isinstance(f, ToolResultFile):
+            continue
+        out.append({"filename": f.filename, "mimeType": f.mime_type, "data": f.data})
+    return out or None
 
 
 def collect_local_handlers(
@@ -1128,6 +1207,8 @@ __all__ = [
     "ToolBudgets",
     "ToolName",
     "ToolRef",
+    "ToolResult",
+    "ToolResultFile",
     "call_handler_sync",
     "collect_local_handlers",
     "define_local_a2a",
@@ -1141,6 +1222,7 @@ __all__ = [
     "mantyx_plugin_tool",
     "mantyx_tool",
     "maybe_await",
+    "normalize_local_tool_output",
     "normalize_loop_detection",
     "normalize_output_schema",
     "normalize_plan",

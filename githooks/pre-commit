@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
-# MANTYX SDK monorepo — run the same drift checks as CI before completing a commit.
-# Enable once per clone:  git config core.hooksPath githooks
+# MANTYX SDK monorepo — format staged Python files and run the same drift checks as CI.
+# Enable once per clone:  ./scripts/setup-git-hooks.sh
 # Disable:                 git config --unset core.hooksPath
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
+
+STAGED_PY="$(git diff --cached --name-only --diff-filter=ACM | grep -E '^python/.*\.py$' || true)"
+if [[ -n "$STAGED_PY" ]]; then
+  echo "pre-commit: format staged Python files"
+  # shellcheck disable=SC2086
+  "$ROOT/scripts/format.sh" $STAGED_PY
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && git add "$file"
+  done <<<"$STAGED_PY"
+fi
 
 echo "pre-commit: sync-version --check"
 node scripts/sync-version.mjs --check
@@ -12,15 +22,13 @@ node scripts/sync-version.mjs --check
 echo "pre-commit: sync-agent-runs-doc --check"
 node scripts/sync-agent-runs-doc.mjs --check
 
-echo "pre-commit: ruff check + format (python/)"
+echo "pre-commit: ruff check (python/)"
 (
   cd "$ROOT/python"
   if command -v uv >/dev/null 2>&1; then
     uv run ruff check .
-    uv run ruff format --check .
   elif python3 -m ruff --version >/dev/null 2>&1; then
     python3 -m ruff check .
-    python3 -m ruff format --check .
   else
     echo "pre-commit: ruff not found — install dev deps: cd python && pip install -e '.[dev]'" >&2
     exit 1

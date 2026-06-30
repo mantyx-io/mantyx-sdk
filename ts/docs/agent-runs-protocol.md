@@ -1448,8 +1448,11 @@ Content-Type: application/json
 
 {
   "toolUseId": "tu_x",
-  "result": "127.0.0.1 localhost"     // OR
-  "error":  "ENOENT: no such file"
+  "result": "127.0.0.1 localhost",    // OR
+  "error":  "ENOENT: no such file",
+  "files": [                          // optional; only with `result`
+    { "filename": "hosts.txt", "mimeType": "text/plain", "data": "<base64>" }
+  ]
 }
 ```
 
@@ -1459,6 +1462,17 @@ has already produced a `result` event.
 
 `result` MUST be a string; SDKs serialize structured outputs as JSON before
 posting. Errors are surfaced to the model as a tool-error response.
+
+A client-resolved tool may also return **files** by attaching a `files` array
+alongside `result`. Each entry is `{ filename, mimeType, data }` where `data`
+is base64 (no data-URL prefix) and `mimeType` is an allowed attachment type.
+The bytes are surfaced to the model on the next turn as native file parts
+(Anthropic / Gemini / Bedrock inside the `tool_result`; OpenAI as a synthetic
+follow-up user turn) — the same pipeline used by server-resolved tools that
+return files. Up to 20 files per result; the combined decoded size is capped
+(currently 5 MB) and files over the inline threshold are persisted to object
+storage and forwarded by reference. `files` is ignored when `error` is set;
+for large artifacts, upload them out of band and reference a URL in `result`.
 
 ## 9. Cancellation
 

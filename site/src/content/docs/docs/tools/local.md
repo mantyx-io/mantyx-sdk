@@ -105,6 +105,70 @@ Execute: func(ctx context.Context, args ResolveIDsArgs) (*Result, error) {
 
 A thrown error (or a non-`nil` `error` in Go) is forwarded to the model as a tool-error response. You typically don't need to catch and re-throw; the SDK wraps the message into the right wire shape automatically.
 
+## Returning files
+
+A local tool can hand **files** back to the model alongside its textual result. Return the richer result shape — `LocalToolResult` (TypeScript), `ToolResult` (Python / Go) — carrying a `files` array of `{ filename, mimeType, data }`, where `data` is base64-encoded bytes with **no** `data:` URL prefix. The SDK posts them with the tool-result, and MANTYX surfaces them to the model on the next turn as native file parts (Anthropic / Gemini / Bedrock inside the `tool_result`; OpenAI as a synthetic follow-up user turn) — the same pipeline used by server-resolved tools that return files.
+
+```ts
+import { defineLocalTool } from "@mantyx/sdk";
+import { z } from "zod";
+
+defineLocalTool({
+  name: "render_chart",
+  parameters: z.object({ kind: z.string() }),
+  execute: async ({ kind }) => {
+    const png = await renderChart(kind); // Buffer
+    return {
+      result: `Rendered a ${kind} chart.`,
+      files: [
+        { filename: "chart.png", mimeType: "image/png", data: png.toString("base64") },
+      ],
+    };
+  },
+});
+```
+
+```python
+import base64
+from mantyx import define_local_tool, ToolResult, ToolResultFile
+
+def render_chart(args):
+    png = render(args.kind)  # bytes
+    return ToolResult(
+        result=f"Rendered a {args.kind} chart.",
+        files=[
+            ToolResultFile(
+                filename="chart.png",
+                mime_type="image/png",
+                data=base64.b64encode(png).decode(),
+            ),
+        ],
+    )
+
+define_local_tool(name="render_chart", parameters=ChartArgs, execute=render_chart)
+```
+
+```go
+mantyx.LocalTool(mantyx.LocalToolSpec{
+    Name:       "render_chart",
+    Parameters: &chartArgs{},
+    Execute: func(ctx context.Context, args chartArgs) (mantyx.ToolResult, error) {
+        png, err := renderChart(args.Kind)
+        if err != nil {
+            return mantyx.ToolResult{}, err
+        }
+        return mantyx.ToolResult{
+            Result: fmt.Sprintf("Rendered a %s chart.", args.Kind),
+            Files: []mantyx.ToolResultFile{
+                {Filename: "chart.png", MimeType: "image/png", Data: base64.StdEncoding.EncodeToString(png)},
+            },
+        }, nil
+    },
+})
+```
+
+`result` is optional — leave it empty when the files are the whole payload. Files are **ignored on the error path**: a thrown error (or non-`nil` Go `error`) is surfaced as a tool-error response with no attachments. Limits are enforced server-side: up to 20 files per result, `mimeType` must be an allowed attachment type, and the combined decoded size is capped (currently 5 MB). For larger artifacts, upload them out of band and reference a URL in `result` instead. In Go, returning `ToolResult` also skips `outputSchema` inference — the `{result, files}` envelope is transport, not a model-facing output contract.
+
 ## Declaring an `outputSchema`
 
 You can attach a JSON Schema for the tool's structured **return value** alongside `parameters`. MANTYX forwards it to providers that support per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. Either way the model uses it to plan follow-up calls more reliably.

@@ -40,6 +40,55 @@ export type ZodLikeObject = z.ZodType<Record<string, unknown>> & {
  */
 export type ReasoningLevel = "off" | "low" | "medium" | "high" | number;
 
+// ------------------------------------------------------------- Tool-result files
+
+/**
+ * A file produced by a client-resolved tool, returned alongside the textual
+ * `result`. The bytes are surfaced to the model on the next turn as native
+ * file parts (Anthropic / Gemini / Bedrock inside the `tool_result`; OpenAI
+ * as a synthetic follow-up user turn) — the same pipeline used by
+ * server-resolved tools that return files.
+ *
+ * Limits (enforced server-side): up to 20 files per result, `mimeType` must
+ * be an allowed attachment type, and the combined decoded size is capped
+ * (currently 5 MB). Files over the inline threshold are persisted to object
+ * storage and forwarded by reference. For larger artifacts, upload them out
+ * of band and reference a URL in `result` instead. See
+ * `docs/agent-runs-protocol.md` §8 and `docs/wire-protocol.md` §4.
+ */
+export interface ToolResultFile {
+  /** Display filename surfaced to the model (e.g. `"chart.png"`). */
+  filename: string;
+  /** Allowed attachment MIME type (e.g. `"image/png"`, `"text/plain"`). */
+  mimeType: string;
+  /** Base64-encoded file bytes — **no** `data:` URL prefix. */
+  data: string;
+}
+
+/**
+ * Rich return value for a {@link LocalTool}'s `execute`. Return this (instead
+ * of a bare string) when the tool needs to hand files back to the model in
+ * addition to — or instead of — its textual result.
+ *
+ * `result` is the same string a tool would normally return; omit it (or pass
+ * the empty string) when the files are the whole payload. `files` is ignored
+ * when the tool throws — errors are surfaced to the model as a tool-error
+ * response with no attachments.
+ */
+export interface LocalToolResult {
+  /** Textual result. Optional when `files` carries the payload. */
+  result?: string;
+  /** Files to surface to the model on the next turn. */
+  files?: ToolResultFile[];
+}
+
+/**
+ * What a {@link LocalTool}'s `execute` may return: a bare string (the common
+ * case) or a {@link LocalToolResult} carrying files. Non-string, non-result
+ * values are JSON-serialized by the SDK before being posted back.
+ */
+export type LocalToolOutput = string | LocalToolResult;
+
 // ---------------------------------------------------------- Generic local tool
 
 /**
@@ -82,7 +131,7 @@ export interface LocalTool<TArgs = Record<string, unknown>> {
    * `docs/agent-runs-protocol.md` §4.1.1.
    */
   readonly readOnly: boolean;
-  readonly execute: (args: TArgs) => Promise<string> | string;
+  readonly execute: (args: TArgs) => Promise<LocalToolOutput> | LocalToolOutput;
 }
 
 export interface DefineLocalToolOptions<T extends ZodLikeObject | undefined> {
@@ -109,7 +158,7 @@ export interface DefineLocalToolOptions<T extends ZodLikeObject | undefined> {
   readOnly?: boolean;
   execute: (
     args: T extends ZodLikeObject ? z.infer<T> : Record<string, unknown>,
-  ) => Promise<string> | string;
+  ) => Promise<LocalToolOutput> | LocalToolOutput;
 }
 
 export function defineLocalTool<T extends ZodLikeObject | undefined>(
@@ -509,4 +558,54 @@ function assertToolName(name: string): void {
 export function prefixedMcpToolName(serverName: string, toolName: string): string {
   const prefix = `${serverName}_`;
   return toolName.startsWith(prefix) ? toolName : `${prefix}${toolName}`;
+}
+
+/**
+ * Coerce whatever a local tool's `execute` returned into the wire-level
+ * `{ result, files }` pair the SDK POSTs back:
+ *
+ *   - `string`                       → `{ result }`
+ *   - `{ result?, files? }`          → forwarded as-is (files validated)
+ *   - any other value                → `{ result: JSON.stringify(value) }`
+ *
+ * The third case preserves the long-standing "non-string returns are
+ * JSON-serialized" contract for handlers that return plain objects.
+ */
+export function normalizeLocalToolOutput(out: unknown): {
+  result: string;
+  files?: ToolResultFile[];
+} {
+  if (typeof out === "string") return { result: out };
+  if (isLocalToolResult(out)) {
+    const files = sanitizeToolResultFiles(out.files);
+    const result = typeof out.result === "string" ? out.result : "";
+    return files ? { result, files } : { result };
+  }
+  return { result: JSON.stringify(out) };
+}
+
+function isLocalToolResult(out: unknown): out is LocalToolResult {
+  if (out === null || typeof out !== "object" || Array.isArray(out)) return false;
+  const o = out as Record<string, unknown>;
+  return (
+    (typeof o.result === "string" || o.result === undefined) &&
+    ("files" in o || "result" in o)
+  );
+}
+
+function sanitizeToolResultFiles(files: unknown): ToolResultFile[] | undefined {
+  if (!Array.isArray(files) || files.length === 0) return undefined;
+  const out: ToolResultFile[] = [];
+  for (const f of files) {
+    if (!f || typeof f !== "object") continue;
+    const file = f as Record<string, unknown>;
+    if (
+      typeof file.filename === "string" &&
+      typeof file.mimeType === "string" &&
+      typeof file.data === "string"
+    ) {
+      out.push({ filename: file.filename, mimeType: file.mimeType, data: file.data });
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }

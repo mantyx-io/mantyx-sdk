@@ -56,22 +56,23 @@ Then re-run the checks above (at minimum the two `--check` scripts and any SDK/s
 
 ## Optional: pre-commit hook
 
-Enable once per clone to run drift checks and Python lint/format automatically on commit:
+Enable once per clone to auto-format staged Python files and run drift checks on commit:
 
 ```bash
-git config core.hooksPath githooks
+./scripts/setup-git-hooks.sh
 ```
 
 The hook runs:
 
+- [`scripts/format.sh`](scripts/format.sh) on staged `python/**/*.py` files (re-stages fixes)
 - `scripts/sync-version.mjs --check`
 - `scripts/sync-agent-runs-doc.mjs --check`
-- `ruff check .` and `ruff format --check .` in `python/` (via `uv run` when available)
+- `ruff check .` in `python/` (via `uv run` when available)
 
-To fix formatting locally before committing:
+To format the whole Python tree manually:
 
 ```bash
-cd python && uv run ruff format .
+./scripts/format.sh
 ```
 
 See [`githooks/README.md`](githooks/README.md) for details.

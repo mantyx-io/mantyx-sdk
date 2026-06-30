@@ -908,7 +908,10 @@ Authorization: Bearer <api-key>
 
 {
   "toolUseId": "tu_z",                  // copied from local_tool_call
-  "result":    "<file contents>"        // OR "error": "..." (mutually exclusive)
+  "result":    "<file contents>",       // OR "error": "..." (mutually exclusive)
+  "files": [                            // optional; only with `result`
+    { "filename": "chart.png", "mimeType": "image/png", "data": "<base64>" }
+  ]
 }
 ```
 
@@ -917,6 +920,7 @@ Authorization: Bearer <api-key>
 | `toolUseId` | string | yes      | Must match a pending `local_tool_call`'s id.                                                                                   |
 | `result`    | string | one-of   | Successful textual result (≤ 2 MB). For MCP tools, flatten content blocks to text. For A2A delegations, the peer's reply text. |
 | `error`     | string | one-of   | Human-readable failure message (≤ 8 KB). Surfaced to the model so it can recover.                                              |
+| `files`     | array  | no       | Files the client-resolved tool produced, surfaced to the model on the next turn as native file parts (Anthropic / Gemini / Bedrock inside `tool_result`; OpenAI as a synthetic follow-up user turn). Each entry is `{ filename, mimeType, data }` with `data` base64 (no data-URL prefix). Only honored alongside `result`; ignored when `error` is set. `mimeType` must be an allowed attachment type. Up to 20 files; combined decoded bytes are capped (currently 5 MB), and large files are persisted to object storage and forwarded by reference. For bigger artifacts, upload out of band and reference a URL in `result`. |
 
 Server response codes:
 

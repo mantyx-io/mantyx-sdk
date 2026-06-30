@@ -70,6 +70,60 @@ describe("MantyxClient.runAgent", () => {
     });
   });
 
+  it("posts files alongside the result when a local tool returns them", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "local_tool_call",
+          toolUseId: "t-files",
+          name: "render_chart",
+          args: { kind: "bar" },
+          awaitToolResult: true,
+        },
+        { type: "result", subtype: "success", text: "done" },
+      ],
+    };
+    const tool = defineLocalTool({
+      name: "render_chart",
+      parameters: z.object({ kind: z.string() }),
+      execute: ({ kind }) => ({
+        result: `rendered a ${kind} chart`,
+        files: [
+          { filename: "chart.png", mimeType: "image/png", data: "aW1hZ2VieXRlcw==" },
+        ],
+      }),
+    });
+    const out = await client.runAgent({ systemPrompt: "x", prompt: "go", tools: [tool] });
+    expect(out.text).toBe("done");
+    expect(server.lastToolResult?.payload).toEqual({
+      toolUseId: "t-files",
+      result: "rendered a bar chart",
+      files: [{ filename: "chart.png", mimeType: "image/png", data: "aW1hZ2VieXRlcw==" }],
+    });
+  });
+
+  it("omits the files key when a local tool returns a bare string", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "local_tool_call",
+          toolUseId: "t-str",
+          name: "echo",
+          args: { value: "hi" },
+          awaitToolResult: true,
+        },
+        { type: "result", subtype: "success", text: "done" },
+      ],
+    };
+    const tool = defineLocalTool({
+      name: "echo",
+      parameters: z.object({ value: z.string() }),
+      execute: ({ value }) => value,
+    });
+    await client.runAgent({ systemPrompt: "x", prompt: "go", tools: [tool] });
+    expect(server.lastToolResult?.payload).toEqual({ toolUseId: "t-str", result: "hi" });
+  });
+
   it("surfaces server-reported errors as MantyxRunError", async () => {
     server.scriptForNextRun = {
       events: [{ type: "result", subtype: "error_other", text: "bad" } as { type: "result" } & { subtype?: string; text?: string }],

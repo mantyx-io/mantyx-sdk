@@ -889,11 +889,11 @@ class MantyxClient:
                 handler.parameters,
                 cast(dict[str, Any] | None, ev.data.get("args") or ev.data.get("input")),
             )
-            from .tools import call_handler_sync
+            from .tools import call_handler_sync, normalize_local_tool_output
 
             out = call_handler_sync(handler.execute, args)
-            text = out if isinstance(out, str) else json.dumps(out)
-            self._post_tool_result(run_id, tool_use_id, result=text)
+            text, files = normalize_local_tool_output(out)
+            self._post_tool_result(run_id, tool_use_id, result=text, files=files)
         except Exception as e:
             self._post_tool_result(
                 run_id,
@@ -908,12 +908,15 @@ class MantyxClient:
         *,
         result: str | None = None,
         error: str | None = None,
+        files: list[dict[str, str]] | None = None,
     ) -> None:
         body: dict[str, Any] = {"toolUseId": tool_use_id}
         if result is not None:
             body["result"] = result
         if error is not None:
             body["error"] = error
+        if files:
+            body["files"] = files
         try:
             self._request("POST", f"/agent-runs/{_quote(run_id)}/tool-results", body)
         except MantyxError:

@@ -21,8 +21,15 @@ import type {
   LocalToolSchemaInput,
   ReasoningLevel,
   ToolRef,
+  ToolResultFile,
 } from "./tools.js";
-import { isLocalA2ATool, isLocalMcpServer, isLocalTool, prefixedMcpToolName } from "./tools.js";
+import {
+  isLocalA2ATool,
+  isLocalMcpServer,
+  isLocalTool,
+  normalizeLocalToolOutput,
+  prefixedMcpToolName,
+} from "./tools.js";
 import { toToolParametersWire } from "./zod-to-json-schema.js";
 
 export const DEFAULT_BASE_URL = "https://app.mantyx.io";
@@ -1327,6 +1334,7 @@ export class MantyxClient {
     const kind = ev.kind ?? "local";
     try {
       let out: string;
+      let files: ToolResultFile[] | undefined;
       if (kind === "a2a_local") {
         const tool = handlers.a2aTools.get(ev.name);
         if (!tool) {
@@ -1365,10 +1373,11 @@ export class MantyxClient {
         const args = handler.parameters
           ? (handler.parameters.parse?.(ev.args) as Record<string, unknown>) ?? ev.args
           : ev.args;
-        const result = await handler.execute(args);
-        out = typeof result === "string" ? result : JSON.stringify(result);
+        const normalized = normalizeLocalToolOutput(await handler.execute(args));
+        out = normalized.result;
+        files = normalized.files;
       }
-      await this.postToolResult(runId, ev.toolUseId, { result: out });
+      await this.postToolResult(runId, ev.toolUseId, files ? { result: out, files } : { result: out });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const handlerName = describeHandlerName(ev);
@@ -1381,7 +1390,7 @@ export class MantyxClient {
   async postToolResult(
     runId: string,
     toolUseId: string,
-    payload: { result?: string; error?: string },
+    payload: { result?: string; error?: string; files?: ToolResultFile[] },
   ): Promise<void> {
     await this.request<{ ok: boolean }>({
       method: "POST",

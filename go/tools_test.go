@@ -1073,6 +1073,75 @@ func TestDispatch_LocalTool_TypedStructResult(t *testing.T) {
 	}
 }
 
+func TestDispatch_LocalTool_ToolResultFiles(t *testing.T) {
+	type chartArgs struct {
+		Kind string `json:"kind"`
+	}
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "local_tool_call",
+				data: map[string]any{
+					"toolUseId": "tu_files",
+					"name":      "render_chart",
+					"args":      map[string]any{"kind": "bar"},
+				},
+				wait: true,
+			},
+			{kind: "result", data: map[string]any{"subtype": "success", "text": "done"}},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:       "render_chart",
+		Parameters: &chartArgs{},
+		Execute: func(ctx context.Context, args chartArgs) (ToolResult, error) {
+			return ToolResult{
+				Result: fmt.Sprintf("rendered a %s chart", args.Kind),
+				Files: []ToolResultFile{
+					{Filename: "chart.png", MimeType: "image/png", Data: "aW1n"},
+				},
+			}, nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "go",
+		Tools:        []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	var posted struct {
+		ToolUseID string           `json:"toolUseId"`
+		Result    string           `json:"result"`
+		Files     []ToolResultFile `json:"files"`
+	}
+	if err := json.Unmarshal(server.lastToolResultBody, &posted); err != nil {
+		t.Fatalf("parse tool-result body: %v", err)
+	}
+	if posted.ToolUseID != "tu_files" {
+		t.Fatalf("unexpected toolUseId: %q", posted.ToolUseID)
+	}
+	if posted.Result != "rendered a bar chart" {
+		t.Fatalf("unexpected result: %q", posted.Result)
+	}
+	if len(posted.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d (raw=%s)", len(posted.Files), server.lastToolResultBody)
+	}
+	f := posted.Files[0]
+	if f.Filename != "chart.png" || f.MimeType != "image/png" || f.Data != "aW1n" {
+		t.Fatalf("unexpected file payload: %#v", f)
+	}
+	// ToolResult is transport, not a model-facing output contract — no
+	// outputSchema should be advertised on the wire.
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if _, has := got["outputSchema"]; has {
+		t.Fatalf("expected no outputSchema for ToolResult return, got %#v", got["outputSchema"])
+	}
+}
+
 func TestDispatch_LocalTool_TypedValueStructResult(t *testing.T) {
 	type ack struct {
 		OK    bool `json:"ok"`

@@ -54,6 +54,47 @@ func (r mantyxPluginToolRef) toolWire() map[string]any {
 // MantyxPluginTool references a plugin tool by its `@plugin-slug/tool-name`.
 func MantyxPluginTool(name string) ToolRef { return mantyxPluginToolRef{name: name} }
 
+// ----- tool-result files ---------------------------------------------------
+
+// ToolResultFile is a file produced by a client-resolved tool, returned
+// alongside the textual result. The bytes are surfaced to the model on the
+// next turn as native file parts (Anthropic / Gemini / Bedrock inside the
+// tool_result; OpenAI as a synthetic follow-up user turn) — the same pipeline
+// used by server-resolved tools that return files.
+//
+// Limits (enforced server-side): up to 20 files per result, MimeType must be
+// an allowed attachment type, and the combined decoded size is capped
+// (currently 5 MB). Files over the inline threshold are persisted to object
+// storage and forwarded by reference. For larger artifacts, upload them out
+// of band and reference a URL in the result instead. See
+// docs/agent-runs-protocol.md §8.
+type ToolResultFile struct {
+	// Filename is the display name surfaced to the model (e.g. "chart.png").
+	Filename string `json:"filename"`
+	// MimeType is an allowed attachment type (e.g. "image/png", "text/plain").
+	MimeType string `json:"mimeType"`
+	// Data is the base64-encoded file bytes — no `data:` URL prefix.
+	Data string `json:"data"`
+}
+
+// ToolResult is the rich return value for a LocalTool's Execute. Return it
+// (instead of a bare string or typed struct) when the tool needs to hand
+// files back to the model in addition to — or instead of — its textual
+// result. Result is the same string a tool would normally return; leave it
+// empty when the files are the whole payload. Files is ignored when Execute
+// returns a non-nil error — errors are surfaced to the model as a tool-error
+// response with no attachments.
+//
+// When Execute's return type R is ToolResult (or *ToolResult), the SDK skips
+// output-schema inference: the {result, files} envelope is transport, not a
+// model-facing output contract.
+type ToolResult struct {
+	// Result is the textual result. Optional when Files carries the payload.
+	Result string
+	// Files are surfaced to the model on the next turn.
+	Files []ToolResultFile
+}
+
 // ----- local (generic local tool) ------------------------------------------
 
 // LocalToolSpec describes a tool that runs in the developer's process.
@@ -120,6 +161,9 @@ type LocalToolSpec struct {
 	//
 	//   - string           → forwarded verbatim (legacy contract).
 	//   - json.RawMessage  → forwarded verbatim (raw JSON bytes).
+	//   - ToolResult       → Result is forwarded as the textual result and
+	//     Files are attached alongside it (see ToolResultFile). Output-schema
+	//     inference is skipped for this type.
 	//   - any other type   → SDK json.Marshals the value, returning the
 	//     resulting JSON text. This pairs naturally with Parameters: a
 	//     single Go return type drives both the typed handler return and
@@ -135,7 +179,7 @@ type localTool struct {
 	spec         LocalToolSpec
 	schema       map[string]any
 	outputSchema map[string]any
-	invoke       func(ctx context.Context, raw json.RawMessage) (string, error)
+	invoke       func(ctx context.Context, raw json.RawMessage) (string, []ToolResultFile, error)
 }
 
 func (t *localTool) toolWire() map[string]any {
@@ -198,7 +242,7 @@ func resolveLocalToolOutputSchema(toolName string, userSupplied any, returnType 
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	if t.Kind() == reflect.String || t == rawMsgType {
+	if t.Kind() == reflect.String || t == rawMsgType || t == toolResultType {
 		return nil
 	}
 	probe := reflect.New(returnType).Interface()
@@ -213,9 +257,10 @@ func resolveLocalToolOutputSchema(toolName string, userSupplied any, returnType 
 }
 
 var (
-	contextType = reflect.TypeOf((*context.Context)(nil)).Elem()
-	errorType   = reflect.TypeOf((*error)(nil)).Elem()
-	rawMsgType  = reflect.TypeOf(json.RawMessage(nil))
+	contextType    = reflect.TypeOf((*context.Context)(nil)).Elem()
+	errorType      = reflect.TypeOf((*error)(nil)).Elem()
+	rawMsgType     = reflect.TypeOf(json.RawMessage(nil))
+	toolResultType = reflect.TypeOf(ToolResult{})
 )
 
 // buildLocalToolInvoker validates spec.Execute's shape and returns a closure
@@ -237,7 +282,7 @@ var (
 // any other Go type (json.Marshaled by the SDK before dispatch). Pairing R
 // with Parameters keeps both ends of the contract type-checked by the Go
 // compiler.
-func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Context, raw json.RawMessage) (string, error), reflect.Type, error) {
+func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Context, raw json.RawMessage) (string, []ToolResultFile, error), reflect.Type, error) {
 	if execute == nil {
 		return nil, nil, fmt.Errorf("Execute is required")
 	}
@@ -245,7 +290,11 @@ func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Conte
 	// reflection cost on every dispatch. The return type is `string`, which
 	// the inference pipeline treats as opaque text and skips.
 	if fn, ok := execute.(func(context.Context, json.RawMessage) (string, error)); ok {
-		return fn, reflect.TypeOf(""), nil
+		wrapped := func(ctx context.Context, raw json.RawMessage) (string, []ToolResultFile, error) {
+			out, err := fn(ctx, raw)
+			return out, nil, err
+		}
+		return wrapped, reflect.TypeOf(""), nil
 	}
 
 	rv := reflect.ValueOf(execute)
@@ -269,7 +318,7 @@ func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Conte
 	isRawMessage := argType == rawMsgType
 	isPointer := argType.Kind() == reflect.Ptr
 
-	invoke := func(ctx context.Context, raw json.RawMessage) (string, error) {
+	invoke := func(ctx context.Context, raw json.RawMessage) (string, []ToolResultFile, error) {
 		// Allocate a fresh *T (or *Telem when T is a pointer) so we have a
 		// settable target for json.Unmarshal.
 		var holder reflect.Value
@@ -280,7 +329,7 @@ func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Conte
 		}
 		if !isRawMessage && len(raw) > 0 {
 			if err := json.Unmarshal(raw, holder.Interface()); err != nil {
-				return "", fmt.Errorf("decode args for tool %q: %w", toolName, err)
+				return "", nil, fmt.Errorf("decode args for tool %q: %w", toolName, err)
 			}
 		} else if isRawMessage {
 			// Stash raw bytes directly on the json.RawMessage holder.
@@ -301,45 +350,65 @@ func buildLocalToolInvoker(toolName string, execute any) (func(ctx context.Conte
 		if rerr != nil {
 			// Skip result encoding on error — the caller drops the result
 			// payload and forwards err.Error() as the tool-error response.
-			return "", rerr
+			return "", nil, rerr
 		}
-		result, encErr := encoder(out[0])
+		result, files, encErr := encoder(out[0])
 		if encErr != nil {
-			return "", fmt.Errorf("encode result for tool %q: %w", toolName, encErr)
+			return "", nil, fmt.Errorf("encode result for tool %q: %w", toolName, encErr)
 		}
-		return result, nil
+		return result, files, nil
 	}
 	return invoke, returnType, nil
 }
 
 // resultEncoderFor returns a function that converts Execute's first return
-// value into the wire-level string the SDK posts back as a tool result.
+// value into the wire-level (string, files) pair the SDK posts back as a
+// tool result.
 //
-//   - string          → returned verbatim.
-//   - json.RawMessage → returned verbatim (raw JSON bytes).
-//   - everything else → json.Marshaled to JSON text.
+//   - string          → returned verbatim, no files.
+//   - json.RawMessage → returned verbatim (raw JSON bytes), no files.
+//   - ToolResult /
+//     *ToolResult     → Result is the textual payload; Files travel
+//     alongside it.
+//   - everything else → json.Marshaled to JSON text, no files.
 //
 // The tail case allows handlers to declare typed result structs (mirroring
 // how Parameters lets them declare typed argument structs) and have the
 // SDK do the marshaling on their behalf. Marshal failures are surfaced
 // from the call site as `encode result for tool …` errors at dispatch time.
-func resultEncoderFor(rt reflect.Type) func(reflect.Value) (string, error) {
+func resultEncoderFor(rt reflect.Type) func(reflect.Value) (string, []ToolResultFile, error) {
 	switch {
 	case rt.Kind() == reflect.String:
-		return func(v reflect.Value) (string, error) { return v.String(), nil }
+		return func(v reflect.Value) (string, []ToolResultFile, error) {
+			return v.String(), nil, nil
+		}
 	case rt == rawMsgType:
-		return func(v reflect.Value) (string, error) {
+		return func(v reflect.Value) (string, []ToolResultFile, error) {
 			// json.RawMessage is []byte under the hood — forward the
 			// raw JSON text without re-marshaling.
-			return string(v.Bytes()), nil
+			return string(v.Bytes()), nil, nil
+		}
+	case rt == toolResultType || (rt.Kind() == reflect.Pointer && rt.Elem() == toolResultType):
+		return func(v reflect.Value) (string, []ToolResultFile, error) {
+			if v.Kind() == reflect.Pointer {
+				if v.IsNil() {
+					return "", nil, nil
+				}
+				v = v.Elem()
+			}
+			tr, ok := v.Interface().(ToolResult)
+			if !ok {
+				return "", nil, fmt.Errorf("expected ToolResult, got %s", v.Type())
+			}
+			return tr.Result, tr.Files, nil
 		}
 	default:
-		return func(v reflect.Value) (string, error) {
+		return func(v reflect.Value) (string, []ToolResultFile, error) {
 			b, err := json.Marshal(v.Interface())
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
-			return string(b), nil
+			return string(b), nil, nil
 		}
 	}
 }

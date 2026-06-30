@@ -117,13 +117,19 @@ CI runs `node scripts/sync-agent-runs-doc.mjs --check` so drift fails the build.
 
 ## Git hooks (optional)
 
-CI drift usually happens when only **half** of a mechanical fix is committed (for example editing `docs/agent-runs-protocol.md` without syncing mirrors). To block those commits locally, enable the repo’s hooks once per clone:
+CI drift usually happens when only **half** of a mechanical fix is committed (for example editing `docs/agent-runs-protocol.md` without syncing mirrors). To format staged Python files and run the same drift checks locally before each commit, enable hooks once per clone:
 
 ```bash
-git config core.hooksPath githooks
+./scripts/setup-git-hooks.sh
 ```
 
-That runs [`githooks/pre-commit`](./githooks/pre-commit) — the same version-sync and protocol-doc checks as CI (see [`githooks/README.md`](./githooks/README.md)).
+That runs [`githooks/pre-commit`](./githooks/pre-commit) — auto-format via [`scripts/format.sh`](./scripts/format.sh), then version-sync and protocol-doc checks (see [`githooks/README.md`](./githooks/README.md)).
+
+Format the Python tree manually:
+
+```bash
+./scripts/format.sh
+```
 
 For per-SDK setup (Node, Go, Python), see the per-package contributing guide linked in the table above.
 
