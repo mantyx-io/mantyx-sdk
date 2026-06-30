@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [go/v0.18.0] — 2026-06-30
+
+### Added
+
+- Add support for file tool output
+
 ## [go/v0.17.0] — 2026-06-26
 
 ### Added
@@ -121,6 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [go/v0.1.0] — 2026-05-02
 
+[go/v0.18.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.17.0..go/v0.18.0
 [go/v0.17.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.15.0..go/v0.17.0
 [go/v0.15.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.14.0..go/v0.15.0
 [go/v0.14.0]: https://github.com/mantyx-io/mantyx-sdk/compare/go/v0.13.0..go/v0.14.0
