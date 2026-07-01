@@ -320,6 +320,7 @@ def test_define_local_tool_forwards_output_schema_and_long_running(
         output_schema=_SendResult,
         long_running=True,
         read_only=True,
+        retain=True,
         execute=lambda _args: '{"id":"msg_1"}',
     )
     mantyx_client.run_agent(system_prompt="x", prompt="y", tools=[tool])
@@ -340,6 +341,7 @@ def test_define_local_tool_forwards_output_schema_and_long_running(
     assert "id" in output_schema["properties"]
     assert entry["longRunning"] is True
     assert entry["readOnly"] is True
+    assert entry["retain"] is True
 
 
 def test_define_local_tool_accepts_output_schema_dict(
@@ -374,6 +376,7 @@ def test_define_local_tool_omits_output_schema_and_long_running_by_default(
     assert "outputSchema" not in entry
     assert "longRunning" not in entry
     assert "readOnly" not in entry
+    assert "retain" not in entry
 
 
 # --------------------------------------------------------------- output_schema

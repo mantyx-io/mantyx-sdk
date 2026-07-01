@@ -217,8 +217,8 @@ describe("tool ref serialization", () => {
   });
 });
 
-describe("defineLocalTool outputSchema + longRunning + readOnly", () => {
-  it("forwards `outputSchema` (JSON Schema dict), `longRunning`, and `readOnly` on the wire", async () => {
+describe("defineLocalTool outputSchema + longRunning + readOnly + retain", () => {
+  it("forwards `outputSchema` (JSON Schema dict), `longRunning`, `readOnly`, and `retain` on the wire", async () => {
     server.scriptForNextRun = {
       events: [{ type: "result", subtype: "success", text: "ok" }],
     };
@@ -236,6 +236,7 @@ describe("defineLocalTool outputSchema + longRunning + readOnly", () => {
       },
       longRunning: true,
       readOnly: true,
+      retain: true,
       execute: async () => `{"id":"msg_1"}`,
     });
     await client.runAgent({ systemPrompt: "x", prompt: "y", tools: [tool] });
@@ -257,6 +258,7 @@ describe("defineLocalTool outputSchema + longRunning + readOnly", () => {
       },
       longRunning: true,
       readOnly: true,
+      retain: true,
     });
   });
 
@@ -279,7 +281,7 @@ describe("defineLocalTool outputSchema + longRunning + readOnly", () => {
     expect(props.id).toMatchObject({ type: "string" });
   });
 
-  it("omits `outputSchema`, `longRunning`, and `readOnly` by default", async () => {
+  it("omits `outputSchema`, `longRunning`, `readOnly`, and `retain` by default", async () => {
     server.scriptForNextRun = {
       events: [{ type: "result", subtype: "success", text: "ok" }],
     };
@@ -292,6 +294,7 @@ describe("defineLocalTool outputSchema + longRunning + readOnly", () => {
     expect(tools[0]).not.toHaveProperty("outputSchema");
     expect(tools[0]).not.toHaveProperty("longRunning");
     expect(tools[0]).not.toHaveProperty("readOnly");
+    expect(tools[0]).not.toHaveProperty("retain");
   });
 });
 

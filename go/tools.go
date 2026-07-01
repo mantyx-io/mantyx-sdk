@@ -147,6 +147,12 @@ type LocalToolSpec struct {
 	// Mutating tools (the default, false) stay strictly sequential. See
 	// `docs/agent-runs-protocol.md` §4.1.1.
 	ReadOnly bool
+	// Retain, when true, persists the tool's result with the session and
+	// replays it to the model on later turns — reconstructed as a
+	// tool_use + tool_result pair in its original place in the transcript.
+	// Only meaningful for session-scoped runs. Keep outputs small (text
+	// only, ~8 KB cap). See `docs/agent-runs-protocol.md` §4.1.1.
+	Retain bool
 	// Execute is invoked when the LLM calls this tool. It must be a function
 	// with the signature:
 	//
@@ -197,6 +203,9 @@ func (t *localTool) toolWire() map[string]any {
 	}
 	if t.spec.ReadOnly {
 		out["readOnly"] = true
+	}
+	if t.spec.Retain {
+		out["retain"] = true
 	}
 	return out
 }

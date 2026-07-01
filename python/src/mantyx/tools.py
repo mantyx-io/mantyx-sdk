@@ -270,6 +270,13 @@ class LocalTool:
     #: Mutating tools (the default, ``False``) stay strictly sequential.
     #: See ``docs/agent-runs-protocol.md`` §4.1.1.
     read_only: bool = False
+    #: When ``True``, the tool's result is **persisted with the session and
+    #: replayed to the model on later turns** — reconstructed as a
+    #: ``tool_use`` + ``tool_result`` pair in its original place in the
+    #: transcript. Only meaningful for session-scoped runs. Keep outputs
+    #: small (text only, ~8 KB cap). See ``docs/agent-runs-protocol.md``
+    #: §4.1.1.
+    retain: bool = False
     execute: Callable[..., Any] = field(default=lambda *_: "")
     kind: str = "local"
 
@@ -439,6 +446,7 @@ def define_local_tool(
     output_schema: ParametersInput = None,
     long_running: bool = False,
     read_only: bool = False,
+    retain: bool = False,
 ) -> LocalTool:
     """Define a tool whose handler runs in *this* Python process.
 
@@ -467,6 +475,9 @@ def define_local_tool(
             other read-only tools the model emits in the same turn. Set it
             only for side-effect-free tools whose results don't depend on
             each other. Mutating tools (the default) stay sequential.
+        retain: When ``True``, the tool's result is persisted with the
+            session and replayed to the model on later turns. Only
+            meaningful for session-scoped runs.
     """
     _assert_tool_name(name)
     return LocalTool(
@@ -476,6 +487,7 @@ def define_local_tool(
         output_schema=output_schema,
         long_running=bool(long_running),
         read_only=bool(read_only),
+        retain=bool(retain),
         execute=execute,
     )
 
@@ -762,6 +774,8 @@ def serialize_tool_refs(tools: list[ToolRef] | None) -> list[dict[str, Any]]:
                 local_entry["longRunning"] = True
             if t.read_only:
                 local_entry["readOnly"] = True
+            if t.retain:
+                local_entry["retain"] = True
             out.append(local_entry)
         elif isinstance(t, MantyxA2AToolRef):
             entry: dict[str, Any] = {

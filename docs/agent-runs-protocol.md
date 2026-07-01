@@ -28,7 +28,7 @@ array:
 | --------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mantyx`        | server      | A workspace `Tool` row referenced by id (HTTP / Code / Plugin).                                                                                                                                                                             |
 | `mantyx_plugin` | server      | A platform plugin tool referenced by name.                                                                                                                                                                                                  |
-| `local`         | client      | A custom tool defined and executed in the SDK's process. Carries `parameters` (input JSON Schema) plus optional `outputSchema` (return-value JSON Schema), `longRunning`, and `readOnly` (parallel-batch) flags — see §4.1.1.                                              |
+| `local`         | client      | A custom tool defined and executed in the SDK's process. Carries `parameters` (input JSON Schema) plus optional `outputSchema` (return-value JSON Schema), `longRunning`, `readOnly` (parallel-batch), and `retain` (cross-turn replay) flags — see §4.1.1.                                              |
 | `a2a`           | server      | A _remote_ Agent2Agent peer MANTYX can reach; invoked via `message/send` and the reply is surfaced as the tool result.                                                                                                                      |
 | `a2a_local`     | client      | An A2A peer MANTYX **cannot** reach. SDK resolves the [Agent Card](https://google.github.io/A2A/specification/#agent-card) locally and ships it inline; MANTYX uses it for the model description and routes calls back to the SDK over SSE. |
 | `mcp`           | server      | A _remote_ MCP server (Streamable HTTP). At run start MANTYX lists the catalog and exposes every tool as `<server>_<tool>` (subject to `toolFilter`).                                                                                       |
@@ -283,6 +283,7 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
       },
       "longRunning": false, // optional — default false
       "readOnly": false, // optional — default false; true ⇒ may run in parallel with other reads
+      "retain": false, // optional — default false; true ⇒ result replayed on later session turns
     },
     {
       "kind": "a2a",
@@ -479,13 +480,15 @@ for the SDK to POST a tool-result.
 | `outputSchema` | no       | JSON Schema for the structured value the tool returns. When present, forwarded to providers that accept per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. Helps the model emit follow-up arguments that round-trip cleanly. Must be an object schema; non-object roots are dropped server-side.                                                        |
 | `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the model-facing description so every provider treats the tool as long-running:<br>_"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."_<br>Useful for tools that return `pending` and rely on SDK-side polling — without the hint the model routinely fires repeat calls and burns turns. Pure declarative — MANTYX does not change scheduling. |
 | `readOnly`     | no       | When `true`, the tool may run **in parallel** with other read-only tools the model emits in the same turn — MANTYX publishes every such `local_tool_call` concurrently and resolves them together, instead of one-at-a-time in model-emit order. Set this only for side-effect-free tools whose results don't depend on each other, and make sure your SDK can service several outstanding `local_tool_call` events at once (each carries its own `toolUseId`; post a tool-result per id in any order). Mutating tools (the default, `false`) stay strictly sequential. |
+| `retain`       | no       | When `true`, the tool's result is **persisted with the session and replayed to the model on later turns** of the same session — reconstructed as a `tool_use` + `tool_result` pair in its original place in the transcript. Ordinary tool results only live for the current run (session history keeps user/assistant text only); a retained result survives so a follow-up turn can reference a value it can no longer recompute (a freshly minted id, a one-shot lookup, etc.). Only meaningful for **session-scoped** runs. Keep outputs small — they are stored verbatim (text only; file parts dropped) and capped (~8 KB). Defaults to `false`. |
 
-The `outputSchema`, `longRunning`, and `readOnly` fields are **additive**
-since wire protocol v1: SDKs that don't ship them keep working unchanged.
-Providers without per-tool response-schema support (OpenAI, Anthropic,
-Bedrock, Grok) accept the new fields silently — the schema is treated as a
-description hint and host-side validation still runs. `readOnly` defaults to
-`false`, so omitting it preserves the original sequential behavior.
+The `outputSchema`, `longRunning`, `readOnly`, and `retain` fields are
+**additive** since wire protocol v1: SDKs that don't ship them keep working
+unchanged. Providers without per-tool response-schema support (OpenAI,
+Anthropic, Bedrock, Grok) accept the new fields silently — the schema is
+treated as a description hint and host-side validation still runs. `readOnly`
+and `retain` both default to `false`, so omitting them preserves the original
+behavior.
 
 ### 4.2 A2A tool refs
 
@@ -1256,6 +1259,10 @@ data: <utf-8 JSON>
 { "seq": 4, "type": "tool_call",   "data": { "toolUseId": "...", "name": "...", "input": {...} } }
 { "seq": 5, "type": "tool_result", "data": { "toolUseId": "...", "name": "...", "ok": true, "summary": "..." } }
 
+// files a server-resolved tool produced (observability; precedes the tool_result above and shares `name`).
+// `storageKey` → fetch via the admin download route; inline base64 `data` (dev fallback) is redacted from the stream.
+{ "seq": 5, "type": "tool_files", "data": { "name": "render_chart", "files": [ { "filename": "chart.png", "mimeType": "image/png", "sizeBytes": 20480, "storageKey": "chat-attachments/<tenant>/tool-results/<tool>/<uuid>.png" } ] } }
+
 // LOCAL tool call — SDK MUST POST a tool-result for the same toolUseId.
 // `kind` carries the discriminator so the SDK can dispatch to the right
 // local handler (generic registry, A2A client, or MCP client). Older SDKs
@@ -1264,7 +1271,9 @@ data: <utf-8 JSON>
 { "seq": 6, "type": "local_tool_call", "data": { "toolUseId": "tu_y", "name": "intranet_hr_agent", "args": { "message": "When does PTO reset?" }, "kind": "a2a_local", "agentCard": { "name": "Acme HR", "url": "https://hr.intranet.acme/a2a", "skills": [ { "id": "pto_lookup", "name": "PTO lookup" } ] } } }
 { "seq": 6, "type": "local_tool_call", "data": { "toolUseId": "tu_z", "name": "fs_read_file", "args": { "path": "/etc/hosts" }, "kind": "mcp_local", "mcpServer": "fs", "mcpToolName": "fs_read_file", "mcpServerInfo": { "name": "mcp-server-filesystem", "version": "0.4.1" } } }
 
-// echo of the SDK's POSTed tool-result, persisted for replay
+// echo of the SDK's POSTed tool-result, persisted for replay. Any `files` carry only
+// metadata on the wire — `{ filename, mimeType, sizeBytes }` — with base64 `data` redacted
+// (bytes are served on demand by the admin download route).
 { "seq": 7, "type": "local_tool_result_in", "data": { "toolUseId": "tu_x", "output": "127.0.0.1 ..." } }
 
 // loop-detection guard fired (see §4.6). Soft nudge: hardCutoff=false. Hard cutoff: hardCutoff=true.

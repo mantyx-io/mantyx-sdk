@@ -1902,6 +1902,7 @@ function serializeToolRefs(tools: ToolRef[]): unknown[] {
             : {}),
           ...(t.longRunning ? { longRunning: true } : {}),
           ...(t.readOnly ? { readOnly: true } : {}),
+          ...(t.retain ? { retain: true } : {}),
         };
       case "a2a":
         return {

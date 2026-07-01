@@ -131,6 +131,15 @@ export interface LocalTool<TArgs = Record<string, unknown>> {
    * `docs/agent-runs-protocol.md` §4.1.1.
    */
   readonly readOnly: boolean;
+  /**
+   * When `true`, the tool's result is **persisted with the session and
+   * replayed to the model on later turns** — reconstructed as a
+   * `tool_use` + `tool_result` pair in its original place in the
+   * transcript. Only meaningful for session-scoped runs. Keep outputs
+   * small (text only, ~8 KB cap). See `docs/agent-runs-protocol.md`
+   * §4.1.1.
+   */
+  readonly retain: boolean;
   readonly execute: (args: TArgs) => Promise<LocalToolOutput> | LocalToolOutput;
 }
 
@@ -156,6 +165,12 @@ export interface DefineLocalToolOptions<T extends ZodLikeObject | undefined> {
    * {@link LocalTool.readOnly}.
    */
   readOnly?: boolean;
+  /**
+   * Persist the tool result across session turns so follow-ups can
+   * reference values the model can no longer recompute. See
+   * {@link LocalTool.retain}.
+   */
+  retain?: boolean;
   execute: (
     args: T extends ZodLikeObject ? z.infer<T> : Record<string, unknown>,
   ) => Promise<LocalToolOutput> | LocalToolOutput;
@@ -173,6 +188,7 @@ export function defineLocalTool<T extends ZodLikeObject | undefined>(
     outputSchema: opts.outputSchema,
     longRunning: opts.longRunning ?? false,
     readOnly: opts.readOnly ?? false,
+    retain: opts.retain ?? false,
     execute: opts.execute as LocalTool["execute"],
   };
 }

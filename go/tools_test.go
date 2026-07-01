@@ -1543,6 +1543,34 @@ func TestLocalTool_LongRunning_OmittedByDefault(t *testing.T) {
 	if _, has := got["readOnly"]; has {
 		t.Fatalf("expected readOnly omitted by default, got %#v", got["readOnly"])
 	}
+	if _, has := got["retain"]; has {
+		t.Fatalf("expected retain omitted by default, got %#v", got["retain"])
+	}
+}
+
+func TestLocalTool_Retain_AddsWireField(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "ok"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	tool := LocalTool(LocalToolSpec{
+		Name:   "mint_id",
+		Retain: true,
+		Execute: func(ctx context.Context, _ struct{}) (string, error) {
+			return "id_abc", nil
+		},
+	})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y", Tools: []ToolRef{tool},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	got := extractLocalTool(t, server.lastRunCreateBody)
+	if got["retain"] != true {
+		t.Fatalf("expected retain=true on wire, got %#v", got["retain"])
+	}
 }
 
 func TestLocalTool_ReadOnly_AddsWireField(t *testing.T) {
