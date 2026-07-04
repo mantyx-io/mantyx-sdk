@@ -1689,8 +1689,12 @@ export class MantyxClient {
         let parsed: EvalRunEvent;
         try {
           parsed = JSON.parse(frame.data) as EvalRunEvent;
-        } catch {
-          throw new MantyxParseError(`invalid eval SSE JSON: ${frame.data.slice(0, 200)}`);
+        } catch (err) {
+          throw new MantyxParseError(
+            `invalid eval SSE JSON: ${frame.data.slice(0, 200)}`,
+            frame.data,
+            { cause: err },
+          );
         }
         yield parsed;
         if (
