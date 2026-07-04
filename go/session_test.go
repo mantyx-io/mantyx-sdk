@@ -167,9 +167,9 @@ func TestGetSessionEvents_ReplaysFrames(t *testing.T) {
 		t.Fatalf("GetSessionEvents full: %v", err)
 	}
 	want := []struct {
-		seq     int
-		evType  string
-		text    string
+		seq    int
+		evType string
+		text   string
 	}{
 		{1, "user_message", "one"},
 		{2, "assistant_message", "echo:one"},

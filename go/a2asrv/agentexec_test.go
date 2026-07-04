@@ -23,13 +23,13 @@ type stubBackend struct {
 	t  *testing.T
 	mu sync.Mutex
 
-	lastRunBody         map[string]any
-	lastSessionBody     map[string]any
-	lastSessionMsgBody  map[string]any
-	createSessionCount  int
-	streamScript        []string // assistant_delta texts to emit
-	finalText           string
-	finalSubtype        string // "" → "success"
+	lastRunBody        map[string]any
+	lastSessionBody    map[string]any
+	lastSessionMsgBody map[string]any
+	createSessionCount int
+	streamScript       []string // assistant_delta texts to emit
+	finalText          string
+	finalSubtype       string // "" → "success"
 
 	srv *httptest.Server
 }

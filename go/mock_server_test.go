@@ -30,19 +30,21 @@ type mockServer struct {
 	// failAuthCount, when > 0, makes the next N API requests return
 	// 401; subsequent requests fall through to normal handling. Used
 	// to exercise the SDK's "refresh + retry once on 401" flow.
-	failAuthCount          int
-	lastAuthHeader         string
-	authHeaderHistory      []string
-	lastToolResultBody     []byte
-	lastRunCreateBody      []byte
-	lastFeedbackBody       []byte
-	lastFeedbackCreated    bool
-	feedbackByRun          map[string]struct {
+	failAuthCount       int
+	lastAuthHeader      string
+	authHeaderHistory   []string
+	lastToolResultBody  []byte
+	lastRunCreateBody   []byte
+	lastFeedbackBody    []byte
+	lastFeedbackCreated bool
+	feedbackByRun       map[string]struct {
 		id   string
 		body []byte
 	}
 	lastSessionCreateBody  []byte
 	lastSessionMessageBody []byte
+	lastEvalCreateBody     []byte
+	evalRuns               map[string]map[string]any
 	models                 ModelCatalog
 	runs                   map[string]*runState
 	sessions               map[string]*mockSession
@@ -111,6 +113,7 @@ func newMockServer() *mockServer {
 			id   string
 			body []byte
 		}{},
+		evalRuns:               map[string]map[string]any{},
 		oauthAccessToken:       "mantyx_at_mock_initial",
 		oauthRefreshToken:      "mantyx_rt_mock_initial",
 		oauthExpiresIn:         3600,
@@ -202,6 +205,10 @@ func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
 		m.handleAgentRuns(w, r, rest[1:])
 	case len(rest) >= 1 && rest[0] == "agent-sessions":
 		m.handleAgentSessions(w, r, rest[1:])
+	case len(rest) >= 1 && rest[0] == "eval-datasets":
+		m.handleEvalDatasets(w, r, rest[1:])
+	case len(rest) >= 1 && rest[0] == "eval-runs":
+		m.handleEvalRuns(w, r, rest[1:])
 	default:
 		http.NotFound(w, r)
 	}
@@ -285,10 +292,10 @@ func (m *mockServer) handleAgentRuns(w http.ResponseWriter, r *http.Request, res
 			status = http.StatusCreated
 		}
 		m.writeJSON(w, status, map[string]any{
-			"id":          id,
-			"verdict":     body["verdict"],
-			"targetKind":  "agent_run",
-			"agentRunId":  runID,
+			"id":         id,
+			"verdict":    body["verdict"],
+			"targetKind": "agent_run",
+			"agentRunId": runID,
 		})
 	default:
 		http.NotFound(w, r)
@@ -751,6 +758,122 @@ func (m *mockServer) writeJSON(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	raw, _ := json.Marshal(body)
 	_, _ = w.Write(raw)
+}
+
+func (m *mockServer) handleEvalDatasets(w http.ResponseWriter, r *http.Request, rest []string) {
+	switch {
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		m.writeJSON(w, http.StatusOK, map[string]any{
+			"datasets": []map[string]any{{
+				"id": "ds_demo", "name": "Demo dataset", "description": nil,
+				"caseCount": 1, "runCount": 0,
+				"createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+			}},
+		})
+	case len(rest) == 1 && r.Method == http.MethodGet:
+		if rest[0] != "ds_demo" {
+			http.NotFound(w, r)
+			return
+		}
+		m.writeJSON(w, http.StatusOK, map[string]any{
+			"id": "ds_demo", "name": "Demo dataset", "description": nil, "toolMocks": nil,
+			"cases": []map[string]any{{
+				"id": "case_1", "name": "hello",
+				"input":   map[string]any{"role": "user", "content": "hi"},
+				"scorers": []any{}, "tags": []any{}, "toolMocks": nil,
+				"createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+			}},
+			"createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+		})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (m *mockServer) handleEvalRuns(w http.ResponseWriter, r *http.Request, rest []string) {
+	switch {
+	case len(rest) == 1 && rest[0] == "compare" && r.Method == http.MethodGet:
+		a := r.URL.Query().Get("a")
+		b := r.URL.Query().Get("b")
+		m.mu.Lock()
+		runA, okA := m.evalRuns[a]
+		runB, okB := m.evalRuns[b]
+		m.mu.Unlock()
+		if !okA || !okB {
+			http.NotFound(w, r)
+			return
+		}
+		m.writeJSON(w, http.StatusOK, map[string]any{
+			"datasetId": runA["datasetId"], "datasetName": runA["datasetName"],
+			"runA": runA, "runB": runB, "cases": []any{},
+		})
+	case len(rest) == 0 && r.Method == http.MethodPost:
+		raw, _ := io.ReadAll(r.Body)
+		m.mu.Lock()
+		m.lastEvalCreateBody = raw
+		m.mu.Unlock()
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		runID := newID("eval")
+		detail := map[string]any{
+			"id": runID, "datasetId": body["datasetId"], "datasetName": "Demo dataset",
+			"agentId": body["agentId"], "inlineAgent": body["agent"] != nil,
+			"status": "succeeded", "totalCases": 1, "completedCases": 1, "passedCases": 1,
+			"score": 1.0, "tokenUsage": nil, "error": nil, "agentOverrides": body["overrides"],
+			"startedAt": "2026-01-01T00:00:01Z", "finishedAt": "2026-01-01T00:00:02Z",
+			"createdAt": "2026-01-01T00:00:00Z", "inlineAgentSpec": body["agent"],
+			"agentSpecSnapshot": nil, "updatedAt": "2026-01-01T00:00:02Z", "results": []any{},
+		}
+		m.mu.Lock()
+		m.evalRuns[runID] = detail
+		m.mu.Unlock()
+		m.writeJSON(w, http.StatusAccepted, map[string]string{
+			"runId": runID, "status": "queued",
+			"streamUrl": fmt.Sprintf("/api/v1/workspaces/x/eval-runs/%s/stream", runID),
+		})
+	case len(rest) == 0 && r.Method == http.MethodGet:
+		m.mu.Lock()
+		runs := make([]map[string]any, 0, len(m.evalRuns))
+		for _, v := range m.evalRuns {
+			runs = append(runs, v)
+		}
+		m.mu.Unlock()
+		m.writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "limit": 50, "offset": 0})
+	case len(rest) == 1 && r.Method == http.MethodGet:
+		m.mu.Lock()
+		detail, ok := m.evalRuns[rest[0]]
+		m.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		m.writeJSON(w, http.StatusOK, detail)
+	case len(rest) == 2 && rest[1] == "stream" && r.Method == http.MethodGet:
+		m.mu.Lock()
+		_, ok := m.evalRuns[rest[0]]
+		m.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"snapshot\",\"status\":\"succeeded\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"run_completed\"}\n\n")
+	case len(rest) == 2 && rest[1] == "cancel" && r.Method == http.MethodPost:
+		m.mu.Lock()
+		detail, ok := m.evalRuns[rest[0]]
+		if ok {
+			detail["status"] = "cancelled"
+		}
+		m.mu.Unlock()
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		m.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func newID(prefix string) string {

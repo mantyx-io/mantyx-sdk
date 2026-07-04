@@ -6,6 +6,7 @@ Mirrors :mod:`mantyx.client` but exposes coroutines and async iterators.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import (
     Any,
@@ -23,9 +24,19 @@ from ._local_resolver import (
 from ._schema import parse_args_with_pydantic
 from ._version import SDK_VERSION
 from .client import (
+    _EVAL_TERMINAL_STATUSES,
     _UNSET,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_S,
+    AgentEvalOverrides,
+    EvalDatasetDetail,
+    EvalDatasetList,
+    EvalRunAccepted,
+    EvalRunCompare,
+    EvalRunDetail,
+    EvalRunEvent,
+    EvalRunList,
+    InlineEvalDatasetSpec,
     ModelCatalog,
     RunEvent,
     RunFeedbackResult,
@@ -35,6 +46,13 @@ from .client import (
     SessionInfo,
     SessionListResult,
     _describe_handler,
+    _parse_eval_dataset_detail,
+    _parse_eval_dataset_list,
+    _parse_eval_run_accepted,
+    _parse_eval_run_compare,
+    _parse_eval_run_detail,
+    _parse_eval_run_event,
+    _parse_eval_run_list,
     _parse_model_catalog,
     _parse_required_scopes,
     _parse_run_feedback,
@@ -47,6 +65,7 @@ from .client import (
     _quote,
     _resolve_credential,
     _serialize_agent_spec,
+    _serialize_create_eval_run,
     _serialize_turn_input,
     _to_run_event,
 )
@@ -54,6 +73,7 @@ from .errors import (
     MantyxAuthError,
     MantyxError,
     MantyxNetworkError,
+    MantyxParseError,
     MantyxRunError,
     MantyxScopeError,
     MantyxToolError,
@@ -341,6 +361,141 @@ class AsyncMantyxClient:
             wire["contentSnapshot"] = content_snapshot
         data = await self._request("POST", f"/agent-runs/{_quote(run_id)}/feedback", wire) or {}
         return _parse_run_feedback(data, run_id)
+
+    # --------------------------------------------------------------- Evals
+
+    async def list_eval_datasets(self) -> EvalDatasetList:
+        body = await self._request("GET", "/eval-datasets")
+        return _parse_eval_dataset_list(body or {})
+
+    async def get_eval_dataset(self, dataset_id: str) -> EvalDatasetDetail:
+        body = await self._request("GET", f"/eval-datasets/{_quote(dataset_id)}")
+        return _parse_eval_dataset_detail(body or {})
+
+    async def create_eval_run(
+        self,
+        *,
+        dataset_id: str | None = None,
+        dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
+        agent_id: str | None = None,
+        agent: Mapping[str, Any] | None = None,
+        model_id: str | None = None,
+        overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
+    ) -> EvalRunAccepted:
+        wire = _serialize_create_eval_run(
+            dataset_id=dataset_id,
+            dataset=dataset,
+            agent_id=agent_id,
+            agent=agent,
+            model_id=model_id,
+            overrides=overrides,
+        )
+        body = await self._request("POST", "/eval-runs", wire)
+        return _parse_eval_run_accepted(body or {})
+
+    async def list_eval_runs(
+        self,
+        *,
+        dataset_id: str | None = None,
+        agent_id: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> EvalRunList:
+        params: dict[str, Any] = {}
+        if dataset_id is not None:
+            params["datasetId"] = dataset_id
+        if agent_id is not None:
+            params["agentId"] = agent_id
+        if status is not None:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        body = await self._request("GET", "/eval-runs", params=params or None)
+        return _parse_eval_run_list(body or {})
+
+    async def compare_eval_runs(self, run_a: str, run_b: str) -> EvalRunCompare:
+        body = await self._request("GET", "/eval-runs/compare", params={"a": run_a, "b": run_b})
+        return _parse_eval_run_compare(body or {})
+
+    async def get_eval_run(self, run_id: str) -> EvalRunDetail:
+        body = await self._request("GET", f"/eval-runs/{_quote(run_id)}")
+        return _parse_eval_run_detail(body or {})
+
+    async def stream_eval_run(self, run_id: str) -> AsyncIterator[EvalRunEvent]:
+        url = self._absolute_url(f"/eval-runs/{_quote(run_id)}/stream")
+        for attempt_reason in ("initial", "unauthorized"):
+            headers = await self._auth_headers(attempt_reason)
+            headers["Accept"] = "text/event-stream"
+            async with self._http.stream("GET", url, headers=headers, timeout=None) as resp:
+                if (
+                    resp.status_code == 401
+                    and self.token_source is not None
+                    and attempt_reason == "initial"
+                ):
+                    continue
+                if resp.status_code != 200:
+                    await self._raise_for_status(resp)
+                async for frame in aiter_sse(resp.aiter_bytes()):
+                    if not frame.data:
+                        continue
+                    try:
+                        raw = json.loads(frame.data)
+                    except json.JSONDecodeError as exc:
+                        raise MantyxParseError(
+                            f"invalid eval SSE JSON: {frame.data[:200]}"
+                        ) from exc
+                    ev = _parse_eval_run_event(raw)
+                    yield ev
+                    if ev.type in ("run_completed", "run_error", "run_cancelled"):
+                        return
+                return
+
+    async def cancel_eval_run(self, run_id: str) -> dict[str, bool]:
+        body = await self._request("POST", f"/eval-runs/{_quote(run_id)}/cancel")
+        return {"ok": bool((body or {}).get("ok"))}
+
+    async def run_eval(
+        self,
+        *,
+        dataset_id: str | None = None,
+        dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
+        agent_id: str | None = None,
+        agent: Mapping[str, Any] | None = None,
+        model_id: str | None = None,
+        overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
+        on_event: Callable[[EvalRunEvent], None] | None = None,
+        poll_interval_s: float = 1.0,
+    ) -> EvalRunDetail:
+        accepted = await self.create_eval_run(
+            dataset_id=dataset_id,
+            dataset=dataset,
+            agent_id=agent_id,
+            agent=agent,
+            model_id=model_id,
+            overrides=overrides,
+        )
+
+        async def _consume_stream() -> None:
+            try:
+                async for ev in self.stream_eval_run(accepted.run_id):
+                    if on_event:
+                        on_event(ev)
+            except MantyxNetworkError:
+                pass
+
+        stream_task = asyncio.create_task(_consume_stream()) if on_event else None
+        try:
+            while True:
+                detail = await self.get_eval_run(accepted.run_id)
+                if detail.status in _EVAL_TERMINAL_STATUSES:
+                    return detail
+                await asyncio.sleep(poll_interval_s)
+        finally:
+            if stream_task is not None:
+                stream_task.cancel()
 
     # ----------------------------------------------------------- Sessions
 

@@ -90,6 +90,41 @@ class MockServer:
         self.last_feedback_body: dict[str, Any] | None = None
         self.last_feedback_created: bool = False
         self.feedback_by_run: dict[str, dict[str, Any]] = {}
+        self.eval_datasets: list[dict[str, Any]] = [
+            {
+                "id": "ds_demo",
+                "name": "Demo dataset",
+                "description": None,
+                "caseCount": 1,
+                "runCount": 0,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z",
+            }
+        ]
+        self.eval_dataset_details: dict[str, dict[str, Any]] = {
+            "ds_demo": {
+                "id": "ds_demo",
+                "name": "Demo dataset",
+                "description": None,
+                "toolMocks": None,
+                "cases": [
+                    {
+                        "id": "case_1",
+                        "name": "hello",
+                        "input": {"role": "user", "content": "hi"},
+                        "scorers": [],
+                        "tags": [],
+                        "toolMocks": None,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-01T00:00:00Z",
+                    }
+                ],
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z",
+            }
+        }
+        self.eval_runs: dict[str, dict[str, Any]] = {}
+        self.last_eval_create_body: dict[str, Any] | None = None
         self.script_for_next_run: RunScript | None = None
         self.session_scripts: dict[str, RunScript] = {}
         # Each session: {"messages": [...], "metadata": {...}, "createdAt": str}
@@ -204,6 +239,121 @@ class MockServer:
             return self._handle_agent_runs(request, rest[1:], method)
         if rest and rest[0] == "agent-sessions":
             return self._handle_agent_sessions(request, rest[1:], method)
+        if rest and rest[0] == "eval-datasets":
+            return self._handle_eval_datasets(request, rest[1:], method)
+        if rest and rest[0] == "eval-runs":
+            return self._handle_eval_runs(request, rest[1:], method)
+        return httpx.Response(404, json={"error": "not_found"})
+
+    # ----- evals -------------------------------------------------------
+
+    def _handle_eval_datasets(
+        self, request: httpx.Request, rest: list[str], method: str
+    ) -> httpx.Response:
+        if not rest and method == "GET":
+            return httpx.Response(200, json={"datasets": self.eval_datasets})
+        if len(rest) == 1 and method == "GET":
+            detail = self.eval_dataset_details.get(rest[0])
+            if detail is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            return httpx.Response(200, json=detail)
+        return httpx.Response(404, json={"error": "not_found"})
+
+    def _handle_eval_runs(
+        self, request: httpx.Request, rest: list[str], method: str
+    ) -> httpx.Response:
+        if rest == ["compare"] and method == "GET":
+            params = dict(request.url.params)
+            run_a = self.eval_runs.get(str(params.get("a") or ""))
+            run_b = self.eval_runs.get(str(params.get("b") or ""))
+            if run_a is None or run_b is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            return httpx.Response(
+                200,
+                json={
+                    "datasetId": run_a["datasetId"],
+                    "datasetName": run_a["datasetName"],
+                    "runA": run_a["summary"],
+                    "runB": run_b["summary"],
+                    "cases": [],
+                },
+            )
+        if not rest and method == "POST":
+            body = json.loads(request.content or b"{}")
+            with self.lock:
+                self.last_eval_create_body = body
+            run_id = _new_id("eval")
+            dataset_id = str(body.get("datasetId") or "ds_inline")
+            detail = {
+                "id": run_id,
+                "datasetId": dataset_id,
+                "datasetName": "Demo dataset",
+                "agentId": body.get("agentId"),
+                "inlineAgent": body.get("agent") is not None,
+                "status": "succeeded",
+                "totalCases": 1,
+                "completedCases": 1,
+                "passedCases": 1,
+                "score": 1.0,
+                "tokenUsage": None,
+                "error": None,
+                "agentOverrides": body.get("overrides"),
+                "startedAt": "2026-01-01T00:00:01Z",
+                "finishedAt": "2026-01-01T00:00:02Z",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "inlineAgentSpec": body.get("agent"),
+                "agentSpecSnapshot": None,
+                "updatedAt": "2026-01-01T00:00:02Z",
+                "results": [],
+                "summary": {},
+            }
+            detail["summary"] = {
+                k: v
+                for k, v in detail.items()
+                if k
+                not in ("results", "summary", "inlineAgentSpec", "agentSpecSnapshot", "updatedAt")
+            }
+            self.eval_runs[run_id] = detail
+            return httpx.Response(
+                202,
+                json={
+                    "runId": run_id,
+                    "status": "queued",
+                    "streamUrl": f"/api/v1/workspaces/x/eval-runs/{run_id}/stream",
+                },
+            )
+        if not rest and method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "runs": [r["summary"] for r in self.eval_runs.values()],
+                    "limit": 50,
+                    "offset": 0,
+                },
+            )
+        if len(rest) == 1 and method == "GET":
+            detail = self.eval_runs.get(rest[0])
+            if detail is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            return httpx.Response(200, json={k: v for k, v in detail.items() if k != "summary"})
+        if len(rest) == 2 and rest[1] == "stream" and method == "GET":
+            run_id = rest[0]
+            if run_id not in self.eval_runs:
+                return httpx.Response(404, json={"error": "not_found"})
+            lines = [
+                'data: {"type":"snapshot","status":"succeeded"}\n\n',
+                'data: {"type":"run_completed"}\n\n',
+            ]
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, content="".join(lines)
+            )
+        if len(rest) == 2 and rest[1] == "cancel" and method == "POST":
+            detail = self.eval_runs.get(rest[0])
+            if detail is None:
+                return httpx.Response(404, json={"error": "not_found"})
+            detail["status"] = "cancelled"
+            detail["summary"]["status"] = "cancelled"
+            return httpx.Response(200, json={"ok": True})
         return httpx.Response(404, json={"error": "not_found"})
 
     # ----- agent-runs --------------------------------------------------

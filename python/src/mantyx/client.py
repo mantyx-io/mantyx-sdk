@@ -8,6 +8,7 @@ package under ``docs/``).
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -184,6 +185,175 @@ class RunFeedbackResult:
 
 
 _RUN_FEEDBACK_EXPLANATION_MAX = 8000
+
+_EVAL_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+@dataclass
+class InlineEvalCaseSpec:
+    input: dict[str, Any]
+    name: str | None = None
+    scorers: list[dict[str, Any]] | None = None
+    tool_mocks: dict[str, Any] | None = None
+    tags: list[str] | None = None
+
+
+@dataclass
+class InlineEvalDatasetSpec:
+    cases: list[InlineEvalCaseSpec]
+    name: str | None = None
+    tool_mocks: dict[str, Any] | None = None
+
+
+@dataclass
+class AgentEvalOverrides:
+    system_prompt: str | None = None
+    system_prompt_append: str | None = None
+    model: str | None = None
+    llm_provider_id: str | None = None
+    reasoning_level: Literal["low", "medium", "high"] | None = None
+    disable_tools: bool | None = None
+    tool_allowlist: list[str] | None = None
+    disabled_mocks: list[str] | None = None
+
+
+@dataclass
+class EvalDatasetSummary:
+    id: str
+    name: str
+    description: str | None
+    case_count: int
+    run_count: int
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class EvalDatasetList:
+    datasets: list[EvalDatasetSummary]
+
+
+@dataclass
+class EvalCase:
+    id: str
+    name: str
+    input: dict[str, Any]
+    scorers: list[dict[str, Any]]
+    tags: list[str]
+    tool_mocks: dict[str, Any] | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class EvalDatasetDetail:
+    id: str
+    name: str
+    description: str | None
+    tool_mocks: dict[str, Any] | None
+    cases: list[EvalCase]
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class EvalRunAccepted:
+    run_id: str
+    status: str
+    stream_url: str
+
+
+@dataclass
+class EvalRunSummary:
+    id: str
+    dataset_id: str
+    dataset_name: str
+    agent_id: str | None
+    inline_agent: bool
+    status: str
+    total_cases: int
+    completed_cases: int
+    passed_cases: int
+    score: float | None
+    token_usage: dict[str, Any] | None
+    error: str | None
+    agent_overrides: dict[str, Any] | None
+    started_at: str | None
+    finished_at: str | None
+    created_at: str
+
+
+@dataclass
+class EvalCaseResult:
+    id: str
+    case_id: str
+    case: EvalCase
+    final_text: str | None
+    tool_calls: list[dict[str, Any]]
+    scores: list[dict[str, Any]]
+    passed: bool
+    score: float
+    tokens: dict[str, Any] | None
+    latency_ms: int | None
+    error: str | None
+    created_at: str
+
+
+@dataclass
+class EvalRunDetail(EvalRunSummary):
+    inline_agent_spec: dict[str, Any] | None
+    agent_spec_snapshot: dict[str, Any] | None
+    updated_at: str
+    results: list[EvalCaseResult]
+
+
+@dataclass
+class EvalRunList:
+    runs: list[EvalRunSummary]
+    limit: int
+    offset: int
+
+
+@dataclass
+class EvalRunCompareSide:
+    id: str
+    agent_id: str | None
+    inline_agent: bool
+    status: str
+    total_cases: int
+    completed_cases: int
+    passed_cases: int
+    score: float | None
+    token_usage: dict[str, Any] | None
+    agent_overrides: dict[str, Any] | None
+    agent_spec_snapshot: dict[str, Any] | None
+    started_at: str | None
+    finished_at: str | None
+    created_at: str
+
+
+@dataclass
+class EvalRunCompareCase:
+    case_id: str
+    case_name: str
+    case_input: dict[str, Any] | None
+    a: dict[str, Any] | None
+    b: dict[str, Any] | None
+
+
+@dataclass
+class EvalRunCompare:
+    dataset_id: str
+    dataset_name: str
+    run_a: EvalRunCompareSide
+    run_b: EvalRunCompareSide
+    cases: list[EvalRunCompareCase]
+
+
+@dataclass
+class EvalRunEvent:
+    type: str
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -540,6 +710,139 @@ class MantyxClient:
             wire["contentSnapshot"] = content_snapshot
         data = self._request("POST", f"/agent-runs/{_quote(run_id)}/feedback", wire) or {}
         return _parse_run_feedback(data, run_id)
+
+    # --------------------------------------------------------------- Evals
+
+    def list_eval_datasets(self) -> EvalDatasetList:
+        body = self._request("GET", "/eval-datasets")
+        return _parse_eval_dataset_list(body or {})
+
+    def get_eval_dataset(self, dataset_id: str) -> EvalDatasetDetail:
+        body = self._request("GET", f"/eval-datasets/{_quote(dataset_id)}")
+        return _parse_eval_dataset_detail(body or {})
+
+    def create_eval_run(
+        self,
+        *,
+        dataset_id: str | None = None,
+        dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
+        agent_id: str | None = None,
+        agent: Mapping[str, Any] | None = None,
+        model_id: str | None = None,
+        overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
+    ) -> EvalRunAccepted:
+        wire = _serialize_create_eval_run(
+            dataset_id=dataset_id,
+            dataset=dataset,
+            agent_id=agent_id,
+            agent=agent,
+            model_id=model_id,
+            overrides=overrides,
+        )
+        body = self._request("POST", "/eval-runs", wire)
+        return _parse_eval_run_accepted(body or {})
+
+    def list_eval_runs(
+        self,
+        *,
+        dataset_id: str | None = None,
+        agent_id: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> EvalRunList:
+        params: dict[str, Any] = {}
+        if dataset_id is not None:
+            params["datasetId"] = dataset_id
+        if agent_id is not None:
+            params["agentId"] = agent_id
+        if status is not None:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        body = self._request("GET", "/eval-runs", params=params or None)
+        return _parse_eval_run_list(body or {})
+
+    def compare_eval_runs(self, run_a: str, run_b: str) -> EvalRunCompare:
+        body = self._request("GET", "/eval-runs/compare", params={"a": run_a, "b": run_b})
+        return _parse_eval_run_compare(body or {})
+
+    def get_eval_run(self, run_id: str) -> EvalRunDetail:
+        body = self._request("GET", f"/eval-runs/{_quote(run_id)}")
+        return _parse_eval_run_detail(body or {})
+
+    def stream_eval_run(self, run_id: str) -> Iterator[EvalRunEvent]:
+        url = self._absolute_url(f"/eval-runs/{_quote(run_id)}/stream")
+        for attempt_reason in ("initial", "unauthorized"):
+            headers = self._auth_headers(attempt_reason)
+            headers["Accept"] = "text/event-stream"
+            with self._http.stream("GET", url, headers=headers, timeout=None) as resp:
+                if (
+                    resp.status_code == 401
+                    and self.token_source is not None
+                    and attempt_reason == "initial"
+                ):
+                    continue
+                if resp.status_code != 200:
+                    self._raise_for_status(resp)
+                for frame in iter_sse(resp.iter_bytes()):
+                    if not frame.data:
+                        continue
+                    try:
+                        raw = json.loads(frame.data)
+                    except json.JSONDecodeError as exc:
+                        raise MantyxParseError(
+                            f"invalid eval SSE JSON: {frame.data[:200]}"
+                        ) from exc
+                    ev = _parse_eval_run_event(raw)
+                    yield ev
+                    if ev.type in ("run_completed", "run_error", "run_cancelled"):
+                        return
+                return
+
+    def cancel_eval_run(self, run_id: str) -> dict[str, bool]:
+        body = self._request("POST", f"/eval-runs/{_quote(run_id)}/cancel")
+        return {"ok": bool((body or {}).get("ok"))}
+
+    def run_eval(
+        self,
+        *,
+        dataset_id: str | None = None,
+        dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
+        agent_id: str | None = None,
+        agent: Mapping[str, Any] | None = None,
+        model_id: str | None = None,
+        overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
+        on_event: Callable[[EvalRunEvent], None] | None = None,
+        poll_interval_s: float = 1.0,
+    ) -> EvalRunDetail:
+        accepted = self.create_eval_run(
+            dataset_id=dataset_id,
+            dataset=dataset,
+            agent_id=agent_id,
+            agent=agent,
+            model_id=model_id,
+            overrides=overrides,
+        )
+
+        if on_event is not None:
+
+            def _consume_stream() -> None:
+                try:
+                    for ev in self.stream_eval_run(accepted.run_id):
+                        on_event(ev)
+                except MantyxNetworkError:
+                    pass
+
+            threading.Thread(target=_consume_stream, daemon=True).start()
+
+        while True:
+            detail = self.get_eval_run(accepted.run_id)
+            if detail.status in _EVAL_TERMINAL_STATUSES:
+                return detail
+            time.sleep(poll_interval_s)
 
     # ----------------------------------------------------------- Sessions
 
@@ -1556,6 +1859,303 @@ def _parse_run_feedback(raw: Mapping[str, Any], run_id: str) -> RunFeedbackResul
         target_kind=str(raw.get("targetKind") or ""),
         agent_run_id=str(raw.get("agentRunId") or run_id),
     )
+
+
+def _serialize_create_eval_run(
+    *,
+    dataset_id: str | None,
+    dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None,
+    agent_id: str | None,
+    agent: Mapping[str, Any] | None,
+    model_id: str | None,
+    overrides: AgentEvalOverrides | Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    has_dataset = dataset_id is not None or dataset is not None
+    has_agent = agent_id is not None or agent is not None
+    if not has_dataset:
+        raise MantyxError("create_eval_run requires exactly one of dataset_id or dataset")
+    if dataset_id is not None and dataset is not None:
+        raise MantyxError("create_eval_run accepts only one of dataset_id or dataset")
+    if not has_agent:
+        raise MantyxError("create_eval_run requires exactly one of agent_id or agent")
+    if agent_id is not None and agent is not None:
+        raise MantyxError("create_eval_run accepts only one of agent_id or agent")
+    body: dict[str, Any] = {}
+    if dataset_id is not None:
+        body["datasetId"] = dataset_id
+    if dataset is not None:
+        body["dataset"] = _inline_eval_dataset_to_wire(dataset)
+    if agent_id is not None:
+        body["agentId"] = agent_id
+    if agent is not None:
+        body["agent"] = dict(agent)
+    if model_id is not None:
+        body["modelId"] = model_id
+    if overrides is not None:
+        body["overrides"] = _agent_eval_overrides_to_wire(overrides)
+    return body
+
+
+def _inline_eval_dataset_to_wire(
+    dataset: InlineEvalDatasetSpec | Mapping[str, Any],
+) -> dict[str, Any]:
+    if isinstance(dataset, InlineEvalDatasetSpec):
+        wire: dict[str, Any] = {
+            "cases": [_inline_eval_case_to_wire(c) for c in dataset.cases],
+        }
+        if dataset.name is not None:
+            wire["name"] = dataset.name
+        if dataset.tool_mocks is not None:
+            wire["toolMocks"] = dataset.tool_mocks
+        return wire
+    return dict(dataset)
+
+
+def _inline_eval_case_to_wire(case: InlineEvalCaseSpec | Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(case, InlineEvalCaseSpec):
+        wire: dict[str, Any] = {"input": dict(case.input)}
+        if case.name is not None:
+            wire["name"] = case.name
+        if case.scorers is not None:
+            wire["scorers"] = case.scorers
+        if case.tool_mocks is not None:
+            wire["toolMocks"] = case.tool_mocks
+        if case.tags is not None:
+            wire["tags"] = case.tags
+        return wire
+    return dict(case)
+
+
+def _agent_eval_overrides_to_wire(
+    overrides: AgentEvalOverrides | Mapping[str, Any],
+) -> dict[str, Any]:
+    if isinstance(overrides, AgentEvalOverrides):
+        wire: dict[str, Any] = {}
+        if overrides.system_prompt is not None:
+            wire["systemPrompt"] = overrides.system_prompt
+        if overrides.system_prompt_append is not None:
+            wire["systemPromptAppend"] = overrides.system_prompt_append
+        if overrides.model is not None:
+            wire["model"] = overrides.model
+        if overrides.llm_provider_id is not None:
+            wire["llmProviderId"] = overrides.llm_provider_id
+        if overrides.reasoning_level is not None:
+            wire["reasoningLevel"] = overrides.reasoning_level
+        if overrides.disable_tools is not None:
+            wire["disableTools"] = overrides.disable_tools
+        if overrides.tool_allowlist is not None:
+            wire["toolAllowlist"] = overrides.tool_allowlist
+        if overrides.disabled_mocks is not None:
+            wire["disabledMocks"] = overrides.disabled_mocks
+        return wire
+    return dict(overrides)
+
+
+def _parse_eval_dataset_summary(raw: Mapping[str, Any]) -> EvalDatasetSummary:
+    return EvalDatasetSummary(
+        id=str(raw.get("id") or ""),
+        name=str(raw.get("name") or ""),
+        description=raw.get("description") if isinstance(raw.get("description"), str) else None,
+        case_count=int(raw.get("caseCount") or 0),
+        run_count=int(raw.get("runCount") or 0),
+        created_at=str(raw.get("createdAt") or ""),
+        updated_at=str(raw.get("updatedAt") or ""),
+    )
+
+
+def _parse_eval_case(raw: Mapping[str, Any]) -> EvalCase:
+    scorers_raw = raw.get("scorers")
+    tags_raw = raw.get("tags")
+    return EvalCase(
+        id=str(raw.get("id") or ""),
+        name=str(raw.get("name") or ""),
+        input=cast(dict[str, Any], raw.get("input") if isinstance(raw.get("input"), dict) else {}),
+        scorers=[s for s in scorers_raw if isinstance(s, dict)]
+        if isinstance(scorers_raw, list)
+        else [],
+        tags=[str(t) for t in tags_raw if isinstance(t, str)] if isinstance(tags_raw, list) else [],
+        tool_mocks=raw.get("toolMocks") if isinstance(raw.get("toolMocks"), dict) else None,
+        created_at=str(raw.get("createdAt") or ""),
+        updated_at=str(raw.get("updatedAt") or ""),
+    )
+
+
+def _parse_eval_dataset_list(body: Mapping[str, Any]) -> EvalDatasetList:
+    datasets_raw = body.get("datasets")
+    datasets = [
+        _parse_eval_dataset_summary(d)
+        for d in cast(Iterable[Any], datasets_raw or [])
+        if isinstance(d, dict)
+    ]
+    return EvalDatasetList(datasets=datasets)
+
+
+def _parse_eval_dataset_detail(body: Mapping[str, Any]) -> EvalDatasetDetail:
+    cases_raw = body.get("cases")
+    cases = [
+        _parse_eval_case(c) for c in cast(Iterable[Any], cases_raw or []) if isinstance(c, dict)
+    ]
+    return EvalDatasetDetail(
+        id=str(body.get("id") or ""),
+        name=str(body.get("name") or ""),
+        description=body.get("description") if isinstance(body.get("description"), str) else None,
+        tool_mocks=body.get("toolMocks") if isinstance(body.get("toolMocks"), dict) else None,
+        cases=cases,
+        created_at=str(body.get("createdAt") or ""),
+        updated_at=str(body.get("updatedAt") or ""),
+    )
+
+
+def _parse_eval_run_accepted(body: Mapping[str, Any]) -> EvalRunAccepted:
+    return EvalRunAccepted(
+        run_id=str(body.get("runId") or ""),
+        status=str(body.get("status") or ""),
+        stream_url=str(body.get("streamUrl") or ""),
+    )
+
+
+def _parse_eval_run_summary(raw: Mapping[str, Any]) -> EvalRunSummary:
+    score_raw = raw.get("score")
+    return EvalRunSummary(
+        id=str(raw.get("id") or ""),
+        dataset_id=str(raw.get("datasetId") or ""),
+        dataset_name=str(raw.get("datasetName") or ""),
+        agent_id=raw.get("agentId") if isinstance(raw.get("agentId"), str) else None,
+        inline_agent=bool(raw.get("inlineAgent")),
+        status=str(raw.get("status") or ""),
+        total_cases=int(raw.get("totalCases") or 0),
+        completed_cases=int(raw.get("completedCases") or 0),
+        passed_cases=int(raw.get("passedCases") or 0),
+        score=float(score_raw) if isinstance(score_raw, (int, float)) else None,
+        token_usage=raw.get("tokenUsage") if isinstance(raw.get("tokenUsage"), dict) else None,
+        error=raw.get("error") if isinstance(raw.get("error"), str) else None,
+        agent_overrides=raw.get("agentOverrides")
+        if isinstance(raw.get("agentOverrides"), dict)
+        else None,
+        started_at=raw.get("startedAt") if isinstance(raw.get("startedAt"), str) else None,
+        finished_at=raw.get("finishedAt") if isinstance(raw.get("finishedAt"), str) else None,
+        created_at=str(raw.get("createdAt") or ""),
+    )
+
+
+def _parse_eval_case_result(raw: Mapping[str, Any]) -> EvalCaseResult:
+    case_raw = raw.get("case")
+    case = _parse_eval_case(case_raw) if isinstance(case_raw, dict) else _parse_eval_case({})
+    tool_calls_raw = raw.get("toolCalls")
+    scores_raw = raw.get("scores")
+    return EvalCaseResult(
+        id=str(raw.get("id") or ""),
+        case_id=str(raw.get("caseId") or ""),
+        case=case,
+        final_text=raw.get("finalText") if isinstance(raw.get("finalText"), str) else None,
+        tool_calls=[t for t in tool_calls_raw if isinstance(t, dict)]
+        if isinstance(tool_calls_raw, list)
+        else [],
+        scores=[s for s in scores_raw if isinstance(s, dict)]
+        if isinstance(scores_raw, list)
+        else [],
+        passed=bool(raw.get("passed")),
+        score=float(raw.get("score") or 0),
+        tokens=raw.get("tokens") if isinstance(raw.get("tokens"), dict) else None,
+        latency_ms=int(raw.get("latencyMs"))
+        if isinstance(raw.get("latencyMs"), (int, float))
+        else None,
+        error=raw.get("error") if isinstance(raw.get("error"), str) else None,
+        created_at=str(raw.get("createdAt") or ""),
+    )
+
+
+def _parse_eval_run_detail(body: Mapping[str, Any]) -> EvalRunDetail:
+    summary = _parse_eval_run_summary(body)
+    results_raw = body.get("results")
+    results = [
+        _parse_eval_case_result(r)
+        for r in cast(Iterable[Any], results_raw or [])
+        if isinstance(r, dict)
+    ]
+    return EvalRunDetail(
+        **summary.__dict__,
+        inline_agent_spec=body.get("inlineAgentSpec")
+        if isinstance(body.get("inlineAgentSpec"), dict)
+        else None,
+        agent_spec_snapshot=body.get("agentSpecSnapshot")
+        if isinstance(body.get("agentSpecSnapshot"), dict)
+        else None,
+        updated_at=str(body.get("updatedAt") or ""),
+        results=results,
+    )
+
+
+def _parse_eval_run_list(body: Mapping[str, Any]) -> EvalRunList:
+    runs_raw = body.get("runs")
+    runs = [
+        _parse_eval_run_summary(r)
+        for r in cast(Iterable[Any], runs_raw or [])
+        if isinstance(r, dict)
+    ]
+    return EvalRunList(
+        runs=runs,
+        limit=int(body.get("limit") or 0),
+        offset=int(body.get("offset") or 0),
+    )
+
+
+def _parse_eval_run_compare_side(raw: Mapping[str, Any]) -> EvalRunCompareSide:
+    score_raw = raw.get("score")
+    return EvalRunCompareSide(
+        id=str(raw.get("id") or ""),
+        agent_id=raw.get("agentId") if isinstance(raw.get("agentId"), str) else None,
+        inline_agent=bool(raw.get("inlineAgent")),
+        status=str(raw.get("status") or ""),
+        total_cases=int(raw.get("totalCases") or 0),
+        completed_cases=int(raw.get("completedCases") or 0),
+        passed_cases=int(raw.get("passedCases") or 0),
+        score=float(score_raw) if isinstance(score_raw, (int, float)) else None,
+        token_usage=raw.get("tokenUsage") if isinstance(raw.get("tokenUsage"), dict) else None,
+        agent_overrides=raw.get("agentOverrides")
+        if isinstance(raw.get("agentOverrides"), dict)
+        else None,
+        agent_spec_snapshot=raw.get("agentSpecSnapshot")
+        if isinstance(raw.get("agentSpecSnapshot"), dict)
+        else None,
+        started_at=raw.get("startedAt") if isinstance(raw.get("startedAt"), str) else None,
+        finished_at=raw.get("finishedAt") if isinstance(raw.get("finishedAt"), str) else None,
+        created_at=str(raw.get("createdAt") or ""),
+    )
+
+
+def _parse_eval_run_compare(body: Mapping[str, Any]) -> EvalRunCompare:
+    cases_raw = body.get("cases")
+    cases: list[EvalRunCompareCase] = []
+    for c in cast(Iterable[Any], cases_raw or []):
+        if not isinstance(c, dict):
+            continue
+        cases.append(
+            EvalRunCompareCase(
+                case_id=str(c.get("caseId") or ""),
+                case_name=str(c.get("caseName") or ""),
+                case_input=c.get("caseInput") if isinstance(c.get("caseInput"), dict) else None,
+                a=c.get("a") if isinstance(c.get("a"), dict) else None,
+                b=c.get("b") if isinstance(c.get("b"), dict) else None,
+            )
+        )
+    run_a_raw = body.get("runA")
+    run_b_raw = body.get("runB")
+    return EvalRunCompare(
+        dataset_id=str(body.get("datasetId") or ""),
+        dataset_name=str(body.get("datasetName") or ""),
+        run_a=_parse_eval_run_compare_side(run_a_raw if isinstance(run_a_raw, dict) else {}),
+        run_b=_parse_eval_run_compare_side(run_b_raw if isinstance(run_b_raw, dict) else {}),
+        cases=cases,
+    )
+
+
+def _parse_eval_run_event(raw: Any) -> EvalRunEvent:
+    if not isinstance(raw, dict):
+        return EvalRunEvent(type="message", data={})
+    type_ = str(raw.get("type") or "message")
+    data = {k: v for k, v in raw.items() if k != "type"}
+    return EvalRunEvent(type=type_, data=data)
 
 
 def _parse_run_tokens(raw: Any) -> RunTokenUsage | None:

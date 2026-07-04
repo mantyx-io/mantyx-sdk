@@ -174,6 +174,44 @@ export class MockServer {
   /** Whether the latest feedback POST created (201) vs updated (200). */
   lastFeedbackCreated = false;
   private feedbackByRun = new Map<string, { id: string; body: Record<string, unknown> }>();
+  evalDatasets: Array<Record<string, unknown>> = [
+    {
+      id: "ds_demo",
+      name: "Demo dataset",
+      description: null,
+      caseCount: 1,
+      runCount: 0,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    },
+  ];
+  evalDatasetDetails = new Map<string, Record<string, unknown>>([
+    [
+      "ds_demo",
+      {
+        id: "ds_demo",
+        name: "Demo dataset",
+        description: null,
+        toolMocks: null,
+        cases: [
+          {
+            id: "case_1",
+            name: "hello",
+            input: { role: "user", content: "hi" },
+            scorers: [],
+            tags: [],
+            toolMocks: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+          },
+        ],
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    ],
+  ]);
+  private evalRuns = new Map<string, Record<string, unknown>>();
+  lastEvalCreateBody: Record<string, unknown> | null = null;
   /** Latest body posted to POST /agent-runs (one-shot create). */
   lastRunCreateBody: Record<string, unknown> | null = null;
   /** Latest body posted to POST /agent-sessions (session create). */
@@ -340,6 +378,12 @@ export class MockServer {
     }
     if (rest[0] === "agent-sessions") {
       return this.handleAgentSessions(req, res, rest.slice(1), url);
+    }
+    if (rest[0] === "eval-datasets") {
+      return this.handleEvalDatasets(req, res, rest.slice(1));
+    }
+    if (rest[0] === "eval-runs") {
+      return this.handleEvalRuns(req, res, rest.slice(1), url);
     }
     res.statusCode = 404;
     res.end(JSON.stringify({ error: "Not found" }));
@@ -752,6 +796,143 @@ export class MockServer {
         // ignore
       }
     });
+  }
+
+  private handleEvalDatasets(req: IncomingMessage, res: ServerResponse, rest: string[]): void {
+    if (rest.length === 0 && req.method === "GET") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ datasets: this.evalDatasets }));
+      return;
+    }
+    if (rest.length === 1 && req.method === "GET") {
+      const detail = this.evalDatasetDetails.get(rest[0]!);
+      if (!detail) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(detail));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: "not_found" }));
+  }
+
+  private async handleEvalRuns(
+    req: IncomingMessage,
+    res: ServerResponse,
+    rest: string[],
+    url: URL,
+  ): Promise<void> {
+    if (rest[0] === "compare" && req.method === "GET") {
+      const a = url.searchParams.get("a") ?? "";
+      const b = url.searchParams.get("b") ?? "";
+      const runA = this.evalRuns.get(a);
+      const runB = this.evalRuns.get(b);
+      if (!runA || !runB) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          datasetId: runA.datasetId,
+          datasetName: runA.datasetName,
+          runA,
+          runB,
+          cases: [],
+        }),
+      );
+      return;
+    }
+    if (rest.length === 0 && req.method === "POST") {
+      const body = (await readJson(req)) as Record<string, unknown>;
+      this.lastEvalCreateBody = body;
+      const runId = `eval_${randomUUID()}`;
+      const detail = {
+        id: runId,
+        datasetId: body.datasetId ?? "ds_inline",
+        datasetName: "Demo dataset",
+        agentId: body.agentId ?? null,
+        inlineAgent: body.agent != null,
+        status: "succeeded",
+        totalCases: 1,
+        completedCases: 1,
+        passedCases: 1,
+        score: 1,
+        tokenUsage: null,
+        error: null,
+        agentOverrides: body.overrides ?? null,
+        startedAt: "2026-01-01T00:00:01Z",
+        finishedAt: "2026-01-01T00:00:02Z",
+        createdAt: "2026-01-01T00:00:00Z",
+        inlineAgentSpec: body.agent ?? null,
+        agentSpecSnapshot: null,
+        updatedAt: "2026-01-01T00:00:02Z",
+        results: [],
+      };
+      this.evalRuns.set(runId, detail);
+      res.statusCode = 202;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          runId,
+          status: "queued",
+          streamUrl: `/api/v1/workspaces/x/eval-runs/${runId}/stream`,
+        }),
+      );
+      return;
+    }
+    if (rest.length === 0 && req.method === "GET") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          runs: [...this.evalRuns.values()],
+          limit: 50,
+          offset: 0,
+        }),
+      );
+      return;
+    }
+    if (rest.length === 1 && req.method === "GET") {
+      const detail = this.evalRuns.get(rest[0]!);
+      if (!detail) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(detail));
+      return;
+    }
+    if (rest.length === 2 && rest[1] === "stream" && req.method === "GET") {
+      if (!this.evalRuns.has(rest[0]!)) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.setHeader("Content-Type", "text/event-stream");
+      res.write('data: {"type":"snapshot","status":"succeeded"}\n\n');
+      res.write('data: {"type":"run_completed"}\n\n');
+      res.end();
+      return;
+    }
+    if (rest.length === 2 && rest[1] === "cancel" && req.method === "POST") {
+      const detail = this.evalRuns.get(rest[0]!);
+      if (!detail) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      detail.status = "cancelled";
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: "not_found" }));
   }
 }
 

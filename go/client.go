@@ -162,8 +162,8 @@ func (c *Client) ListModels(ctx context.Context) (ModelCatalog, error) {
 
 // Message is one entry in the conversation transcript.
 type Message struct {
-	Role    string           `json:"role"` // user | assistant | system
-	Content string           `json:"content"`
+	Role        string           `json:"role"` // user | assistant | system
+	Content     string           `json:"content"`
 	Attachments []map[string]any `json:"attachments,omitempty"`
 }
 
@@ -213,7 +213,7 @@ type RunSpec struct {
 	// Attachments is shorthand for a single user turn with file inputs. When
 	// Prompt is set and Messages is empty, the SDK builds a one-entry
 	// Messages slice. Ignored when Messages is non-empty.
-	Attachments  []map[string]any
+	Attachments []map[string]any
 	// ReasoningLevel controls provider thinking strength on reasoning models.
 	// Build one with ReasoningOff/Low/Medium/High or ReasoningEffort(n) where
 	// n ∈ [0, 100]. Nil leaves the field unset (the server then falls back to
@@ -1587,10 +1587,10 @@ type RunFeedbackInput struct {
 
 // RunFeedbackResult is the response from POST /agent-runs/:runId/feedback.
 type RunFeedbackResult struct {
-	ID          string `json:"id"`
-	Verdict     string `json:"verdict"`
-	TargetKind  string `json:"targetKind"`
-	AgentRunID  string `json:"agentRunId"`
+	ID         string `json:"id"`
+	Verdict    string `json:"verdict"`
+	TargetKind string `json:"targetKind"`
+	AgentRunID string `json:"agentRunId"`
 }
 
 const runFeedbackExplanationMax = 8000
@@ -1617,6 +1617,408 @@ func (c *Client) SubmitRunFeedback(ctx context.Context, runID string, input RunF
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ----- Evals ----------------------------------------------------------------
+
+// EvalRunStatus is a terminal or in-flight eval run status.
+type EvalRunStatus string
+
+const (
+	EvalRunQueued    EvalRunStatus = "queued"
+	EvalRunRunning   EvalRunStatus = "running"
+	EvalRunSucceeded EvalRunStatus = "succeeded"
+	EvalRunFailed    EvalRunStatus = "failed"
+	EvalRunCancelled EvalRunStatus = "cancelled"
+)
+
+var evalTerminalStatuses = map[EvalRunStatus]struct{}{
+	EvalRunSucceeded: {},
+	EvalRunFailed:    {},
+	EvalRunCancelled: {},
+}
+
+// InlineEvalCaseSpec is one case in an inline eval dataset.
+type InlineEvalCaseSpec struct {
+	Name      string           `json:"name,omitempty"`
+	Input     map[string]any   `json:"input"`
+	Scorers   []map[string]any `json:"scorers,omitempty"`
+	ToolMocks map[string]any   `json:"toolMocks,omitempty"`
+	Tags      []string         `json:"tags,omitempty"`
+}
+
+// InlineEvalDatasetSpec is an inline dataset blob for POST /eval-runs.
+type InlineEvalDatasetSpec struct {
+	Name      string               `json:"name,omitempty"`
+	ToolMocks map[string]any       `json:"toolMocks,omitempty"`
+	Cases     []InlineEvalCaseSpec `json:"cases"`
+}
+
+// AgentEvalOverrides are saved-agent eval overrides (ignored for inline agent).
+type AgentEvalOverrides struct {
+	SystemPrompt       string   `json:"systemPrompt,omitempty"`
+	SystemPromptAppend string   `json:"systemPromptAppend,omitempty"`
+	Model              string   `json:"model,omitempty"`
+	LLMProviderID      string   `json:"llmProviderId,omitempty"`
+	ReasoningLevel     string   `json:"reasoningLevel,omitempty"`
+	DisableTools       *bool    `json:"disableTools,omitempty"`
+	ToolAllowlist      []string `json:"toolAllowlist,omitempty"`
+	DisabledMocks      []string `json:"disabledMocks,omitempty"`
+}
+
+// CreateEvalRunRequest is the body for POST /eval-runs.
+// Exactly one of DatasetID/Dataset and AgentID/Agent must be set.
+type CreateEvalRunRequest struct {
+	DatasetID string                 `json:"datasetId,omitempty"`
+	Dataset   *InlineEvalDatasetSpec `json:"dataset,omitempty"`
+	AgentID   string                 `json:"agentId,omitempty"`
+	Agent     *RunSpec               `json:"agent,omitempty"`
+	ModelID   string                 `json:"modelId,omitempty"`
+	Overrides *AgentEvalOverrides    `json:"overrides,omitempty"`
+}
+
+// EvalDatasetSummary is a row from GET /eval-datasets.
+type EvalDatasetSummary struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CaseCount   int    `json:"caseCount"`
+	RunCount    int    `json:"runCount"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+// EvalDatasetList is the response from ListEvalDatasets.
+type EvalDatasetList struct {
+	Datasets []EvalDatasetSummary `json:"datasets"`
+}
+
+// EvalCase is one case in a saved eval dataset.
+type EvalCase struct {
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	Input     map[string]any   `json:"input"`
+	Scorers   []map[string]any `json:"scorers"`
+	Tags      []string         `json:"tags"`
+	ToolMocks map[string]any   `json:"toolMocks"`
+	CreatedAt string           `json:"createdAt"`
+	UpdatedAt string           `json:"updatedAt"`
+}
+
+// EvalDatasetDetail is the response from GetEvalDataset.
+type EvalDatasetDetail struct {
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	ToolMocks   map[string]any `json:"toolMocks"`
+	Cases       []EvalCase     `json:"cases"`
+	CreatedAt   string         `json:"createdAt"`
+	UpdatedAt   string         `json:"updatedAt"`
+}
+
+// EvalRunAccepted is returned by CreateEvalRun.
+type EvalRunAccepted struct {
+	RunID     string `json:"runId"`
+	Status    string `json:"status"`
+	StreamURL string `json:"streamUrl"`
+}
+
+// EvalRunSummary is a row from ListEvalRuns.
+type EvalRunSummary struct {
+	ID             string         `json:"id"`
+	DatasetID      string         `json:"datasetId"`
+	DatasetName    string         `json:"datasetName"`
+	AgentID        string         `json:"agentId"`
+	InlineAgent    bool           `json:"inlineAgent"`
+	Status         EvalRunStatus  `json:"status"`
+	TotalCases     int            `json:"totalCases"`
+	CompletedCases int            `json:"completedCases"`
+	PassedCases    int            `json:"passedCases"`
+	Score          *float64       `json:"score"`
+	TokenUsage     map[string]any `json:"tokenUsage"`
+	Error          string         `json:"error"`
+	AgentOverrides map[string]any `json:"agentOverrides"`
+	StartedAt      string         `json:"startedAt"`
+	FinishedAt     string         `json:"finishedAt"`
+	CreatedAt      string         `json:"createdAt"`
+}
+
+// EvalCaseResult is one per-case result on an eval run.
+type EvalCaseResult struct {
+	ID        string           `json:"id"`
+	CaseID    string           `json:"caseId"`
+	Case      EvalCase         `json:"case"`
+	FinalText string           `json:"finalText"`
+	ToolCalls []map[string]any `json:"toolCalls"`
+	Scores    []map[string]any `json:"scores"`
+	Passed    bool             `json:"passed"`
+	Score     float64          `json:"score"`
+	Tokens    map[string]any   `json:"tokens"`
+	LatencyMs int              `json:"latencyMs"`
+	Error     string           `json:"error"`
+	CreatedAt string           `json:"createdAt"`
+}
+
+// EvalRunDetail is the response from GetEvalRun.
+type EvalRunDetail struct {
+	EvalRunSummary
+	InlineAgentSpec   map[string]any   `json:"inlineAgentSpec"`
+	AgentSpecSnapshot map[string]any   `json:"agentSpecSnapshot"`
+	UpdatedAt         string           `json:"updatedAt"`
+	Results           []EvalCaseResult `json:"results"`
+}
+
+// EvalRunList is the response from ListEvalRuns.
+type EvalRunList struct {
+	Runs   []EvalRunSummary `json:"runs"`
+	Limit  int              `json:"limit"`
+	Offset int              `json:"offset"`
+}
+
+// EvalRunCompareSide is one side of GET /eval-runs/compare.
+type EvalRunCompareSide struct {
+	ID                string         `json:"id"`
+	AgentID           string         `json:"agentId"`
+	InlineAgent       bool           `json:"inlineAgent"`
+	Status            string         `json:"status"`
+	TotalCases        int            `json:"totalCases"`
+	CompletedCases    int            `json:"completedCases"`
+	PassedCases       int            `json:"passedCases"`
+	Score             *float64       `json:"score"`
+	TokenUsage        map[string]any `json:"tokenUsage"`
+	AgentOverrides    map[string]any `json:"agentOverrides"`
+	AgentSpecSnapshot map[string]any `json:"agentSpecSnapshot"`
+	StartedAt         string         `json:"startedAt"`
+	FinishedAt        string         `json:"finishedAt"`
+	CreatedAt         string         `json:"createdAt"`
+}
+
+// EvalRunCompareCase is one aligned case in a compare response.
+type EvalRunCompareCase struct {
+	CaseID    string         `json:"caseId"`
+	CaseName  string         `json:"caseName"`
+	CaseInput map[string]any `json:"caseInput"`
+	A         map[string]any `json:"a"`
+	B         map[string]any `json:"b"`
+}
+
+// EvalRunCompare is the response from CompareEvalRuns.
+type EvalRunCompare struct {
+	DatasetID   string               `json:"datasetId"`
+	DatasetName string               `json:"datasetName"`
+	RunA        EvalRunCompareSide   `json:"runA"`
+	RunB        EvalRunCompareSide   `json:"runB"`
+	Cases       []EvalRunCompareCase `json:"cases"`
+}
+
+// EvalRunEvent is one SSE frame from StreamEvalRun.
+type EvalRunEvent struct {
+	Type string         `json:"type"`
+	Data map[string]any `json:"-"`
+}
+
+// ListEvalRunsOptions filters GET /eval-runs.
+type ListEvalRunsOptions struct {
+	DatasetID string
+	AgentID   string
+	Status    string
+	Limit     int
+	Offset    int
+}
+
+// RunEvalOptions configures the blocking RunEval helper.
+type RunEvalOptions struct {
+	OnEvent      func(EvalRunEvent)
+	PollInterval time.Duration
+}
+
+// ListEvalDatasets returns saved eval datasets in the workspace.
+func (c *Client) ListEvalDatasets(ctx context.Context) (EvalDatasetList, error) {
+	var out EvalDatasetList
+	err := c.do(ctx, "GET", "/eval-datasets", nil, &out)
+	return out, err
+}
+
+// GetEvalDataset returns one eval dataset with cases.
+func (c *Client) GetEvalDataset(ctx context.Context, datasetID string) (EvalDatasetDetail, error) {
+	var out EvalDatasetDetail
+	path := fmt.Sprintf("/eval-datasets/%s", pathEscape(datasetID))
+	err := c.do(ctx, "GET", path, nil, &out)
+	return out, err
+}
+
+// CreateEvalRun queues an eval run.
+func (c *Client) CreateEvalRun(ctx context.Context, req CreateEvalRunRequest) (EvalRunAccepted, error) {
+	if err := validateCreateEvalRunRequest(req); err != nil {
+		return EvalRunAccepted{}, err
+	}
+	var out EvalRunAccepted
+	err := c.do(ctx, "POST", "/eval-runs", req, &out)
+	return out, err
+}
+
+// ListEvalRuns lists eval runs with optional filters.
+func (c *Client) ListEvalRuns(ctx context.Context, opts ListEvalRunsOptions) (EvalRunList, error) {
+	q := url.Values{}
+	if opts.DatasetID != "" {
+		q.Set("datasetId", opts.DatasetID)
+	}
+	if opts.AgentID != "" {
+		q.Set("agentId", opts.AgentID)
+	}
+	if opts.Status != "" {
+		q.Set("status", opts.Status)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Offset > 0 {
+		q.Set("offset", strconv.Itoa(opts.Offset))
+	}
+	path := "/eval-runs"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var out EvalRunList
+	err := c.do(ctx, "GET", path, nil, &out)
+	return out, err
+}
+
+// CompareEvalRuns aligns two eval runs case-by-case.
+func (c *Client) CompareEvalRuns(ctx context.Context, runA, runB string) (EvalRunCompare, error) {
+	path := fmt.Sprintf("/eval-runs/compare?a=%s&b=%s", url.QueryEscape(runA), url.QueryEscape(runB))
+	var out EvalRunCompare
+	err := c.do(ctx, "GET", path, nil, &out)
+	return out, err
+}
+
+// GetEvalRun returns an eval run with per-case results.
+func (c *Client) GetEvalRun(ctx context.Context, runID string) (EvalRunDetail, error) {
+	var out EvalRunDetail
+	path := fmt.Sprintf("/eval-runs/%s", pathEscape(runID))
+	err := c.do(ctx, "GET", path, nil, &out)
+	return out, err
+}
+
+// StreamEvalRun tails eval run progress over SSE until a terminal event.
+func (c *Client) StreamEvalRun(ctx context.Context, runID string) (<-chan EvalRunEvent, <-chan error) {
+	events := make(chan EvalRunEvent, 16)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(events)
+		defer close(errs)
+		path := fmt.Sprintf("/eval-runs/%s/stream", pathEscape(runID))
+		resp, err := c.openSSEStream(ctx, path, 0)
+		if err != nil {
+			errs <- err
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errs <- c.errorFromResponse(resp)
+			return
+		}
+		err = readSseStream(resp.Body, func(ev SseEvent) bool {
+			if ev.Data == "" {
+				return true
+			}
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(ev.Data), &raw); err != nil {
+				errs <- &Error{Code: "parse_error", Message: "invalid eval SSE JSON: " + err.Error()}
+				return false
+			}
+			typeVal, _ := raw["type"].(string)
+			if typeVal == "" {
+				typeVal = "message"
+			}
+			data := make(map[string]any, len(raw))
+			for k, v := range raw {
+				if k != "type" {
+					data[k] = v
+				}
+			}
+			evt := EvalRunEvent{Type: typeVal, Data: data}
+			select {
+			case events <- evt:
+			case <-ctx.Done():
+				return false
+			}
+			if typeVal == "run_completed" || typeVal == "run_error" || typeVal == "run_cancelled" {
+				return false
+			}
+			return true
+		})
+		if err != nil {
+			errs <- err
+		}
+	}()
+	return events, errs
+}
+
+// CancelEvalRun cancels a queued or running eval run.
+func (c *Client) CancelEvalRun(ctx context.Context, runID string) error {
+	path := fmt.Sprintf("/eval-runs/%s/cancel", pathEscape(runID))
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	return c.do(ctx, "POST", path, nil, &out)
+}
+
+// RunEval starts an eval run and blocks until it reaches a terminal status.
+func (c *Client) RunEval(ctx context.Context, req CreateEvalRunRequest, opts RunEvalOptions) (EvalRunDetail, error) {
+	accepted, err := c.CreateEvalRun(ctx, req)
+	if err != nil {
+		return EvalRunDetail{}, err
+	}
+	poll := opts.PollInterval
+	if poll <= 0 {
+		poll = time.Second
+	}
+	if opts.OnEvent != nil {
+		events, errs := c.StreamEvalRun(ctx, accepted.RunID)
+		go func() {
+			for ev := range events {
+				opts.OnEvent(ev)
+			}
+			// drain error channel
+			<-errs
+		}()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return EvalRunDetail{}, &NetworkError{Inner: &Error{Message: "eval run wait aborted", Code: "network"}, Cause: err}
+		}
+		detail, err := c.GetEvalRun(ctx, accepted.RunID)
+		if err != nil {
+			return EvalRunDetail{}, err
+		}
+		if _, ok := evalTerminalStatuses[detail.Status]; ok {
+			return detail, nil
+		}
+		select {
+		case <-ctx.Done():
+			return EvalRunDetail{}, &NetworkError{Inner: &Error{Message: "eval run wait aborted", Code: "network"}, Cause: ctx.Err()}
+		case <-time.After(poll):
+		}
+	}
+}
+
+func validateCreateEvalRunRequest(req CreateEvalRunRequest) error {
+	hasDataset := req.DatasetID != "" || req.Dataset != nil
+	hasAgent := req.AgentID != "" || req.Agent != nil
+	if !hasDataset {
+		return &Error{Code: "invalid_request", Message: "CreateEvalRun requires exactly one of DatasetID or Dataset"}
+	}
+	if req.DatasetID != "" && req.Dataset != nil {
+		return &Error{Code: "invalid_request", Message: "CreateEvalRun accepts only one of DatasetID or Dataset"}
+	}
+	if !hasAgent {
+		return &Error{Code: "invalid_request", Message: "CreateEvalRun requires exactly one of AgentID or Agent"}
+	}
+	if req.AgentID != "" && req.Agent != nil {
+		return &Error{Code: "invalid_request", Message: "CreateEvalRun accepts only one of AgentID or Agent"}
+	}
+	return nil
 }
 
 // ----- HTTP plumbing --------------------------------------------------------

@@ -85,7 +85,7 @@ type Executor struct {
 
 type sessionEntry struct {
 	contextID string
-	session  *mantyx.Session
+	session   *mantyx.Session
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -340,4 +340,3 @@ func extractText(msg *a2a.Message) string {
 	}
 	return b.String()
 }
-

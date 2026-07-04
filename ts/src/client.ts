@@ -119,6 +119,196 @@ export interface RunFeedbackResult {
 
 const RUN_FEEDBACK_EXPLANATION_MAX = 8000;
 
+/** Terminal statuses for {@link EvalRunDetail} and {@link EvalRunSummary}. */
+export type EvalRunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+/** One case in an inline eval dataset (`POST /eval-runs` `dataset`). */
+export interface InlineEvalCaseSpec {
+  name?: string;
+  input: {
+    role?: "user";
+    content: string;
+    expected?: string | null;
+  };
+  scorers?: Record<string, unknown>[];
+  toolMocks?: Record<string, unknown>;
+  tags?: string[];
+}
+
+/** Inline eval dataset blob (`POST /eval-runs` `dataset`). */
+export interface InlineEvalDatasetSpec {
+  name?: string;
+  toolMocks?: Record<string, unknown>;
+  cases: InlineEvalCaseSpec[];
+}
+
+/** Saved-agent overrides on `POST /eval-runs` (ignored for inline `agent`). */
+export interface AgentEvalOverrides {
+  systemPrompt?: string;
+  systemPromptAppend?: string;
+  model?: string;
+  llmProviderId?: string;
+  reasoningLevel?: "low" | "medium" | "high";
+  disableTools?: boolean;
+  toolAllowlist?: string[];
+  disabledMocks?: string[];
+}
+
+/** Body for `POST /eval-runs`. Exactly one of `datasetId`/`dataset` and `agentId`/`agent`. */
+export interface CreateEvalRunRequest {
+  datasetId?: string;
+  dataset?: InlineEvalDatasetSpec;
+  agentId?: string;
+  agent?: AgentSpecBase;
+  modelId?: string;
+  overrides?: AgentEvalOverrides;
+}
+
+export interface EvalDatasetSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  caseCount: number;
+  runCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalDatasetList {
+  datasets: EvalDatasetSummary[];
+}
+
+export interface EvalCase {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  scorers: Record<string, unknown>[];
+  tags: string[];
+  toolMocks: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalDatasetDetail {
+  id: string;
+  name: string;
+  description: string | null;
+  toolMocks: Record<string, unknown> | null;
+  cases: EvalCase[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EvalRunAccepted {
+  runId: string;
+  status: string;
+  streamUrl: string;
+}
+
+export interface EvalRunSummary {
+  id: string;
+  datasetId: string;
+  datasetName: string;
+  agentId: string | null;
+  inlineAgent: boolean;
+  status: EvalRunStatus;
+  totalCases: number;
+  completedCases: number;
+  passedCases: number;
+  score: number | null;
+  tokenUsage: Record<string, unknown> | null;
+  error: string | null;
+  agentOverrides: Record<string, unknown> | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface EvalCaseResult {
+  id: string;
+  caseId: string;
+  case: EvalCase;
+  finalText: string | null;
+  toolCalls: Record<string, unknown>[];
+  scores: Record<string, unknown>[];
+  passed: boolean;
+  score: number;
+  tokens: Record<string, unknown> | null;
+  latencyMs: number | null;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface EvalRunDetail extends EvalRunSummary {
+  inlineAgentSpec: Record<string, unknown> | null;
+  agentSpecSnapshot: Record<string, unknown> | null;
+  updatedAt: string;
+  results: EvalCaseResult[];
+}
+
+export interface EvalRunList {
+  runs: EvalRunSummary[];
+  limit: number;
+  offset: number;
+}
+
+export interface EvalRunCompareSide {
+  id: string;
+  agentId: string | null;
+  inlineAgent: boolean;
+  status: string;
+  totalCases: number;
+  completedCases: number;
+  passedCases: number;
+  score: number | null;
+  tokenUsage: Record<string, unknown> | null;
+  agentOverrides: Record<string, unknown> | null;
+  agentSpecSnapshot: Record<string, unknown> | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface EvalRunCompareCase {
+  caseId: string;
+  caseName: string;
+  caseInput: Record<string, unknown> | null;
+  a: Record<string, unknown> | null;
+  b: Record<string, unknown> | null;
+}
+
+export interface EvalRunCompare {
+  datasetId: string;
+  datasetName: string;
+  runA: EvalRunCompareSide;
+  runB: EvalRunCompareSide;
+  cases: EvalRunCompareCase[];
+}
+
+/** One SSE frame from `GET /eval-runs/:runId/stream`. */
+export interface EvalRunEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface ListEvalRunsOptions {
+  datasetId?: string;
+  agentId?: string;
+  status?: EvalRunStatus | string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface RunEvalOptions {
+  /** Called for each SSE frame while the run is in flight. */
+  onEvent?: (event: EvalRunEvent) => void;
+  /** Poll interval when SSE is unavailable or ends early. Default 1000ms. */
+  pollIntervalMs?: number;
+  signal?: AbortSignal;
+}
+
+const EVAL_TERMINAL_STATUSES = new Set<EvalRunStatus>(["succeeded", "failed", "cancelled"]);
+
 export interface MantyxClientOptions {
   /**
    * Workspace API key (token prefix `mantyx_`) **or** a MANTYX OAuth 2.0
@@ -152,7 +342,8 @@ export interface MantyxClientOptions {
    *
    * OAuth tokens additionally enforce per-route **scopes**
    * (`runs:read`, `runs:write`, `sessions:read`, `sessions:write`,
-   * `models:read`, `feedback:write`, `mantyx.identity:read`); see
+   * `models:read`, `feedback:write`, `evals:read`, `evals:write`,
+   * `mantyx.identity:read`); see
    * `docs/agent-runs-protocol.md` §2.2 for the table. Missing scopes
    * land as {@link MantyxScopeError} so callers can route the user
    * back to a re-consent flow.
@@ -1433,6 +1624,131 @@ export class MantyxClient {
     });
   }
 
+  // --------------------------------------------------------------- Evals
+
+  async listEvalDatasets(): Promise<EvalDatasetList> {
+    return this.request<EvalDatasetList>({
+      method: "GET",
+      path: "/eval-datasets",
+    });
+  }
+
+  async getEvalDataset(datasetId: string): Promise<EvalDatasetDetail> {
+    return this.request<EvalDatasetDetail>({
+      method: "GET",
+      path: `/eval-datasets/${encodeURIComponent(datasetId)}`,
+    });
+  }
+
+  async createEvalRun(spec: CreateEvalRunRequest): Promise<EvalRunAccepted> {
+    return this.request<EvalRunAccepted>({
+      method: "POST",
+      path: "/eval-runs",
+      body: serializeCreateEvalRunRequest(spec),
+    });
+  }
+
+  async listEvalRuns(options: ListEvalRunsOptions = {}): Promise<EvalRunList> {
+    const params = new URLSearchParams();
+    if (options.datasetId) params.set("datasetId", options.datasetId);
+    if (options.agentId) params.set("agentId", options.agentId);
+    if (options.status) params.set("status", options.status);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.offset !== undefined) params.set("offset", String(options.offset));
+    const qs = params.toString();
+    return this.request<EvalRunList>({
+      method: "GET",
+      path: qs ? `/eval-runs?${qs}` : "/eval-runs",
+    });
+  }
+
+  async compareEvalRuns(runA: string, runB: string): Promise<EvalRunCompare> {
+    const params = new URLSearchParams({ a: runA, b: runB });
+    return this.request<EvalRunCompare>({
+      method: "GET",
+      path: `/eval-runs/compare?${params}`,
+    });
+  }
+
+  async getEvalRun(runId: string): Promise<EvalRunDetail> {
+    return this.request<EvalRunDetail>({
+      method: "GET",
+      path: `/eval-runs/${encodeURIComponent(runId)}`,
+    });
+  }
+
+  async *streamEvalRun(
+    runId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<EvalRunEvent, void, void> {
+    const url = this.absoluteUrl(`/eval-runs/${encodeURIComponent(runId)}/stream`);
+    const res = await this.openSseStream(url, 0, signal);
+    try {
+      for await (const frame of readSseStream(res.body!, { signal })) {
+        if (!frame.data) continue;
+        let parsed: EvalRunEvent;
+        try {
+          parsed = JSON.parse(frame.data) as EvalRunEvent;
+        } catch {
+          throw new MantyxParseError(`invalid eval SSE JSON: ${frame.data.slice(0, 200)}`);
+        }
+        yield parsed;
+        if (
+          parsed.type === "run_completed" ||
+          parsed.type === "run_error" ||
+          parsed.type === "run_cancelled"
+        ) {
+          return;
+        }
+      }
+    } finally {
+      await res.body?.cancel().catch(() => undefined);
+    }
+  }
+
+  async cancelEvalRun(runId: string): Promise<{ ok: boolean }> {
+    return this.request<{ ok: boolean }>({
+      method: "POST",
+      path: `/eval-runs/${encodeURIComponent(runId)}/cancel`,
+    });
+  }
+
+  /**
+   * Start an eval run and block until it reaches a terminal status.
+   * Tails the SSE stream for live `onEvent` callbacks while polling
+   * `getEvalRun` until `status` is terminal.
+   */
+  async runEval(
+    spec: CreateEvalRunRequest,
+    options: RunEvalOptions = {},
+  ): Promise<EvalRunDetail> {
+    const accepted = await this.createEvalRun(spec);
+    const pollMs = options.pollIntervalMs ?? 1000;
+
+    const streamDone = (async () => {
+      try {
+        for await (const ev of this.streamEvalRun(accepted.runId, options.signal)) {
+          options.onEvent?.(ev);
+        }
+      } catch (err) {
+        if (!(err instanceof MantyxNetworkError)) throw err;
+      }
+    })();
+
+    try {
+      while (true) {
+        if (options.signal?.aborted) {
+          throw new MantyxNetworkError("eval run wait aborted", { cause: options.signal.reason });
+        }
+        const detail = await this.getEvalRun(accepted.runId);
+        if (EVAL_TERMINAL_STATUSES.has(detail.status)) return detail;
+        await sleep(pollMs);
+      }
+    } finally {
+      await streamDone.catch(() => undefined);
+    }
+  }
+
   // -------------------------------------------------------------- HTTP
 
   private absoluteUrl(path: string): string {
@@ -1881,6 +2197,31 @@ function serializeAgentSpec(
   if (spec.budgets) body.budgets = spec.budgets;
   if (spec.metadata && Object.keys(spec.metadata).length > 0) body.metadata = spec.metadata;
   Object.assign(body, serializeTurnInput(extra));
+  return body;
+}
+
+function serializeCreateEvalRunRequest(spec: CreateEvalRunRequest): Record<string, unknown> {
+  const hasDataset = spec.datasetId !== undefined || spec.dataset !== undefined;
+  const hasAgent = spec.agentId !== undefined || spec.agent !== undefined;
+  if (!hasDataset) {
+    throw new MantyxError("createEvalRun requires exactly one of `datasetId` or `dataset`");
+  }
+  if (spec.datasetId !== undefined && spec.dataset !== undefined) {
+    throw new MantyxError("createEvalRun accepts only one of `datasetId` or `dataset`");
+  }
+  if (!hasAgent) {
+    throw new MantyxError("createEvalRun requires exactly one of `agentId` or `agent`");
+  }
+  if (spec.agentId !== undefined && spec.agent !== undefined) {
+    throw new MantyxError("createEvalRun accepts only one of `agentId` or `agent`");
+  }
+  const body: Record<string, unknown> = {};
+  if (spec.datasetId) body.datasetId = spec.datasetId;
+  if (spec.dataset) body.dataset = spec.dataset;
+  if (spec.agentId) body.agentId = spec.agentId;
+  if (spec.agent) body.agent = serializeAgentSpec(spec.agent);
+  if (spec.modelId) body.modelId = spec.modelId;
+  if (spec.overrides) body.overrides = spec.overrides;
   return body;
 }
 

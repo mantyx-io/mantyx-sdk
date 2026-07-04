@@ -231,9 +231,9 @@ func TestRunAgent_LoopDetectionIsForwarded(t *testing.T) {
 		BaseURL:       server.baseURL(),
 	})
 	if _, err := client.RunAgent(context.Background(), RunSpec{
-		SystemPrompt:   "x",
-		Prompt:         "y",
-		LoopDetection:  LoopDetectionThresholds(2, 4),
+		SystemPrompt:  "x",
+		Prompt:        "y",
+		LoopDetection: LoopDetectionThresholds(2, 4),
 	}); err != nil {
 		t.Fatalf("RunAgent: %v", err)
 	}
@@ -866,9 +866,9 @@ func TestRunAgent_ClampsMalformedTokenBuckets(t *testing.T) {
 					"subtype": "success",
 					"text":    "ok",
 					"tokens": map[string]any{
-						"inputTokens":     -10,
-						"cachedTokens":    "not a number",
-						"outputTokens":    12.7,
+						"inputTokens":  -10,
+						"cachedTokens": "not a number",
+						"outputTokens": 12.7,
 					},
 					"turns": -1,
 					"model": map[string]any{"id": "x", "provider": "openai", "vendorModelId": "y"},
