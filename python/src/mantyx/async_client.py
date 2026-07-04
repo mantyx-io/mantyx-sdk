@@ -6,6 +6,7 @@ Mirrors :mod:`mantyx.client` but exposes coroutines and async iterators.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import (
@@ -45,7 +46,9 @@ from .client import (
     RunTokenUsage,
     SessionInfo,
     SessionListResult,
+    _coerce_eval_tools,
     _describe_handler,
+    _eval_event_to_run_event,
     _parse_eval_dataset_detail,
     _parse_eval_dataset_list,
     _parse_eval_run_accepted,
@@ -67,15 +70,12 @@ from .client import (
     _serialize_agent_spec,
     _serialize_create_eval_run,
     _serialize_turn_input,
-    _coerce_eval_tools,
-    _eval_event_to_run_event,
     _to_run_event,
 )
 from .errors import (
     MantyxAuthError,
     MantyxError,
     MantyxNetworkError,
-    MantyxParseError,
     MantyxRunError,
     MantyxScopeError,
     MantyxToolError,
@@ -450,9 +450,7 @@ class AsyncMantyxClient:
                     try:
                         raw = json.loads(frame.data)
                     except json.JSONDecodeError as exc:
-                        raise MantyxParseError(
-                            f"invalid eval SSE JSON: {frame.data[:200]}"
-                        ) from exc
+                        raise MantyxError(f"invalid eval SSE JSON: {frame.data[:200]}") from exc
                     ev = _parse_eval_run_event(raw)
                     yield ev
                     if ev.type in ("run_completed", "run_error", "run_cancelled"):
@@ -490,7 +488,7 @@ class AsyncMantyxClient:
             )
             handlers = collect_local_handlers(tools_list)
 
-            stream_task = None
+            stream_task: asyncio.Task[None] | None = None
             if tools_list or on_event is not None:
 
                 async def _consume_stream() -> None:
@@ -499,12 +497,10 @@ class AsyncMantyxClient:
                             if ev.type == "local_tool_call" and tools_list:
                                 agent_run_id = str(ev.data.get("agentRunId") or "")
                                 if agent_run_id:
-                                    asyncio.create_task(
-                                        self._dispatch_local_tool(
-                                            agent_run_id,
-                                            _eval_event_to_run_event(ev),
-                                            handlers,
-                                        )
+                                    await self._dispatch_local_tool(
+                                        agent_run_id,
+                                        _eval_event_to_run_event(ev),
+                                        handlers,
                                     )
                             if on_event is not None:
                                 on_event(ev)
@@ -516,11 +512,14 @@ class AsyncMantyxClient:
                 while True:
                     detail = await self.get_eval_run(accepted.run_id)
                     if detail.status in _EVAL_TERMINAL_STATUSES:
-                        return detail
+                        break
                     await asyncio.sleep(poll_interval_s)
             finally:
                 if stream_task is not None:
                     stream_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await stream_task
+            return detail
         finally:
             await async_close_mcp_refs(tools_list)
 

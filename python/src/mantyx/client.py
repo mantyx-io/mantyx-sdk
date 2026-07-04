@@ -797,9 +797,7 @@ class MantyxClient:
                     try:
                         raw = json.loads(frame.data)
                     except json.JSONDecodeError as exc:
-                        raise MantyxParseError(
-                            f"invalid eval SSE JSON: {frame.data[:200]}"
-                        ) from exc
+                        raise MantyxError(f"invalid eval SSE JSON: {frame.data[:200]}") from exc
                     ev = _parse_eval_run_event(raw)
                     yield ev
                     if ev.type in ("run_completed", "run_error", "run_cancelled"):
@@ -836,6 +834,7 @@ class MantyxClient:
                 overrides=overrides,
             )
             handlers = collect_local_handlers(tools_list)
+            stream_thread: threading.Thread | None = None
 
             if tools_list or on_event is not None:
 
@@ -859,11 +858,14 @@ class MantyxClient:
                     except MantyxNetworkError:
                         pass
 
-                threading.Thread(target=_consume_stream, daemon=True).start()
+                stream_thread = threading.Thread(target=_consume_stream, daemon=True)
+                stream_thread.start()
 
             while True:
                 detail = self.get_eval_run(accepted.run_id)
                 if detail.status in _EVAL_TERMINAL_STATUSES:
+                    if stream_thread is not None:
+                        stream_thread.join(timeout=30.0)
                     return detail
                 time.sleep(poll_interval_s)
         finally:
@@ -2117,6 +2119,8 @@ def _parse_eval_case_result(raw: Mapping[str, Any]) -> EvalCaseResult:
     case = _parse_eval_case(case_raw) if isinstance(case_raw, dict) else _parse_eval_case({})
     tool_calls_raw = raw.get("toolCalls")
     scores_raw = raw.get("scores")
+    latency_raw = raw.get("latencyMs")
+    latency_ms = int(latency_raw) if isinstance(latency_raw, (int, float)) else None
     return EvalCaseResult(
         id=str(raw.get("id") or ""),
         case_id=str(raw.get("caseId") or ""),
@@ -2131,9 +2135,7 @@ def _parse_eval_case_result(raw: Mapping[str, Any]) -> EvalCaseResult:
         passed=bool(raw.get("passed")),
         score=float(raw.get("score") or 0),
         tokens=raw.get("tokens") if isinstance(raw.get("tokens"), dict) else None,
-        latency_ms=int(raw.get("latencyMs"))
-        if isinstance(raw.get("latencyMs"), (int, float))
-        else None,
+        latency_ms=latency_ms,
         error=raw.get("error") if isinstance(raw.get("error"), str) else None,
         created_at=str(raw.get("createdAt") or ""),
     )

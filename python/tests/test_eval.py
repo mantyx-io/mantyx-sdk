@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from mantyx import InlineEvalCaseSpec, InlineEvalDatasetSpec, MantyxClient, MantyxError, define_local_tool
+from mantyx import (
+    InlineEvalCaseSpec,
+    InlineEvalDatasetSpec,
+    MantyxClient,
+    MantyxError,
+    define_local_tool,
+)
 from mantyx.async_client import AsyncMantyxClient
 from tests.conftest import MockServer, RunScript, ScriptEvent, _new_id
 
