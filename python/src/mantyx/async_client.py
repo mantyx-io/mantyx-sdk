@@ -67,6 +67,8 @@ from .client import (
     _serialize_agent_spec,
     _serialize_create_eval_run,
     _serialize_turn_input,
+    _coerce_eval_tools,
+    _eval_event_to_run_event,
     _to_run_event,
 )
 from .errors import (
@@ -379,14 +381,18 @@ class AsyncMantyxClient:
         dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
         agent_id: str | None = None,
         agent: Mapping[str, Any] | None = None,
+        tools: Sequence[ToolRef] | None = None,
         model_id: str | None = None,
         overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
     ) -> EvalRunAccepted:
+        tools_list = _coerce_eval_tools(agent, tools)
+        await async_resolve_local_refs(tools_list, http=self._http)
         wire = _serialize_create_eval_run(
             dataset_id=dataset_id,
             dataset=dataset,
             agent_id=agent_id,
             agent=agent,
+            tools=tools_list,
             model_id=model_id,
             overrides=overrides,
         )
@@ -464,38 +470,59 @@ class AsyncMantyxClient:
         dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
         agent_id: str | None = None,
         agent: Mapping[str, Any] | None = None,
+        tools: Sequence[ToolRef] | None = None,
         model_id: str | None = None,
         overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
         on_event: Callable[[EvalRunEvent], None] | None = None,
         poll_interval_s: float = 1.0,
     ) -> EvalRunDetail:
-        accepted = await self.create_eval_run(
-            dataset_id=dataset_id,
-            dataset=dataset,
-            agent_id=agent_id,
-            agent=agent,
-            model_id=model_id,
-            overrides=overrides,
-        )
-
-        async def _consume_stream() -> None:
-            try:
-                async for ev in self.stream_eval_run(accepted.run_id):
-                    if on_event:
-                        on_event(ev)
-            except MantyxNetworkError:
-                pass
-
-        stream_task = asyncio.create_task(_consume_stream()) if on_event else None
+        tools_list = _coerce_eval_tools(agent, tools)
+        await async_resolve_local_refs(tools_list, http=self._http)
         try:
-            while True:
-                detail = await self.get_eval_run(accepted.run_id)
-                if detail.status in _EVAL_TERMINAL_STATUSES:
-                    return detail
-                await asyncio.sleep(poll_interval_s)
+            accepted = await self.create_eval_run(
+                dataset_id=dataset_id,
+                dataset=dataset,
+                agent_id=agent_id,
+                agent=agent,
+                tools=tools_list,
+                model_id=model_id,
+                overrides=overrides,
+            )
+            handlers = collect_local_handlers(tools_list)
+
+            stream_task = None
+            if tools_list or on_event is not None:
+
+                async def _consume_stream() -> None:
+                    try:
+                        async for ev in self.stream_eval_run(accepted.run_id):
+                            if ev.type == "local_tool_call" and tools_list:
+                                agent_run_id = str(ev.data.get("agentRunId") or "")
+                                if agent_run_id:
+                                    asyncio.create_task(
+                                        self._dispatch_local_tool(
+                                            agent_run_id,
+                                            _eval_event_to_run_event(ev),
+                                            handlers,
+                                        )
+                                    )
+                            if on_event is not None:
+                                on_event(ev)
+                    except MantyxNetworkError:
+                        pass
+
+                stream_task = asyncio.create_task(_consume_stream())
+            try:
+                while True:
+                    detail = await self.get_eval_run(accepted.run_id)
+                    if detail.status in _EVAL_TERMINAL_STATUSES:
+                        return detail
+                    await asyncio.sleep(poll_interval_s)
+            finally:
+                if stream_task is not None:
+                    stream_task.cancel()
         finally:
-            if stream_task is not None:
-                stream_task.cancel()
+            await async_close_mcp_refs(tools_list)
 
     # ----------------------------------------------------------- Sessions
 

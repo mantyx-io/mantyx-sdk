@@ -212,6 +212,7 @@ export class MockServer {
   ]);
   private evalRuns = new Map<string, Record<string, unknown>>();
   lastEvalCreateBody: Record<string, unknown> | null = null;
+  evalStreamEvents: Array<Record<string, unknown>> | null = null;
   /** Latest body posted to POST /agent-runs (one-shot create). */
   lastRunCreateBody: Record<string, unknown> | null = null;
   /** Latest body posted to POST /agent-sessions (session create). */
@@ -685,6 +686,10 @@ export class MockServer {
     res.end(JSON.stringify({ error: "Not found" }));
   }
 
+  seedRun(id: string, script: MockRunScript): void {
+    this.startRun(id, script);
+  }
+
   private startRun(id: string, script: MockRunScript): void {
     const run: RunState = {
       id,
@@ -914,8 +919,13 @@ export class MockServer {
         return;
       }
       res.setHeader("Content-Type", "text/event-stream");
-      res.write('data: {"type":"snapshot","status":"succeeded"}\n\n');
-      res.write('data: {"type":"run_completed"}\n\n');
+      const events = this.evalStreamEvents ?? [
+        { type: "snapshot", status: "succeeded" },
+        { type: "run_completed" },
+      ];
+      for (const ev of events) {
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      }
       res.end();
       return;
     }

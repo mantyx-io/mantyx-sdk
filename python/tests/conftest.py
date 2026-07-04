@@ -125,6 +125,7 @@ class MockServer:
         }
         self.eval_runs: dict[str, dict[str, Any]] = {}
         self.last_eval_create_body: dict[str, Any] | None = None
+        self.eval_stream_events: list[dict[str, Any]] | None = None
         self.script_for_next_run: RunScript | None = None
         self.session_scripts: dict[str, RunScript] = {}
         # Each session: {"messages": [...], "metadata": {...}, "createdAt": str}
@@ -340,10 +341,11 @@ class MockServer:
             run_id = rest[0]
             if run_id not in self.eval_runs:
                 return httpx.Response(404, json={"error": "not_found"})
-            lines = [
-                'data: {"type":"snapshot","status":"succeeded"}\n\n',
-                'data: {"type":"run_completed"}\n\n',
+            events = self.eval_stream_events or [
+                {"type": "snapshot", "status": "succeeded"},
+                {"type": "run_completed"},
             ]
+            lines = [f"data: {json.dumps(ev)}\n\n" for ev in events]
             return httpx.Response(
                 200, headers={"content-type": "text/event-stream"}, content="".join(lines)
             )

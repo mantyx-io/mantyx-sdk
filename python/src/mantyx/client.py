@@ -728,14 +728,18 @@ class MantyxClient:
         dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
         agent_id: str | None = None,
         agent: Mapping[str, Any] | None = None,
+        tools: Sequence[ToolRef] | None = None,
         model_id: str | None = None,
         overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
     ) -> EvalRunAccepted:
+        tools_list = _coerce_eval_tools(agent, tools)
+        sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
         wire = _serialize_create_eval_run(
             dataset_id=dataset_id,
             dataset=dataset,
             agent_id=agent_id,
             agent=agent,
+            tools=tools_list,
             model_id=model_id,
             overrides=overrides,
         )
@@ -813,36 +817,57 @@ class MantyxClient:
         dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None = None,
         agent_id: str | None = None,
         agent: Mapping[str, Any] | None = None,
+        tools: Sequence[ToolRef] | None = None,
         model_id: str | None = None,
         overrides: AgentEvalOverrides | Mapping[str, Any] | None = None,
         on_event: Callable[[EvalRunEvent], None] | None = None,
         poll_interval_s: float = 1.0,
     ) -> EvalRunDetail:
-        accepted = self.create_eval_run(
-            dataset_id=dataset_id,
-            dataset=dataset,
-            agent_id=agent_id,
-            agent=agent,
-            model_id=model_id,
-            overrides=overrides,
-        )
+        tools_list = _coerce_eval_tools(agent, tools)
+        sync_resolve_local_refs(tools_list, http=self._http, portal=self._mcp_portal)
+        try:
+            accepted = self.create_eval_run(
+                dataset_id=dataset_id,
+                dataset=dataset,
+                agent_id=agent_id,
+                agent=agent,
+                tools=tools_list,
+                model_id=model_id,
+                overrides=overrides,
+            )
+            handlers = collect_local_handlers(tools_list)
 
-        if on_event is not None:
+            if tools_list or on_event is not None:
 
-            def _consume_stream() -> None:
-                try:
-                    for ev in self.stream_eval_run(accepted.run_id):
-                        on_event(ev)
-                except MantyxNetworkError:
-                    pass
+                def _consume_stream() -> None:
+                    try:
+                        with ThreadPoolExecutor(
+                            max_workers=4, thread_name_prefix="mantyx-eval-tool"
+                        ) as pool:
+                            for ev in self.stream_eval_run(accepted.run_id):
+                                if ev.type == "local_tool_call" and tools_list:
+                                    agent_run_id = str(ev.data.get("agentRunId") or "")
+                                    if agent_run_id:
+                                        pool.submit(
+                                            self._dispatch_local_tool,
+                                            agent_run_id,
+                                            _eval_event_to_run_event(ev),
+                                            handlers,
+                                        )
+                                if on_event is not None:
+                                    on_event(ev)
+                    except MantyxNetworkError:
+                        pass
 
-            threading.Thread(target=_consume_stream, daemon=True).start()
+                threading.Thread(target=_consume_stream, daemon=True).start()
 
-        while True:
-            detail = self.get_eval_run(accepted.run_id)
-            if detail.status in _EVAL_TERMINAL_STATUSES:
-                return detail
-            time.sleep(poll_interval_s)
+            while True:
+                detail = self.get_eval_run(accepted.run_id)
+                if detail.status in _EVAL_TERMINAL_STATUSES:
+                    return detail
+                time.sleep(poll_interval_s)
+        finally:
+            sync_close_mcp_refs(tools_list)
 
     # ----------------------------------------------------------- Sessions
 
@@ -1861,12 +1886,59 @@ def _parse_run_feedback(raw: Mapping[str, Any], run_id: str) -> RunFeedbackResul
     )
 
 
+def _coerce_eval_tools(
+    agent: Mapping[str, Any] | None,
+    tools: Sequence[ToolRef] | None,
+) -> list[ToolRef] | None:
+    merged: list[ToolRef] = []
+    if agent is not None:
+        merged.extend(_extract_tool_refs(agent.get("tools")))
+    if tools:
+        merged.extend(tools)
+    return merged or None
+
+
+def _extract_tool_refs(raw: Any) -> list[ToolRef]:
+    if not isinstance(raw, list):
+        return []
+    out: list[ToolRef] = []
+    for item in raw:
+        if isinstance(item, dict):
+            continue
+        out.append(cast(ToolRef, item))
+    return out
+
+
+def _serialize_inline_eval_agent(
+    agent: Mapping[str, Any],
+    tools: list[ToolRef] | None,
+) -> dict[str, Any]:
+    wire = dict(agent)
+    wire_tools: list[Any] = []
+    raw_agent_tools = wire.pop("tools", None)
+    if isinstance(raw_agent_tools, list):
+        wire_tools.extend(t for t in raw_agent_tools if isinstance(t, dict))
+        agent_tool_refs = _extract_tool_refs(raw_agent_tools)
+        if agent_tool_refs:
+            wire_tools.extend(serialize_tool_refs(agent_tool_refs))
+    if tools:
+        wire_tools.extend(serialize_tool_refs(tools))
+    if wire_tools:
+        wire["tools"] = wire_tools
+    return wire
+
+
+def _eval_event_to_run_event(ev: EvalRunEvent) -> RunEvent:
+    return RunEvent(type=ev.type, data=cast(RunEventData, dict(ev.data)), seq=0)
+
+
 def _serialize_create_eval_run(
     *,
     dataset_id: str | None,
     dataset: InlineEvalDatasetSpec | Mapping[str, Any] | None,
     agent_id: str | None,
     agent: Mapping[str, Any] | None,
+    tools: list[ToolRef] | None,
     model_id: str | None,
     overrides: AgentEvalOverrides | Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -1888,7 +1960,9 @@ def _serialize_create_eval_run(
     if agent_id is not None:
         body["agentId"] = agent_id
     if agent is not None:
-        body["agent"] = dict(agent)
+        body["agent"] = _serialize_inline_eval_agent(agent, tools if agent_id is None else None)
+    if tools is not None and agent_id is not None:
+        body["tools"] = serialize_tool_refs(tools)
     if model_id is not None:
         body["modelId"] = model_id
     if overrides is not None:
