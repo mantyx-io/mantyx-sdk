@@ -45,6 +45,7 @@ type mockServer struct {
 	lastSessionMessageBody []byte
 	lastEvalCreateBody     []byte
 	evalRuns               map[string]map[string]any
+	evalStreamEvents       []map[string]any
 	models                 ModelCatalog
 	runs                   map[string]*runState
 	sessions               map[string]*mockSession
@@ -857,8 +858,17 @@ func (m *mockServer) handleEvalRuns(w http.ResponseWriter, r *http.Request, rest
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"snapshot\",\"status\":\"succeeded\"}\n\n")
-		_, _ = io.WriteString(w, "data: {\"type\":\"run_completed\"}\n\n")
+		events := m.evalStreamEvents
+		if len(events) == 0 {
+			events = []map[string]any{
+				{"type": "snapshot", "status": "succeeded"},
+				{"type": "run_completed"},
+			}
+		}
+		for _, ev := range events {
+			raw, _ := json.Marshal(ev)
+			_, _ = io.WriteString(w, "data: "+string(raw)+"\n\n")
+		}
 	case len(rest) == 2 && rest[1] == "cancel" && r.Method == http.MethodPost:
 		m.mu.Lock()
 		detail, ok := m.evalRuns[rest[0]]

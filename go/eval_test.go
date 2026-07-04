@@ -2,6 +2,7 @@ package mantyx
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -147,5 +148,125 @@ func TestCancelEvalRun(t *testing.T) {
 	detail, _ := client.GetEvalRun(context.Background(), accepted.RunID)
 	if detail.Status != EvalRunCancelled {
 		t.Fatalf("status: %q", detail.Status)
+	}
+}
+
+func TestCreateEvalRunInlineLocalTool(t *testing.T) {
+	srv := newMockServer()
+	defer srv.close()
+	client := NewClient(Options{APIKey: "mantyx_test", WorkspaceSlug: "acme", BaseURL: srv.baseURL()})
+
+	tool := LocalTool(LocalToolSpec{
+		Name: "echo",
+		Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
+			return "ok", nil
+		},
+	})
+	_, err := client.CreateEvalRun(context.Background(), CreateEvalRunRequest{
+		Dataset: &InlineEvalDatasetSpec{
+			Cases: []InlineEvalCaseSpec{{Input: map[string]any{"role": "user", "content": "ping"}}},
+		},
+		Agent: &RunSpec{SystemPrompt: "You are helpful.", Tools: []ToolRef{tool}},
+	})
+	if err != nil {
+		t.Fatalf("CreateEvalRun: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(srv.lastEvalCreateBody, &body); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	agent, _ := body["agent"].(map[string]any)
+	tools, _ := agent["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools: %#v", tools)
+	}
+	wire, _ := tools[0].(map[string]any)
+	if wire["kind"] != "local" || wire["name"] != "echo" {
+		t.Fatalf("unexpected tool wire: %#v", wire)
+	}
+}
+
+func TestCreateEvalRunSavedAgentLocalTools(t *testing.T) {
+	srv := newMockServer()
+	defer srv.close()
+	client := NewClient(Options{APIKey: "mantyx_test", WorkspaceSlug: "acme", BaseURL: srv.baseURL()})
+
+	tool := LocalTool(LocalToolSpec{
+		Name: "echo",
+		Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
+			return "ok", nil
+		},
+	})
+	_, err := client.CreateEvalRun(context.Background(), CreateEvalRunRequest{
+		DatasetID: "ds_demo",
+		AgentID:   "agent_1",
+		Tools:     []ToolRef{tool},
+	})
+	if err != nil {
+		t.Fatalf("CreateEvalRun: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(srv.lastEvalCreateBody, &body); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	tools, _ := body["tools"].([]any)
+	wire, _ := tools[0].(map[string]any)
+	if wire["kind"] != "local" || wire["name"] != "echo" {
+		t.Fatalf("unexpected tool wire: %#v", wire)
+	}
+}
+
+func TestRunEvalDispatchesLocalTool(t *testing.T) {
+	srv := newMockServer()
+	defer srv.close()
+	client := NewClient(Options{APIKey: "mantyx_test", WorkspaceSlug: "acme", BaseURL: srv.baseURL()})
+
+	tool := LocalTool(LocalToolSpec{
+		Name: "echo",
+		Execute: func(ctx context.Context, raw json.RawMessage) (string, error) {
+			var args struct {
+				Msg string `json:"msg"`
+			}
+			if err := json.Unmarshal(raw, &args); err != nil {
+				return "", err
+			}
+			return args.Msg, nil
+		},
+	})
+	agentRunID := newID("run")
+	srv.startRun(agentRunID, &runScript{
+		events: []scriptEvent{{
+			kind: "local_tool_call",
+			data: map[string]any{"toolUseId": "tu_eval", "name": "echo", "args": map[string]any{"msg": "hi"}},
+			wait: true,
+		}, {
+			kind: "result",
+			data: map[string]any{"subtype": "success", "text": "ok"},
+		}},
+	})
+	srv.evalStreamEvents = []map[string]any{{
+		"type": "local_tool_call", "agentRunId": agentRunID,
+		"toolUseId": "tu_eval", "name": "echo", "args": map[string]any{"msg": "hi"},
+	}, {"type": "run_completed"}}
+
+	detail, err := client.RunEval(context.Background(), CreateEvalRunRequest{
+		DatasetID: "ds_demo",
+		AgentID:   "agent_1",
+	}, RunEvalOptions{Tools: []ToolRef{tool}, PollInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("RunEval: %v", err)
+	}
+	if detail.Status != EvalRunSucceeded {
+		t.Fatalf("status: %q", detail.Status)
+	}
+	var posted struct {
+		ToolUseID string `json:"toolUseId"`
+		Result    string `json:"result"`
+	}
+	if err := json.Unmarshal(srv.lastToolResultBody, &posted); err != nil {
+		t.Fatalf("unmarshal tool result: %v", err)
+	}
+	if posted.ToolUseID != "tu_eval" || posted.Result != "hi" {
+		t.Fatalf("tool result: %#v", posted)
 	}
 }

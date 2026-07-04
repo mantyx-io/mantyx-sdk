@@ -1672,9 +1672,11 @@ type CreateEvalRunRequest struct {
 	DatasetID string                 `json:"datasetId,omitempty"`
 	Dataset   *InlineEvalDatasetSpec `json:"dataset,omitempty"`
 	AgentID   string                 `json:"agentId,omitempty"`
-	Agent     *RunSpec               `json:"agent,omitempty"`
+	Agent     *RunSpec               `json:"-"`
 	ModelID   string                 `json:"modelId,omitempty"`
 	Overrides *AgentEvalOverrides    `json:"overrides,omitempty"`
+	// Tools are client-resolved tool refs merged onto a saved AgentID eval run.
+	Tools []ToolRef `json:"-"`
 }
 
 // EvalDatasetSummary is a row from GET /eval-datasets.
@@ -1828,6 +1830,7 @@ type ListEvalRunsOptions struct {
 
 // RunEvalOptions configures the blocking RunEval helper.
 type RunEvalOptions struct {
+	Tools        []ToolRef
 	OnEvent      func(EvalRunEvent)
 	PollInterval time.Duration
 }
@@ -1852,8 +1855,11 @@ func (c *Client) CreateEvalRun(ctx context.Context, req CreateEvalRunRequest) (E
 	if err := validateCreateEvalRunRequest(req); err != nil {
 		return EvalRunAccepted{}, err
 	}
+	if err := resolveLocalRefs(ctx, req.Tools, c.httpClient); err != nil {
+		return EvalRunAccepted{}, err
+	}
 	var out EvalRunAccepted
-	err := c.do(ctx, "POST", "/eval-runs", req, &out)
+	err := c.do(ctx, "POST", "/eval-runs", serializeCreateEvalRunRequest(req), &out)
 	return out, err
 }
 
@@ -1966,6 +1972,19 @@ func (c *Client) CancelEvalRun(ctx context.Context, runID string) error {
 
 // RunEval starts an eval run and blocks until it reaches a terminal status.
 func (c *Client) RunEval(ctx context.Context, req CreateEvalRunRequest, opts RunEvalOptions) (EvalRunDetail, error) {
+	tools := opts.Tools
+	if len(tools) == 0 {
+		tools = req.Tools
+	}
+	if len(tools) > 0 {
+		req.Tools = tools
+	}
+	if err := resolveLocalRefs(ctx, tools, c.httpClient); err != nil {
+		return EvalRunDetail{}, err
+	}
+	defer closeMcpRefs(tools)
+	handlers := collectLocalHandlers(tools)
+
 	accepted, err := c.CreateEvalRun(ctx, req)
 	if err != nil {
 		return EvalRunDetail{}, err
@@ -1974,13 +1993,29 @@ func (c *Client) RunEval(ctx context.Context, req CreateEvalRunRequest, opts Run
 	if poll <= 0 {
 		poll = time.Second
 	}
-	if opts.OnEvent != nil {
+	var streamDone chan struct{}
+	if opts.OnEvent != nil || len(tools) > 0 {
 		events, errs := c.StreamEvalRun(ctx, accepted.RunID)
+		streamDone = make(chan struct{})
 		go func() {
+			defer close(streamDone)
 			for ev := range events {
-				opts.OnEvent(ev)
+				if ev.Type == "local_tool_call" && len(tools) > 0 {
+					agentRunID, _ := ev.Data["agentRunId"].(string)
+					if agentRunID == "" {
+						if top, ok := ev.Data["data"].(map[string]any); ok {
+							agentRunID, _ = top["agentRunId"].(string)
+						}
+					}
+					if agentRunID != "" {
+						runEv := evalEventToRunEvent(ev)
+						c.dispatchLocalTool(ctx, agentRunID, runEv, handlers)
+					}
+				}
+				if opts.OnEvent != nil {
+					opts.OnEvent(ev)
+				}
 			}
-			// drain error channel
 			<-errs
 		}()
 	}
@@ -1993,6 +2028,9 @@ func (c *Client) RunEval(ctx context.Context, req CreateEvalRunRequest, opts Run
 			return EvalRunDetail{}, err
 		}
 		if _, ok := evalTerminalStatuses[detail.Status]; ok {
+			if streamDone != nil {
+				<-streamDone
+			}
 			return detail, nil
 		}
 		select {
@@ -2019,6 +2057,80 @@ func validateCreateEvalRunRequest(req CreateEvalRunRequest) error {
 		return &Error{Code: "invalid_request", Message: "CreateEvalRun accepts only one of AgentID or Agent"}
 	}
 	return nil
+}
+
+func serializeCreateEvalRunRequest(req CreateEvalRunRequest) map[string]any {
+	body := map[string]any{}
+	if req.DatasetID != "" {
+		body["datasetId"] = req.DatasetID
+	}
+	if req.Dataset != nil {
+		body["dataset"] = req.Dataset
+	}
+	if req.AgentID != "" {
+		body["agentId"] = req.AgentID
+	}
+	if req.Agent != nil {
+		body["agent"] = serializeEvalAgentSpec(*req.Agent)
+	}
+	if len(req.Tools) > 0 && req.AgentID != "" {
+		body["tools"] = toolWire(req.Tools)
+	}
+	if req.ModelID != "" {
+		body["modelId"] = req.ModelID
+	}
+	if req.Overrides != nil {
+		body["overrides"] = req.Overrides
+	}
+	return body
+}
+
+func serializeEvalAgentSpec(spec RunSpec) map[string]any {
+	body := map[string]any{
+		"tools": toolWire(spec.Tools),
+	}
+	if spec.SystemPrompt != "" {
+		body["systemPrompt"] = spec.SystemPrompt
+	}
+	if spec.AgentID != "" {
+		body["agentId"] = spec.AgentID
+	}
+	if spec.Name != "" {
+		body["name"] = spec.Name
+	}
+	if spec.ModelID != "" {
+		body["modelId"] = spec.ModelID
+	}
+	if spec.ReasoningLevel != nil {
+		body["reasoningLevel"] = spec.ReasoningLevel
+	}
+	if spec.OutputSchema != nil {
+		body["outputSchema"] = spec.OutputSchema
+	}
+	if spec.LoopDetection != nil {
+		body["loopDetection"] = spec.LoopDetection
+	}
+	if spec.ToolBudgets != nil {
+		body["toolBudgets"] = serializeToolBudgets(spec.ToolBudgets)
+	}
+	if spec.Supervisor != nil {
+		body["supervisor"] = spec.Supervisor
+	}
+	if spec.Plan != nil {
+		body["plan"] = spec.Plan
+	}
+	if len(spec.Metadata) > 0 {
+		body["metadata"] = spec.Metadata
+	}
+	return body
+}
+
+func evalEventToRunEvent(ev EvalRunEvent) RunEvent {
+	data := make(map[string]any, len(ev.Data))
+	for k, v := range ev.Data {
+		data[k] = v
+	}
+	return RunEvent{Type: ev.Type, Data: data}
 }
 
 // ----- HTTP plumbing --------------------------------------------------------

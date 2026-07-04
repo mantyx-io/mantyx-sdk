@@ -160,6 +160,8 @@ export interface CreateEvalRunRequest {
   dataset?: InlineEvalDatasetSpec;
   agentId?: string;
   agent?: AgentSpecBase;
+  /** Client-resolved tools merged onto a saved `agentId` eval run. */
+  tools?: ToolRef[];
   modelId?: string;
   overrides?: AgentEvalOverrides;
 }
@@ -300,6 +302,8 @@ export interface ListEvalRunsOptions {
 }
 
 export interface RunEvalOptions {
+  /** Client-resolved tools to register for the eval run. */
+  tools?: ToolRef[];
   /** Called for each SSE frame while the run is in flight. */
   onEvent?: (event: EvalRunEvent) => void;
   /** Poll interval when SSE is unavailable or ends early. Default 1000ms. */
@@ -1641,6 +1645,10 @@ export class MantyxClient {
   }
 
   async createEvalRun(spec: CreateEvalRunRequest): Promise<EvalRunAccepted> {
+    const tools = spec.tools ?? [];
+    if (tools.length > 0) {
+      await resolveLocalRefs(tools, { fetch: this.options.fetch });
+    }
     return this.request<EvalRunAccepted>({
       method: "POST",
       path: "/eval-runs",
@@ -1726,30 +1734,59 @@ export class MantyxClient {
     spec: CreateEvalRunRequest,
     options: RunEvalOptions = {},
   ): Promise<EvalRunDetail> {
-    const accepted = await this.createEvalRun(spec);
-    const pollMs = options.pollIntervalMs ?? 1000;
-
-    const streamDone = (async () => {
-      try {
-        for await (const ev of this.streamEvalRun(accepted.runId, options.signal)) {
-          options.onEvent?.(ev);
-        }
-      } catch (err) {
-        if (!(err instanceof MantyxNetworkError)) throw err;
-      }
-    })();
-
+    const tools = options.tools ?? spec.tools ?? [];
+    if (tools.length > 0) {
+      await resolveLocalRefs(tools, { fetch: this.options.fetch });
+    }
+    const handlers = collectLocalHandlers(tools);
     try {
-      while (true) {
-        if (options.signal?.aborted) {
-          throw new MantyxNetworkError("eval run wait aborted", { cause: options.signal.reason });
+      const accepted = await this.createEvalRun({
+        ...spec,
+        ...(tools.length > 0 ? { tools } : {}),
+      });
+      const pollMs = options.pollIntervalMs ?? 1000;
+
+      const streamDone = (async () => {
+        try {
+          for await (const ev of this.streamEvalRun(accepted.runId, options.signal)) {
+            if (ev.type === "local_tool_call" && tools.length > 0) {
+              const record = ev as Record<string, unknown>;
+              const nested =
+                typeof record.data === "object" && record.data !== null && !Array.isArray(record.data)
+                  ? (record.data as Record<string, unknown>)
+                  : undefined;
+              const agentRunId =
+                typeof record.agentRunId === "string"
+                  ? record.agentRunId
+                  : typeof nested?.agentRunId === "string"
+                    ? nested.agentRunId
+                    : "";
+              if (agentRunId) {
+                const localEv = evalEventToLocalToolCall(ev);
+                void this.dispatchLocalTool(agentRunId, localEv, handlers).catch(() => undefined);
+              }
+            }
+            options.onEvent?.(ev);
+          }
+        } catch (err) {
+          if (!(err instanceof MantyxNetworkError)) throw err;
         }
-        const detail = await this.getEvalRun(accepted.runId);
-        if (EVAL_TERMINAL_STATUSES.has(detail.status)) return detail;
-        await sleep(pollMs);
+      })();
+
+      try {
+        while (true) {
+          if (options.signal?.aborted) {
+            throw new MantyxNetworkError("eval run wait aborted", { cause: options.signal.reason });
+          }
+          const detail = await this.getEvalRun(accepted.runId);
+          if (EVAL_TERMINAL_STATUSES.has(detail.status)) return detail;
+          await sleep(pollMs);
+        }
+      } finally {
+        await streamDone.catch(() => undefined);
       }
     } finally {
-      await streamDone.catch(() => undefined);
+      await closeMcpRefs(tools);
     }
   }
 
@@ -2224,9 +2261,33 @@ function serializeCreateEvalRunRequest(spec: CreateEvalRunRequest): Record<strin
   if (spec.dataset) body.dataset = spec.dataset;
   if (spec.agentId) body.agentId = spec.agentId;
   if (spec.agent) body.agent = serializeAgentSpec(spec.agent);
+  if (spec.tools && spec.tools.length > 0 && spec.agentId) {
+    body.tools = serializeToolRefs(spec.tools);
+  }
   if (spec.modelId) body.modelId = spec.modelId;
   if (spec.overrides) body.overrides = spec.overrides;
   return body;
+}
+
+function evalEventToLocalToolCall(ev: EvalRunEvent): LocalToolCallEvent {
+  const data =
+    ev.data && typeof ev.data === "object" && !Array.isArray(ev.data)
+      ? (ev.data as Record<string, unknown>)
+      : (ev as Record<string, unknown>);
+  return {
+    type: "local_tool_call",
+    seq: 0,
+    toolUseId: String(data.toolUseId ?? ""),
+    name: String(data.name ?? ""),
+    args: (data.args as Record<string, unknown> | undefined) ?? {},
+    ...(typeof data.kind === "string" ? { kind: data.kind as LocalToolCallEvent["kind"] } : {}),
+    ...(data.agentCard !== undefined ? { agentCard: data.agentCard as LocalToolCallEvent["agentCard"] } : {}),
+    ...(typeof data.mcpServer === "string" ? { mcpServer: data.mcpServer } : {}),
+    ...(typeof data.mcpToolName === "string" ? { mcpToolName: data.mcpToolName } : {}),
+    ...(data.mcpServerInfo !== undefined
+      ? { mcpServerInfo: data.mcpServerInfo as LocalToolCallEvent["mcpServerInfo"] }
+      : {}),
+  };
 }
 
 function serializeToolRefs(tools: ToolRef[]): unknown[] {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { MantyxClient, MantyxError } from "../src/index.js";
+import { MantyxClient, MantyxError, defineLocalTool } from "../src/index.js";
 import { MockServer } from "./helpers/mock-server.js";
+import { z } from "zod";
 
 const mock = new MockServer();
 await mock.start();
@@ -38,6 +39,84 @@ describe("MantyxClient evals", () => {
     const detail = await client.getEvalRun(accepted.runId);
     expect(detail.status).toBe("succeeded");
     expect(detail.passedCases).toBe(1);
+  });
+
+  it("serializes inline local tools on createEvalRun", async () => {
+    const tool = defineLocalTool({
+      name: "echo",
+      parameters: z.object({ msg: z.string() }),
+      execute: async ({ msg }) => msg,
+    });
+    await client.createEvalRun({
+      dataset: {
+        cases: [{ input: { role: "user", content: "ping" } }],
+      },
+      agent: {
+        systemPrompt: "You are helpful.",
+        tools: [tool],
+      },
+    });
+    const body = mock.lastEvalCreateBody as { agent?: { tools?: Array<{ kind?: string; name?: string }> } };
+    expect(body.agent?.tools?.[0]?.kind).toBe("local");
+    expect(body.agent?.tools?.[0]?.name).toBe("echo");
+  });
+
+  it("serializes local tools for saved-agent eval runs", async () => {
+    const tool = defineLocalTool({
+      name: "echo",
+      parameters: z.object({ msg: z.string() }),
+      execute: async ({ msg }) => msg,
+    });
+    await client.createEvalRun({
+      datasetId: "ds_demo",
+      agentId: "agent_1",
+      tools: [tool],
+    });
+    const body = mock.lastEvalCreateBody as { tools?: Array<{ kind?: string; name?: string }> };
+    expect(body.tools?.[0]?.kind).toBe("local");
+    expect(body.tools?.[0]?.name).toBe("echo");
+  });
+
+  it("runEval dispatches local_tool_call events via agentRunId", async () => {
+    const tool = defineLocalTool({
+      name: "echo",
+      parameters: z.object({ msg: z.string() }),
+      execute: async ({ msg }) => msg,
+    });
+    const agentRunId = `run_eval_${Date.now()}`;
+    mock.seedRun(agentRunId, {
+      events: [
+        {
+          type: "local_tool_call",
+          toolUseId: "tu_eval",
+          name: "echo",
+          args: { msg: "hi" },
+          awaitToolResult: true,
+        },
+        { type: "result", subtype: "success", text: "ok" },
+      ],
+    });
+    mock.evalStreamEvents = [
+      {
+        type: "local_tool_call",
+        agentRunId,
+        toolUseId: "tu_eval",
+        name: "echo",
+        args: { msg: "hi" },
+      },
+      { type: "run_completed" },
+    ];
+    const detail = await client.runEval(
+      { datasetId: "ds_demo", agentId: "agent_1", tools: [tool] },
+      { pollIntervalMs: 10 },
+    );
+    expect(detail.status).toBe("succeeded");
+    expect(mock.lastToolResult?.runId).toBe(agentRunId);
+    expect(mock.lastToolResult?.payload).toMatchObject({
+      toolUseId: "tu_eval",
+      result: "hi",
+    });
+    mock.evalStreamEvents = null;
   });
 
   it("validates createEvalRun request shape", async () => {
