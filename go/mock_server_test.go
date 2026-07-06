@@ -31,6 +31,14 @@ type mockServer struct {
 	// 401; subsequent requests fall through to normal handling. Used
 	// to exercise the SDK's "refresh + retry once on 401" flow.
 	failAuthCount       int
+	// failToolResultCount, when > 0, makes the next N tool-result POSTs
+	// return 503; subsequent calls succeed. Used to exercise the SDK's
+	// tool-result retry path.
+	failToolResultCount int
+	// toolResultFixedStatus, when non-zero, makes every tool-result POST
+	// return that HTTP status.
+	toolResultFixedStatus int
+	toolResultPostCount int
 	lastAuthHeader      string
 	authHeaderHistory   []string
 	lastToolResultBody  []byte
@@ -238,6 +246,19 @@ func (m *mockServer) handleAgentRuns(w http.ResponseWriter, r *http.Request, res
 	case len(rest) == 2 && rest[1] == "tool-results" && r.Method == http.MethodPost:
 		raw, _ := io.ReadAll(r.Body)
 		m.mu.Lock()
+		m.toolResultPostCount++
+		if m.toolResultFixedStatus != 0 {
+			status := m.toolResultFixedStatus
+			m.mu.Unlock()
+			m.writeJSON(w, status, map[string]string{"error": "fixed_failure"})
+			return
+		}
+		if m.failToolResultCount > 0 {
+			m.failToolResultCount--
+			m.mu.Unlock()
+			m.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "temporary_unavailable"})
+			return
+		}
 		m.lastToolResultBody = raw
 		m.mu.Unlock()
 		var body struct {

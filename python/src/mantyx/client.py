@@ -1247,12 +1247,20 @@ class MantyxClient:
             body["error"] = error
         if files:
             body["files"] = files
-        try:
-            self._request("POST", f"/agent-runs/{_quote(run_id)}/tool-results", body)
-        except MantyxError:
-            # The server will time-out the tool-use and surface the right
-            # terminal event on the SSE stream; logging is enough here.
-            pass
+        path = f"/agent-runs/{_quote(run_id)}/tool-results"
+        for attempt in range(_TOOL_RESULT_POST_MAX_ATTEMPTS):
+            try:
+                self._request("POST", path, body)
+                return
+            except MantyxError as exc:
+                if (
+                    attempt == _TOOL_RESULT_POST_MAX_ATTEMPTS - 1
+                    or not _is_tool_result_post_retryable(exc)
+                ):
+                    # The server will time-out the tool-use and surface the right
+                    # terminal event on the SSE stream.
+                    return
+                time.sleep(_tool_result_post_backoff_s(attempt))
 
     # --------------------------------------------------------------- HTTP
 
@@ -1609,6 +1617,24 @@ def _parse_required_scopes(
         if m:
             return tuple(s for s in m.group(1).split() if s)
     return ()
+
+
+_TOOL_RESULT_POST_MAX_ATTEMPTS = 6
+
+
+def _tool_result_post_backoff_s(attempt: int) -> float:
+    return min(0.5 * (2**attempt), 8.0)
+
+
+def _is_tool_result_post_retryable(exc: MantyxError) -> bool:
+    if isinstance(exc, MantyxNetworkError):
+        return True
+    status = exc.status
+    if status == 429:
+        return True
+    if status is not None and status >= 500:
+        return True
+    return False
 
 
 def _quote(s: str) -> str:

@@ -68,6 +68,11 @@ class MockServer:
         # as a string; longer lists serialise as a JSON array — matches
         # the server contract).
         self.fail_scope: list[str] | None = None
+        # When > 0, the next N tool-result POSTs return 503; subsequent
+        # calls succeed. Drives the SDK's tool-result retry path.
+        self.fail_tool_result_count = 0
+        self.tool_result_fixed_status: int | None = None
+        self.tool_result_post_count = 0
         self.last_auth_header: str | None = None
         self.auth_header_history: list[str] = []
         # ── OAuth authorization server simulation ───────────────────────
@@ -385,6 +390,15 @@ class MockServer:
         if len(rest) == 2 and rest[1] == "tool-results" and method == "POST":
             body = json.loads(request.content or b"{}")
             with self.lock:
+                self.tool_result_post_count += 1
+                if self.tool_result_fixed_status is not None:
+                    return httpx.Response(
+                        self.tool_result_fixed_status,
+                        json={"error": "fixed_failure"},
+                    )
+                if self.fail_tool_result_count > 0:
+                    self.fail_tool_result_count -= 1
+                    return httpx.Response(503, json={"error": "temporary_unavailable"})
                 self.last_tool_result_body = body
                 state = self.runs.get(rest[0])
                 if state is not None:

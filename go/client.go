@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1529,6 +1530,34 @@ func (c *Client) dispatchLocalTool(ctx context.Context, runID string, ev RunEven
 	}
 }
 
+const toolResultPostMaxAttempts = 6
+
+// toolResultPostSleep is the backoff wait between tool-result POST retries.
+// Tests may replace it to avoid real delays.
+var toolResultPostSleep = time.Sleep
+
+func toolResultPostBackoff(attempt int) time.Duration {
+	d := 500 * time.Millisecond * time.Duration(1<<attempt)
+	if d > 8*time.Second {
+		return 8 * time.Second
+	}
+	return d
+}
+
+func isToolResultPostRetryable(err error) bool {
+	var netErr *NetworkError
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var mxErr *Error
+	if errors.As(err, &mxErr) {
+		if mxErr.HTTPStatus == 429 || mxErr.HTTPStatus >= 500 {
+			return true
+		}
+	}
+	return false
+}
+
 // PostToolResult sends the SDK's response for a `local_tool_call` event back to
 // the server. Either `result` (success) or `errMsg` (failure) should be set.
 func (c *Client) PostToolResult(ctx context.Context, runID, toolUseID, result, errMsg string) error {
@@ -1559,7 +1588,20 @@ func (c *Client) postToolResult(ctx context.Context, runID, toolUseID, result, e
 		}
 	}
 	path := fmt.Sprintf("/agent-runs/%s/tool-results", pathEscape(runID))
-	return c.do(ctx, "POST", path, body, nil)
+	for attempt := 0; attempt < toolResultPostMaxAttempts; attempt++ {
+		err := c.do(ctx, "POST", path, body, nil)
+		if err == nil {
+			return nil
+		}
+		if attempt == toolResultPostMaxAttempts-1 || !isToolResultPostRetryable(err) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		toolResultPostSleep(toolResultPostBackoff(attempt))
+	}
+	return nil
 }
 
 // CancelRun aborts a run server-side. The run row's status moves to

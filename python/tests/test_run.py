@@ -114,6 +114,25 @@ def test_run_agent_local_tool_returns_files(
     ]
 
 
+def test_post_tool_result_retries_transient_failures(
+    mantyx_client: MantyxClient, mock_server: MockServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("mantyx.client.time.sleep", lambda _s: None)
+    mock_server.fail_tool_result_count = 2
+    mantyx_client._post_tool_result("run_retry", "tu_retry", result="ok")
+    assert mock_server.tool_result_post_count == 3
+    assert mock_server.last_tool_result_body == {"toolUseId": "tu_retry", "result": "ok"}
+
+
+def test_post_tool_result_does_not_retry_run_terminal(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.tool_result_fixed_status = 409
+    mantyx_client._post_tool_result("run_terminal", "tu_terminal", result="late")
+    assert mock_server.tool_result_post_count == 1
+    assert mock_server.last_tool_result_body is None
+
+
 def test_run_agent_error_terminates(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
     mock_server.script_for_next_run = RunScript(
         events=[

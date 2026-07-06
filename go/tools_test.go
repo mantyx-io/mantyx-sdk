@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // errorsAs is a tiny shim around errors.As so we don't have to rename the
@@ -1713,5 +1715,48 @@ func TestDispatch_MissingHandlerSurfacesError(t *testing.T) {
 	}
 	if !strings.Contains(string(server.lastToolResultBody), "No local A2A handler") {
 		t.Fatalf("expected helpful error in tool result: %s", server.lastToolResultBody)
+	}
+}
+
+func TestPostToolResult_RetriesTransientFailures(t *testing.T) {
+	prevSleep := toolResultPostSleep
+	toolResultPostSleep = func(time.Duration) {}
+	t.Cleanup(func() { toolResultPostSleep = prevSleep })
+
+	server := newMockServer()
+	defer server.close()
+	server.failToolResultCount = 2
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	if err := client.PostToolResult(context.Background(), "run_retry", "tu_retry", "ok", ""); err != nil {
+		t.Fatalf("PostToolResult: %v", err)
+	}
+	if server.toolResultPostCount != 3 {
+		t.Fatalf("toolResultPostCount = %d, want 3", server.toolResultPostCount)
+	}
+	var posted struct {
+		ToolUseID string `json:"toolUseId"`
+		Result    string `json:"result"`
+	}
+	if err := json.Unmarshal(server.lastToolResultBody, &posted); err != nil {
+		t.Fatalf("parse tool-result body: %v", err)
+	}
+	if posted.ToolUseID != "tu_retry" || posted.Result != "ok" {
+		t.Fatalf("unexpected tool result: %#v", posted)
+	}
+}
+
+func TestPostToolResult_DoesNotRetryRunTerminal(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.toolResultFixedStatus = http.StatusConflict
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	if err := client.PostToolResult(context.Background(), "run_terminal", "tu_terminal", "late", ""); err == nil {
+		t.Fatal("expected PostToolResult to fail on 409")
+	}
+	if server.toolResultPostCount != 1 {
+		t.Fatalf("toolResultPostCount = %d, want 1", server.toolResultPostCount)
+	}
+	if len(server.lastToolResultBody) != 0 {
+		t.Fatalf("expected no accepted tool result, got %s", server.lastToolResultBody)
 	}
 }

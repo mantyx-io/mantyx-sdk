@@ -26,6 +26,7 @@ from ._schema import parse_args_with_pydantic
 from ._version import SDK_VERSION
 from .client import (
     _EVAL_TERMINAL_STATUSES,
+    _TOOL_RESULT_POST_MAX_ATTEMPTS,
     _UNSET,
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_S,
@@ -49,6 +50,7 @@ from .client import (
     _coerce_eval_tools,
     _describe_handler,
     _eval_event_to_run_event,
+    _is_tool_result_post_retryable,
     _parse_eval_dataset_detail,
     _parse_eval_dataset_list,
     _parse_eval_run_accepted,
@@ -71,6 +73,7 @@ from .client import (
     _serialize_create_eval_run,
     _serialize_turn_input,
     _to_run_event,
+    _tool_result_post_backoff_s,
 )
 from .errors import (
     MantyxAuthError,
@@ -901,10 +904,18 @@ class AsyncMantyxClient:
             body["error"] = error
         if files:
             body["files"] = files
-        try:
-            await self._request("POST", f"/agent-runs/{_quote(run_id)}/tool-results", body)
-        except MantyxError:
-            pass
+        path = f"/agent-runs/{_quote(run_id)}/tool-results"
+        for attempt in range(_TOOL_RESULT_POST_MAX_ATTEMPTS):
+            try:
+                await self._request("POST", path, body)
+                return
+            except MantyxError as exc:
+                if (
+                    attempt == _TOOL_RESULT_POST_MAX_ATTEMPTS - 1
+                    or not _is_tool_result_post_retryable(exc)
+                ):
+                    return
+                await asyncio.sleep(_tool_result_post_backoff_s(attempt))
 
     # ---------------------------------------------------------------- HTTP
 

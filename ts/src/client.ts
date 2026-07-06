@@ -1587,11 +1587,25 @@ export class MantyxClient {
     toolUseId: string,
     payload: { result?: string; error?: string; files?: ToolResultFile[] },
   ): Promise<void> {
-    await this.request<{ ok: boolean }>({
-      method: "POST",
-      path: `/agent-runs/${encodeURIComponent(runId)}/tool-results`,
-      body: { toolUseId, ...payload },
-    });
+    const path = `/agent-runs/${encodeURIComponent(runId)}/tool-results`;
+    const body = { toolUseId, ...payload };
+    for (let attempt = 0; attempt < TOOL_RESULT_POST_MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.request<{ ok: boolean }>({
+          method: "POST",
+          path,
+          body,
+        });
+        return;
+      } catch (err) {
+        if (attempt === TOOL_RESULT_POST_MAX_ATTEMPTS - 1 || !isToolResultPostRetryable(err)) {
+          // The server will time-out the tool-use and surface the right
+          // terminal event on the SSE stream.
+          return;
+        }
+        await sleep(toolResultPostBackoffMs(attempt));
+      }
+    }
   }
 
   async cancelRun(runId: string): Promise<void> {
@@ -2764,6 +2778,22 @@ export function parseRunOutput<T = unknown>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Transient tool-result POST failures are retried with exponential backoff. */
+const TOOL_RESULT_POST_MAX_ATTEMPTS = 6;
+
+function toolResultPostBackoffMs(attempt: number): number {
+  return Math.min(500 * 2 ** attempt, 8_000);
+}
+
+function isToolResultPostRetryable(err: unknown): boolean {
+  if (err instanceof MantyxNetworkError) return true;
+  if (err instanceof MantyxError && typeof err.status === "number") {
+    if (err.status === 429) return true;
+    if (err.status >= 500) return true;
+  }
+  return false;
 }
 
 /**

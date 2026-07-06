@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
   defineLocalA2A,
@@ -656,5 +656,27 @@ describe("local_tool_call dispatch", () => {
       toolUseId: "tu_legacy",
       result: "result:hi",
     });
+  });
+
+  it("retries transient tool-result POST failures", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      server.failToolResultCount = 2;
+      await client.postToolResult("run_retry", "tu_retry", { result: "ok" });
+      expect(server.toolResultPostCount).toBe(3);
+      expect(server.lastToolResult?.payload).toEqual({
+        toolUseId: "tu_retry",
+        result: "ok",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry non-retryable tool-result POST failures", async () => {
+    server.toolResultFixedStatus = 409;
+    await client.postToolResult("run_terminal", "tu_terminal", { result: "late" });
+    expect(server.toolResultPostCount).toBe(1);
+    expect(server.lastToolResult).toBeNull();
   });
 });

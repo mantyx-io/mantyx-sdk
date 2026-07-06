@@ -127,6 +127,15 @@ export class MockServer {
    * array. Tests use this to drive `MantyxScopeError` paths end-to-end.
    */
   failScope: { required: string[] } | null = null;
+  /**
+   * When > 0, the next N tool-result POSTs return 503; subsequent calls
+   * succeed. Used to exercise the SDK's tool-result retry path.
+   */
+  failToolResultCount = 0;
+  /** When set, every tool-result POST returns this status (no retries in SDK). */
+  toolResultFixedStatus: number | null = null;
+  /** Number of tool-result POSTs received. */
+  toolResultPostCount = 0;
   /** Auth header captured on the most recent request. */
   lastAuthHeader: string | null = null;
   /** Auth headers across all requests, in arrival order. */
@@ -472,6 +481,20 @@ export class MockServer {
     if (rest.length === 2 && rest[1] === "tool-results" && req.method === "POST") {
       const runId = rest[0]!;
       const body = (await readJson(req)) as { toolUseId: string; result?: string; error?: string };
+      this.toolResultPostCount++;
+      if (this.toolResultFixedStatus !== null) {
+        res.statusCode = this.toolResultFixedStatus;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "fixed_failure" }));
+        return;
+      }
+      if (this.failToolResultCount > 0) {
+        this.failToolResultCount--;
+        res.statusCode = 503;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: "temporary_unavailable" }));
+        return;
+      }
       this.lastToolResult = { runId, payload: body };
       const run = this.runs.get(runId);
       if (run) {
