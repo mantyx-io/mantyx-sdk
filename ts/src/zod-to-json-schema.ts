@@ -41,12 +41,38 @@ function isZodSchema(value: unknown): value is z.ZodType<unknown> {
   return typeof o._def !== "undefined" || typeof o._zod !== "undefined";
 }
 
+function normalizeWireJsonSchema(out: JsonSchema, schema: z.ZodType<unknown>): JsonSchema {
+  const normalized = { ...out };
+  delete normalized.$schema;
+  delete normalized.additionalProperties;
+
+  const def = (schema as ZodSchemaInstance)._def;
+  const kind = schemaKind(def);
+  if (kind === "ZodObject" || kind === "object") {
+    const shape = def?.shape;
+    const fields =
+      typeof shape === "function" ? shape() : (shape as Record<string, z.ZodType<unknown>> | undefined);
+    if (fields) {
+      const required: string[] = [];
+      for (const [key, value] of Object.entries(fields)) {
+        if (!isOptionalField(value)) {
+          required.push(key);
+        }
+      }
+      if (required.length > 0) normalized.required = required;
+      else delete normalized.required;
+    }
+  }
+
+  return normalized;
+}
+
 export function zodToJsonSchema(schema: z.ZodType<unknown>): JsonSchema {
   const instance = schema as unknown as ZodSchemaInstance;
   if (typeof instance.toJSONSchema === "function") {
     try {
       const out = instance.toJSONSchema();
-      if (out && typeof out === "object") return out;
+      if (out && typeof out === "object") return normalizeWireJsonSchema(out, schema);
     } catch {
       // fall through
     }
@@ -56,7 +82,7 @@ export function zodToJsonSchema(schema: z.ZodType<unknown>): JsonSchema {
   if (typeof builtIn === "function") {
     try {
       const out = builtIn.call(z, schema) as JsonSchema;
-      if (out && typeof out === "object") return out;
+      if (out && typeof out === "object") return normalizeWireJsonSchema(out, schema);
     } catch {
       // fall through to manual converter
     }
