@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "sync-version": "node ../scripts/sync-version.mjs",
-    "build": "tsup --config tsup.config.ts",
+    "build": "tsup --config tsup.config.ts && tsc -p tsconfig.build.json",
     "dev": "tsup --config tsup.config.ts --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -45,7 +45,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^3.23.8"
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@a2a-js/sdk": "^0.3.0",
@@ -64,14 +64,14 @@
     }
   },
   "devDependencies": {
-    "@a2a-js/sdk": "^0.3.0",
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.0.0",
-    "express": "^5.0.0",
-    "playwright": "^1.48.0",
-    "tsup": "^8.3.0",
-    "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "@a2a-js/sdk": "^0.3.14",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.1",
+    "express": "^5.2.1",
+    "playwright": "^1.61.1",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   },
   "keywords": [
     "mantyx",

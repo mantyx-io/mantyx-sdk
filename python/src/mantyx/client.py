@@ -1623,7 +1623,7 @@ _TOOL_RESULT_POST_MAX_ATTEMPTS = 6
 
 
 def _tool_result_post_backoff_s(attempt: int) -> float:
-    return min(0.5 * (2**attempt), 8.0)
+    return float(min(0.5 * (2**attempt), 8.0))
 
 
 def _is_tool_result_post_retryable(exc: MantyxError) -> bool:

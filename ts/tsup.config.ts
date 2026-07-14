@@ -3,7 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: ["src/index.ts", "src/a2a-server.ts", "src/playwright.ts"],
   format: ["esm", "cjs"],
-  dts: true,
+  dts: false,
   clean: true,
   sourcemap: true,
   target: "node18",

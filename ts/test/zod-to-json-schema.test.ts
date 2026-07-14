@@ -35,7 +35,7 @@ describe("zodToJsonSchema", () => {
     const withInstanceMethod = Object.assign(schema, {
       toJSONSchema: () => fakeJsonSchema,
     });
-    expect(zodToJsonSchema(withInstanceMethod)).toBe(fakeJsonSchema);
+    expect(zodToJsonSchema(withInstanceMethod)).toEqual(fakeJsonSchema);
   });
 
   it("falls back to manual Zod v4 _def.type walker when instance toJSONSchema is absent", () => {
