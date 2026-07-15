@@ -95,6 +95,7 @@ from .tools import (
     MantyxPluginToolRef,
     MantyxToolRef,
     OutputSchema,
+    PlanMode,
     PlanOptions,
     PlanSpec,
     ReasoningLevel,
@@ -102,6 +103,7 @@ from .tools import (
     Supervisor,
     TaskPlan,
     TaskPlanStep,
+    TaskPlanTransition,
     ToolBudget,
     ToolBudgets,
     ToolRef,
@@ -118,6 +120,7 @@ from .tools import (
     mantyx_plugin_tool,
     mantyx_tool,
     plan_only,
+    task_plan_from_event_data,
 )
 from .types import (
     AgentSpec,
@@ -206,6 +209,7 @@ __all__ = [
     "ModelInfo",
     "OAuthToken",
     "OutputSchema",
+    "PlanMode",
     "PlanOptions",
     "PlanSpec",
     "PricingInfo",
@@ -228,6 +232,7 @@ __all__ = [
     "Supervisor",
     "TaskPlan",
     "TaskPlanStep",
+    "TaskPlanTransition",
     "TokenRequestReason",
     "TokenSource",
     "ToolBudget",
@@ -251,4 +256,5 @@ __all__ = [
     "mantyx_tool",
     "parse_run_output",
     "plan_only",
+    "task_plan_from_event_data",
 ]

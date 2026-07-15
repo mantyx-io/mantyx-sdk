@@ -1,4 +1,4 @@
-import { MantyxClient } from "@mantyx/sdk";
+import { MantyxClient, taskPlanFromEventData } from "@mantyx/sdk";
 
 const apiKey = required("MANTYX_API_KEY");
 const workspaceSlug = required("MANTYX_WORKSPACE_SLUG");
@@ -17,13 +17,15 @@ async function main(): Promise<void> {
   const result = await client.runPlan({
     systemPrompt: "You break complex engineering work into ordered, actionable steps.",
     prompt,
-    // Uncomment to skip the classifier and supply your own checklist:
+    // Uncomment to supply your own checklist:
     // brief: "Postgres billing migration",
     // steps: ["Snapshot schema", "Apply DDL", "Backfill rows", "Verify counts"],
     onEvent: (ev) => {
       if (ev.type === "task_plan") {
-        console.log("\n[task_plan]", ev.brief ?? "(classifying…)");
-        for (const step of ev.steps) {
+        const plan = taskPlanFromEventData(ev as Record<string, unknown>);
+        if (!plan) return;
+        console.log("\n[task_plan]", plan.brief ?? "(planning…)");
+        for (const step of plan.steps) {
           console.log(`  [${step.status}] ${step.title}`);
         }
       }
@@ -38,7 +40,7 @@ async function main(): Promise<void> {
       console.log(`  [${step.status}] ${step.title}`);
     }
   } else {
-    console.log("\n(No multi-step plan — classifier declined.)");
+    console.log("\n(No structured plan returned.)");
   }
 }
 

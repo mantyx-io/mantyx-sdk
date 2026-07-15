@@ -504,14 +504,17 @@ export interface AgentSpecBase {
   /**
    * In-product **task plan** — live checklist emitted as `task_plan` SSE
    * events and (for `planOnly` runs) returned on the terminal `result`.
-   * Opt-in: every planned run pays for at least one classifier LLM call.
+   * Opt-in: exposes the host `update_task_plan` tool so the executing agent
+   * owns the checklist (no separate classifier/tracker LLM on executed runs).
    *
-   * - `true` — auto-classify; track step statuses during the run when warranted.
-   * - `{ steps?, brief? }` — caller-provided checklist (skips the classifier).
+   * - `"auto"` / `true` — agent decides during its first turn whether to plan.
+   * - `"required"` — agent must initialize a plan before substantive tools.
+   * - `{ mode?, steps?, brief? }` — caller-seeded checklist (`mode` defaults
+   *   to `"auto"`; use `"required"` to enforce).
    * - `{ planOnly: true, steps?, brief? }` — produce the plan and **stop**
    *   without executing the agent loop; read the final checklist from
    *   {@link RunResult.plan}.
-   * - `false` — no planning (default when omitted).
+   * - `"off"` / `false` — no planning (default when omitted).
    *
    * See `docs/agent-runs-protocol.md` §4.9. Prefer {@link MantyxClient.runPlan}
    * for plan-only runs.
@@ -651,11 +654,21 @@ export type SupervisorAction = "on_track" | "redirect" | "finalize";
 /** When a supervisor review fired relative to the model turn. */
 export type SupervisorPhase = "turn_boundary" | "reasoning";
 
+/** Planning mode for a run. See `docs/agent-runs-protocol.md` §4.9. */
+export type PlanMode = "off" | "auto" | "required";
+
 /** Status of one step in an in-product task plan. */
-export type TaskPlanStepStatus = "pending" | "in_progress" | "done";
+export type TaskPlanStepStatus =
+  | "pending"
+  | "in_progress"
+  | "done"
+  | "blocked"
+  | "skipped";
 
 /** One checklist row in a {@link TaskPlan}. */
 export interface TaskPlanStep {
+  /** Stable step id (v2 task plans). */
+  id?: string;
   title: string;
   status: TaskPlanStepStatus;
 }
@@ -665,26 +678,44 @@ export interface TaskPlanStep {
  * on {@link RunResult.plan}. See `docs/agent-runs-protocol.md` §4.9.
  */
 export interface TaskPlan {
+  /** Wire format version (`2` on agent-owned plans). */
+  v?: number;
+  /** Stable id for idempotent snapshot application. */
+  planId?: string;
+  /** Monotonic revision per {@link planId}. */
+  revision?: number;
+  /** Active planning mode (`auto` | `required`). */
+  mode?: PlanMode;
+  /** Who produced the plan (`agent` | `caller`). */
+  source?: string;
   /** Optional one-line objective summary. */
   brief?: string;
   steps: TaskPlanStep[];
 }
 
+/** One transition in a v2 `task_plan` event. */
+export interface TaskPlanTransition {
+  kind: string;
+  stepId?: string;
+}
+
 /**
- * Caller-supplied plan options. Pass `true` / `false` at the top level via
- * {@link PlanSpec} for auto-classify / disable.
+ * Caller-supplied plan options. Pass `"auto"` / `"required"` / `true` / `false`
+ * at the top level via {@link PlanSpec}, or set {@link mode} on the object.
  */
 export interface PlanOptions {
+  /** `off` | `auto` | `required`. Defaults to `auto`. */
+  mode?: PlanMode;
   /** When `true`, produce the plan and terminate without executing the agent loop. */
   planOnly?: boolean;
   /** One-line objective for a caller-provided plan. Clamped server-side. */
   brief?: string;
-  /** Caller-provided checklist titles. Omit to let the classifier decide. */
+  /** Caller-provided checklist titles. */
   steps?: string[];
 }
 
-/** `true` (auto-classify) | options object | `false` (disable). */
-export type PlanSpec = boolean | PlanOptions;
+/** `"off"` | `"auto"` | `"required"` | `true`/`false` aliases | options object. */
+export type PlanSpec = boolean | PlanMode | PlanOptions;
 
 /**
  * Build a {@link PlanSpec} for plan-only runs. Equivalent to
@@ -981,11 +1012,24 @@ export interface SupervisorEvent extends RunEventBase {
 /**
  * Live checklist update for an in-product task plan. Non-terminal — the run
  * continues until `result` / `error` / `cancelled`. See §4.9.
+ *
+ * Prefer {@link plan} (canonical v2 snapshot). {@link brief} and {@link steps}
+ * are mirrored at the top level for pre-v2 clients.
  */
 export interface TaskPlanEvent extends RunEventBase {
   type: "task_plan";
+  /** Canonical post-transition snapshot (v2). */
+  plan?: TaskPlan;
+  v?: number;
+  planId?: string;
+  revision?: number;
+  mode?: PlanMode;
+  source?: string;
+  transition?: TaskPlanTransition;
+  transitionIndex?: number;
+  transitionCount?: number;
   brief?: string;
-  steps: TaskPlanStep[];
+  steps?: TaskPlanStep[];
 }
 
 export interface ResultEvent extends RunEventBase {
@@ -1493,7 +1537,8 @@ export class MantyxClient {
           const evType = sseEvent.event ?? (data.type as string | undefined) ?? "message";
           const seq = typeof data.seq === "number" ? data.seq : lastSeq;
           if (typeof seq === "number" && seq > lastSeq) lastSeq = seq;
-          const ev = { seq, type: evType, ...data } as RunEvent;
+          const payload = runEventPayload(data);
+          const ev = { seq, type: evType, ...payload } as RunEvent;
           yield ev;
           if (evType === "local_tool_call") {
             const localEv = ev as LocalToolCallEvent;
@@ -2603,19 +2648,50 @@ function normalizeSupervisor(value: Supervisor | false): false | Record<string, 
   return out;
 }
 
+const PLAN_MODES = new Set<PlanMode>(["off", "auto", "required"]);
+const TASK_PLAN_STEP_STATUSES = new Set<TaskPlanStepStatus>([
+  "pending",
+  "in_progress",
+  "done",
+  "blocked",
+  "skipped",
+]);
+
+function assertPlanMode(field: string, value: unknown): PlanMode {
+  if (typeof value !== "string" || !PLAN_MODES.has(value as PlanMode)) {
+    throw new MantyxError(
+      `${field} must be "off", "auto", or "required", got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as PlanMode;
+}
+
+/** Unwrap nested SSE `data` when present; otherwise return the frame as-is. */
+function runEventPayload(data: Record<string, unknown>): Record<string, unknown> {
+  const nested = data.data;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    return nested as Record<string, unknown>;
+  }
+  return data;
+}
+
 /**
  * Validate a {@link PlanSpec} value and return the wire shape unchanged
- * (`true` | `false` | `{ planOnly?, brief?, steps? }`). Mirrors the
- * server-side checks so callers see an early local error.
+ * (`off` | `auto` | `required` | boolean aliases | `{ mode?, planOnly?, brief?, steps? }`).
+ * Mirrors the server-side checks so callers see an early local error.
  */
-function normalizePlan(value: PlanSpec): boolean | Record<string, unknown> {
+function normalizePlan(value: PlanSpec): boolean | string | Record<string, unknown> {
   if (value === true || value === false) return value;
+  if (typeof value === "string") return assertPlanMode("plan", value);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new MantyxError(
-      `plan must be \`true\`, \`false\`, or an object { planOnly?, brief?, steps? }, got ${JSON.stringify(value)}`,
+      `plan must be "off", "auto", "required", \`true\`, \`false\`, or an object { mode?, planOnly?, brief?, steps? }, got ${JSON.stringify(value)}`,
     );
   }
   const out: Record<string, unknown> = {};
+  if (value.mode !== undefined) {
+    out.mode = assertPlanMode("plan.mode", value.mode);
+  }
   if (value.planOnly !== undefined) {
     if (typeof value.planOnly !== "boolean") {
       throw new MantyxError(`plan.planOnly must be a boolean, got ${JSON.stringify(value.planOnly)}`);
@@ -2645,6 +2721,18 @@ function normalizePlan(value: PlanSpec): boolean | Record<string, unknown> {
   return out;
 }
 
+function parseTaskPlanStep(entry: unknown): TaskPlanStep | undefined {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+  const row = entry as Record<string, unknown>;
+  const title = row.title;
+  const status = row.status;
+  if (typeof title !== "string" || typeof status !== "string") return undefined;
+  if (!TASK_PLAN_STEP_STATUSES.has(status as TaskPlanStepStatus)) return undefined;
+  const step: TaskPlanStep = { title, status: status as TaskPlanStepStatus };
+  if (typeof row.id === "string" && row.id) step.id = row.id;
+  return step;
+}
+
 function parseTaskPlan(raw: unknown): TaskPlan | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const obj = raw as Record<string, unknown>;
@@ -2652,17 +2740,30 @@ function parseTaskPlan(raw: unknown): TaskPlan | undefined {
   if (!Array.isArray(stepsRaw)) return undefined;
   const steps: TaskPlanStep[] = [];
   for (const entry of stepsRaw) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const row = entry as Record<string, unknown>;
-    const title = row.title;
-    const status = row.status;
-    if (typeof title !== "string" || typeof status !== "string") continue;
-    if (status !== "pending" && status !== "in_progress" && status !== "done") continue;
-    steps.push({ title, status });
+    const step = parseTaskPlanStep(entry);
+    if (step !== undefined) steps.push(step);
   }
+  const out: TaskPlan = { steps };
+  if (typeof obj.v === "number") out.v = obj.v;
+  if (typeof obj.planId === "string" && obj.planId) out.planId = obj.planId;
+  if (typeof obj.revision === "number") out.revision = obj.revision;
+  if (typeof obj.mode === "string" && PLAN_MODES.has(obj.mode as PlanMode)) {
+    out.mode = obj.mode as PlanMode;
+  }
+  if (typeof obj.source === "string" && obj.source) out.source = obj.source;
   const briefRaw = obj.brief;
-  const brief = typeof briefRaw === "string" && briefRaw ? briefRaw : undefined;
-  return { steps, ...(brief !== undefined ? { brief } : {}) };
+  if (typeof briefRaw === "string" && briefRaw) out.brief = briefRaw;
+  return out;
+}
+
+/** Parse a `task_plan` event payload, preferring the canonical v2 `plan` field. */
+export function taskPlanFromEventData(data: Record<string, unknown>): TaskPlan | undefined {
+  const canonical = data.plan;
+  if (canonical !== undefined) {
+    const parsed = parseTaskPlan(canonical);
+    if (parsed !== undefined) return parsed;
+  }
+  return parseTaskPlan(data);
 }
 
 /**

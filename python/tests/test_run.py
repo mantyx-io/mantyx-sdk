@@ -557,10 +557,40 @@ def test_run_agent_plan_forwarded_and_run_plan(
     assert body is not None
     assert body["plan"] is True
 
+    mantyx_client.run_agent(system_prompt="x", prompt="y", plan="required")
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["plan"] == "required"
+
     mantyx_client.run_plan(system_prompt="x", prompt="y", steps=["A", "B"])
     body = mock_server.last_run_create_body
     assert body is not None
     assert body["plan"] == {"planOnly": True, "steps": ["A", "B"]}
+
+
+def test_task_plan_from_event_data_prefers_canonical_v2() -> None:
+    from mantyx import task_plan_from_event_data
+
+    plan = task_plan_from_event_data(
+        {
+            "v": 2,
+            "planId": "plan-1",
+            "revision": 2,
+            "brief": "Mirrored",
+            "steps": [{"title": "Stale", "status": "pending"}],
+            "plan": {
+                "v": 2,
+                "planId": "plan-1",
+                "revision": 2,
+                "brief": "Canonical",
+                "steps": [{"id": "s1", "title": "Pull data", "status": "in_progress"}],
+            },
+        }
+    )
+    assert plan is not None
+    assert plan.get("brief") == "Canonical"
+    assert plan.get("planId") == "plan-1"
+    assert plan["steps"][0]["id"] == "s1"
 
 
 def test_run_plan_surfaces_terminal_checklist(

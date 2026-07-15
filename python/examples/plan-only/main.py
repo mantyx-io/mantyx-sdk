@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import sys
 
-from mantyx import MantyxClient
+from mantyx import MantyxClient, task_plan_from_event_data
 
 
 def required_env(name: str) -> str:
@@ -26,9 +26,12 @@ def required_env(name: str) -> str:
 def on_event(ev) -> None:
     if ev.type != "task_plan":
         return
-    brief = ev.data.get("brief") or "(classifying…)"
+    plan = task_plan_from_event_data(ev.data)
+    if plan is None:
+        return
+    brief = plan.get("brief") or "(planning…)"
     print("\n[task_plan]", brief)
-    for step in ev.data.get("steps", []):
+    for step in plan.get("steps", []):
         print(f"  [{step['status']}] {step['title']}")
 
 
@@ -46,7 +49,7 @@ def main() -> None:
     result = client.run_plan(
         system_prompt="You break complex engineering work into ordered, actionable steps.",
         prompt=prompt,
-        # Uncomment to skip the classifier:
+        # Uncomment to supply your own checklist:
         # brief="Postgres billing migration",
         # steps=["Snapshot schema", "Apply DDL", "Backfill rows", "Verify counts"],
         on_event=on_event,
@@ -54,7 +57,7 @@ def main() -> None:
 
     print("\n---\nSummary:\n", result.text)
     if not result.plan or not result.plan.get("steps"):
-        print("\n(No multi-step plan — classifier declined.)")
+        print("\n(No structured plan returned.)")
         return
 
     print("\nStructured plan:")

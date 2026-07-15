@@ -248,9 +248,9 @@ type RunSpec struct {
 	// docs/agent-runs-protocol.md §4.8.
 	Supervisor *Supervisor
 	// Plan turns on the in-product task plan (live checklist + optional
-	// plan-only termination). Build with PlanAuto, PlanWithSteps,
-	// PlanOnly, or PlanDisabled. nil leaves the field unset. See
-	// `docs/agent-runs-protocol.md` §4.9. Prefer RunPlan for plan-only
+	// plan-only termination). Build with PlanAuto, PlanRequired,
+	// PlanWithSteps, PlanOnly, or PlanDisabled. nil leaves the field unset.
+	// See `docs/agent-runs-protocol.md` §4.9. Prefer RunPlan for plan-only
 	// runs.
 	Plan *Plan
 	// Metadata is a flat string→string KV carried alongside the run for
@@ -662,10 +662,13 @@ const (
 	TaskPlanPending    TaskPlanStepStatus = "pending"
 	TaskPlanInProgress TaskPlanStepStatus = "in_progress"
 	TaskPlanDone       TaskPlanStepStatus = "done"
+	TaskPlanBlocked    TaskPlanStepStatus = "blocked"
+	TaskPlanSkipped    TaskPlanStepStatus = "skipped"
 )
 
 // TaskPlanStep is one row in an in-product task plan.
 type TaskPlanStep struct {
+	ID     string             `json:"id,omitempty"`
 	Title  string             `json:"title"`
 	Status TaskPlanStepStatus `json:"status"`
 }
@@ -673,8 +676,19 @@ type TaskPlanStep struct {
 // TaskPlan is the structured checklist on `task_plan` events and
 // plan-only terminal results. See `docs/agent-runs-protocol.md` §4.9.
 type TaskPlan struct {
-	Brief string         `json:"brief,omitempty"`
-	Steps []TaskPlanStep `json:"steps"`
+	V        int                `json:"v,omitempty"`
+	PlanID   string             `json:"planId,omitempty"`
+	Revision int                `json:"revision,omitempty"`
+	Mode     string             `json:"mode,omitempty"`
+	Source   string             `json:"source,omitempty"`
+	Brief    string             `json:"brief,omitempty"`
+	Steps    []TaskPlanStep     `json:"steps"`
+}
+
+// TaskPlanTransition is one transition in a v2 `task_plan` event.
+type TaskPlanTransition struct {
+	Kind   string `json:"kind"`
+	StepID string `json:"stepId,omitempty"`
 }
 
 type planWireMode int
@@ -682,35 +696,40 @@ type planWireMode int
 const (
 	planWireUnset planWireMode = iota
 	planWireAuto
+	planWireRequired
 	planWireDisabled
 	planWireObject
 )
 
 // Plan configures the in-product task plan. Build with PlanAuto,
-// PlanWithSteps, PlanOnly, or PlanDisabled. nil leaves the field unset
-// (no planning). See `docs/agent-runs-protocol.md` §4.9.
+// PlanRequired, PlanWithSteps, PlanOnly, or PlanDisabled. nil leaves the
+// field unset (no planning). See `docs/agent-runs-protocol.md` §4.9.
 type Plan struct {
 	mode     planWireMode
 	PlanOnly bool
+	Mode     string
 	Brief    string
 	Steps    []string
 }
 
-// PlanAuto enables auto-classify planning with live step tracking during
-// the run when the classifier decides a multi-step plan is warranted.
+// PlanAuto exposes update_task_plan; the agent decides during its first
+// turn whether multi-step tracking is useful.
 func PlanAuto() *Plan { return &Plan{mode: planWireAuto} }
+
+// PlanRequired requires update_task_plan before substantive tools.
+func PlanRequired() *Plan { return &Plan{mode: planWireRequired} }
 
 // PlanDisabled explicitly disables planning for the run / session.
 func PlanDisabled() *Plan { return &Plan{mode: planWireDisabled} }
 
-// PlanWithSteps supplies a caller-provided checklist (skips the classifier)
-// and tracks step statuses during execution.
+// PlanWithSteps seeds a caller-provided checklist and tracks step statuses
+// during execution.
 func PlanWithSteps(steps ...string) *Plan {
 	return &Plan{mode: planWireObject, Steps: steps}
 }
 
 // PlanOnly produces the plan and terminates without executing the agent
-// loop. Omit steps to let the classifier decide; pass steps for a
+// loop. Omit steps to let the one-shot planner decide; pass steps for a
 // caller-provided checklist.
 func PlanOnly(steps ...string) *Plan {
 	return &Plan{mode: planWireObject, PlanOnly: true, Steps: steps}
@@ -726,9 +745,24 @@ func (p *Plan) WithBrief(brief string) *Plan {
 	return &cp
 }
 
+// WithMode returns a copy with an explicit planning mode (`off`, `auto`, or
+// `required`). Only applies to object-form plans.
+func (p *Plan) WithMode(mode string) *Plan {
+	if p == nil {
+		return &Plan{mode: planWireObject, Mode: mode}
+	}
+	cp := *p
+	cp.mode = planWireObject
+	cp.Mode = mode
+	return &cp
+}
+
 func (p *Plan) validate() error {
 	if p == nil || p.mode != planWireObject {
 		return nil
+	}
+	if p.Mode != "" && p.Mode != "off" && p.Mode != "auto" && p.Mode != "required" {
+		return &Error{Code: "invalid_request", Message: fmt.Sprintf(`Plan.Mode must be "off", "auto", or "required", got %q`, p.Mode)}
 	}
 	for i, step := range p.Steps {
 		if step == "" {
@@ -738,8 +772,8 @@ func (p *Plan) validate() error {
 	return nil
 }
 
-// MarshalJSON serialises Plan to its wire shape: `true`, `false`, or
-// `{ planOnly?, brief?, steps? }`.
+// MarshalJSON serialises Plan to its wire shape: `true`, `"auto"`,
+// `"required"`, `false`, or `{ mode?, planOnly?, brief?, steps? }`.
 func (p *Plan) MarshalJSON() ([]byte, error) {
 	if p == nil {
 		return []byte("null"), nil
@@ -747,12 +781,17 @@ func (p *Plan) MarshalJSON() ([]byte, error) {
 	switch p.mode {
 	case planWireAuto:
 		return []byte("true"), nil
+	case planWireRequired:
+		return []byte(`"required"`), nil
 	case planWireDisabled:
 		return []byte("false"), nil
 	default:
 		out := map[string]any{}
 		if p.PlanOnly {
 			out["planOnly"] = true
+		}
+		if p.Mode != "" {
+			out["mode"] = p.Mode
 		}
 		if p.Brief != "" {
 			out["brief"] = p.Brief
@@ -992,8 +1031,8 @@ func (c *Client) RunAgent(ctx context.Context, spec RunSpec) (RunResult, error) 
 // RunPlanSpec is sugar for a plan-only RunAgent call.
 type RunPlanSpec struct {
 	RunSpec
-	// Steps, when non-empty, supplies a caller-provided checklist (skips
-	// the classifier). Omit to let the classifier decide.
+	// Steps, when non-empty, supplies a caller-provided checklist. Omit to
+	// let the one-shot planner decide (plan-only compatibility path).
 	Steps []string
 	// Brief is an optional one-line objective for a caller-provided plan.
 	Brief string
@@ -1364,8 +1403,14 @@ func (c *Client) consumeStream(
 			if ev.Data != "" {
 				_ = json.Unmarshal([]byte(ev.Data), &data)
 			}
+			payload := runEventPayload(data)
 			seq := lastSeq
-			if v, ok := data["seq"].(float64); ok {
+			if v, ok := payload["seq"].(float64); ok {
+				seq = int(v)
+				if seq > lastSeq {
+					lastSeq = seq
+				}
+			} else if v, ok := data["seq"].(float64); ok {
 				seq = int(v)
 				if seq > lastSeq {
 					lastSeq = seq
@@ -1373,11 +1418,13 @@ func (c *Client) consumeStream(
 			}
 			evType := ev.Event
 			if evType == "" {
-				if t, ok := data["type"].(string); ok {
+				if t, ok := payload["type"].(string); ok {
+					evType = t
+				} else if t, ok := data["type"].(string); ok {
 					evType = t
 				}
 			}
-			runEv := RunEvent{Seq: seq, Type: evType, Data: data}
+			runEv := RunEvent{Seq: seq, Type: evType, Data: payload}
 			onEvent(runEv)
 
 			switch evType {
@@ -1385,8 +1432,8 @@ func (c *Client) consumeStream(
 				go c.dispatchLocalTool(ctx, runID, runEv, handlers)
 			case "result":
 				sawTerminal = true
-				if subtype, _ := data["subtype"].(string); subtype != "success" && subtype != "" {
-					msg, _ := data["error"].(string)
+				if subtype, _ := payload["subtype"].(string); subtype != "success" && subtype != "" {
+					msg, _ := payload["error"].(string)
 					if msg == "" {
 						msg = subtype
 					}
@@ -1395,16 +1442,16 @@ func (c *Client) consumeStream(
 				return false
 			case "error":
 				sawTerminal = true
-				msg, _ := data["error"].(string)
-				code, _ := data["code"].(string)
+				msg, _ := payload["error"].(string)
+				code, _ := payload["code"].(string)
 				// The wire reports both a coarse `code` (legacy alias)
 				// and a canonical `errorClass` triage category; prefer
 				// `errorClass` for the run-error Code when present so
 				// callers see a stable taxonomy. See
 				// `docs/agent-runs-protocol.md` §7.
-				errorClass, _ := data["errorClass"].(string)
-				finishReason, _ := data["finishReason"].(string)
-				partialText, _ := data["partialText"].(string)
+				errorClass, _ := payload["errorClass"].(string)
+				finishReason, _ := payload["finishReason"].(string)
+				partialText, _ := payload["partialText"].(string)
 				resolvedCode := errorClass
 				if resolvedCode == "" {
 					resolvedCode = code
@@ -1417,17 +1464,17 @@ func (c *Client) consumeStream(
 					FinishReason: finishReason,
 					PartialText:  partialText,
 				}
-				if retryable, ok := data["retryable"].(bool); ok {
+				if retryable, ok := payload["retryable"].(bool); ok {
 					rerr.Retryable = &retryable
 				}
 				// Cost-attribution triple (MANTYX ≥ 2026-09). Failed
 				// runs report the failing model call's usage too — see
 				// `docs/agent-runs-protocol.md` §7.1.
-				rerr.Tokens = parseRunTokens(data["tokens"])
-				if n, ok := parseRunTurns(data["turns"]); ok {
+				rerr.Tokens = parseRunTokens(payload["tokens"])
+				if n, ok := parseRunTurns(payload["turns"]); ok {
 					rerr.Turns = n
 				}
-				rerr.Model = parseRunModel(data["model"])
+				rerr.Model = parseRunModel(payload["model"])
 				terminalErr = rerr
 				return false
 			case "cancelled":
@@ -2555,13 +2602,22 @@ func parseRunModel(raw any) *RunModelInfo {
 	return out
 }
 
-// parseTaskPlan decodes a wire `plan` object from a terminal result.
+// parseTaskPlan decodes a wire `plan` object from a terminal result or v2
+// `task_plan` event. Prefers the canonical nested `plan` field when present.
 func parseTaskPlan(raw any) *TaskPlan {
-	m, ok := raw.(map[string]any)
-	if !ok {
-		return nil
+	if m, ok := raw.(map[string]any); ok {
+		if nested, ok := m["plan"].(map[string]any); ok {
+			if p := parseTaskPlanSnapshot(nested); p != nil {
+				return p
+			}
+		}
+		return parseTaskPlanSnapshot(m)
 	}
-	stepsRaw, ok := m["steps"].([]any)
+	return nil
+}
+
+func parseTaskPlanSnapshot(raw map[string]any) *TaskPlan {
+	stepsRaw, ok := raw["steps"].([]any)
 	if !ok {
 		return nil
 	}
@@ -2576,16 +2632,57 @@ func parseTaskPlan(raw any) *TaskPlan {
 		if title == "" || status == "" {
 			continue
 		}
-		if status != string(TaskPlanPending) && status != string(TaskPlanInProgress) && status != string(TaskPlanDone) {
+		if status != string(TaskPlanPending) &&
+			status != string(TaskPlanInProgress) &&
+			status != string(TaskPlanDone) &&
+			status != string(TaskPlanBlocked) &&
+			status != string(TaskPlanSkipped) {
 			continue
 		}
-		steps = append(steps, TaskPlanStep{Title: title, Status: TaskPlanStepStatus(status)})
+		step := TaskPlanStep{Title: title, Status: TaskPlanStepStatus(status)}
+		if id, ok := row["id"].(string); ok && id != "" {
+			step.ID = id
+		}
+		steps = append(steps, step)
 	}
 	out := &TaskPlan{Steps: steps}
-	if brief, ok := m["brief"].(string); ok && brief != "" {
+	if v, ok := raw["v"].(float64); ok {
+		out.V = int(v)
+	}
+	if planID, ok := raw["planId"].(string); ok && planID != "" {
+		out.PlanID = planID
+	}
+	if revision, ok := raw["revision"].(float64); ok {
+		out.Revision = int(revision)
+	}
+	if mode, ok := raw["mode"].(string); ok && mode != "" {
+		out.Mode = mode
+	}
+	if source, ok := raw["source"].(string); ok && source != "" {
+		out.Source = source
+	}
+	if brief, ok := raw["brief"].(string); ok && brief != "" {
 		out.Brief = brief
 	}
 	return out
+}
+
+// TaskPlanFromEventData parses a `task_plan` event payload, preferring the
+// canonical v2 `plan` snapshot.
+func TaskPlanFromEventData(data map[string]any) *TaskPlan {
+	if nested, ok := data["plan"].(map[string]any); ok {
+		if p := parseTaskPlanSnapshot(nested); p != nil {
+			return p
+		}
+	}
+	return parseTaskPlanSnapshot(data)
+}
+
+func runEventPayload(data map[string]any) map[string]any {
+	if nested, ok := data["data"].(map[string]any); ok {
+		return nested
+	}
+	return data
 }
 
 func toNonNegativeInt(raw any) int {
