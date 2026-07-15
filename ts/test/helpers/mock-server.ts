@@ -69,8 +69,26 @@ export type MockEvent =
     }
   | {
       type: "task_plan";
+      v?: number;
+      planId?: string;
+      revision?: number;
+      mode?: string;
+      source?: string;
+      transition?: { kind: string; stepId?: string };
+      transitionIndex?: number;
+      transitionCount?: number;
+      /** Canonical v2 snapshot. */
+      plan?: {
+        v?: number;
+        planId?: string;
+        revision?: number;
+        mode?: string;
+        source?: string;
+        brief?: string;
+        steps: Array<{ id?: string; title: string; status: string }>;
+      };
       brief?: string;
-      steps: Array<{ title: string; status: string }>;
+      steps?: Array<{ id?: string; title: string; status: string }>;
     }
   | {
       type: "error";
