@@ -33,19 +33,21 @@ func main() {
 				if ev.Type != "task_plan" {
 					return
 				}
-				brief, _ := ev.Data["brief"].(string)
+				plan := mantyx.TaskPlanFromEventData(ev.Data)
+				if plan == nil {
+					return
+				}
+				brief := plan.Brief
 				if brief == "" {
-					brief = "(classifying…)"
+					brief = "(planning…)"
 				}
 				fmt.Println("\n[task_plan]", brief)
-				steps, _ := ev.Data["steps"].([]any)
-				for _, raw := range steps {
-					row, _ := raw.(map[string]any)
-					fmt.Printf("  [%v] %v\n", row["status"], row["title"])
+				for _, step := range plan.Steps {
+					fmt.Printf("  [%s] %s\n", step.Status, step.Title)
 				}
 			},
 		},
-		// Uncomment to skip the classifier:
+		// Uncomment to supply your own checklist:
 		// Brief: "Postgres billing migration",
 		// Steps: []string{"Snapshot schema", "Apply DDL", "Backfill rows", "Verify counts"},
 	})
@@ -55,7 +57,7 @@ func main() {
 
 	fmt.Println("\n---\nSummary:\n", out.Text)
 	if out.Plan == nil || len(out.Plan.Steps) == 0 {
-		fmt.Println("\n(No multi-step plan — classifier declined.)")
+		fmt.Println("\n(No structured plan returned.)")
 		return
 	}
 	fmt.Println("\nStructured plan:")

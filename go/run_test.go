@@ -509,6 +509,48 @@ func TestRunAgent_PlanIsForwarded(t *testing.T) {
 	if got := body["plan"]; got != true {
 		t.Fatalf("plan: got %#v want true", got)
 	}
+
+	_, err = client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		Plan:         PlanRequired(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(server.lastRunCreateBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := body["plan"]; got != "required" {
+		t.Fatalf("plan required: got %#v want \"required\"", got)
+	}
+}
+
+func TestTaskPlanFromEventDataPrefersCanonicalV2(t *testing.T) {
+	plan := TaskPlanFromEventData(map[string]any{
+		"v":        2,
+		"planId":   "plan-1",
+		"revision": 2,
+		"brief":    "Mirrored",
+		"steps": []any{
+			map[string]any{"title": "Stale", "status": "pending"},
+		},
+		"plan": map[string]any{
+			"v":        2,
+			"planId":   "plan-1",
+			"revision": 2,
+			"brief":    "Canonical",
+			"steps": []any{
+				map[string]any{"id": "s1", "title": "Pull data", "status": "in_progress"},
+			},
+		},
+	})
+	if plan == nil || plan.Brief != "Canonical" || plan.PlanID != "plan-1" {
+		t.Fatalf("plan: %#v", plan)
+	}
+	if len(plan.Steps) != 1 || plan.Steps[0].ID != "s1" {
+		t.Fatalf("steps: %#v", plan.Steps)
+	}
 }
 
 func TestRunPlan_ForwardsPlanOnlyAndSurfacesTerminalPlan(t *testing.T) {

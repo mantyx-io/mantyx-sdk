@@ -134,31 +134,47 @@ class Supervisor(TypedDict, total=False):
 class PlanOptions(TypedDict, total=False):
     """Caller-supplied task-plan options.
 
-    Pass ``True`` / ``False`` at the top level via :data:`PlanSpec` for
-    auto-classify / disable. See ``docs/agent-runs-protocol.md`` §4.9.
+    Pass ``"auto"`` / ``"required"`` / ``True`` / ``False`` at the top level
+    via :data:`PlanSpec`, or set ``mode`` on the object.
+    See ``docs/agent-runs-protocol.md`` §4.9.
     """
 
+    mode: str  # "off" | "auto" | "required"
     planOnly: bool
     brief: str
     steps: list[str]
 
 
-#: ``True`` (auto-classify) | options mapping | ``False`` (disable).
-PlanSpec = bool | PlanOptions
+#: ``"off"`` | ``"auto"`` | ``"required"`` | ``True``/``False`` aliases | options mapping.
+PlanSpec = bool | str | PlanOptions
+PlanMode = str  # "off" | "auto" | "required"
 
 
-class TaskPlanStep(TypedDict):
+class TaskPlanStep(TypedDict, total=False):
     """One checklist row in a :class:`TaskPlan`."""
 
+    id: str
     title: str
-    status: str  # "pending" | "in_progress" | "done"
+    status: str  # pending | in_progress | done | blocked | skipped
 
 
 class TaskPlan(TypedDict, total=False):
     """Structured task plan on ``task_plan`` events and plan-only results."""
 
+    v: int
+    planId: str
+    revision: int
+    mode: str
+    source: str
     brief: str
     steps: list[TaskPlanStep]
+
+
+class TaskPlanTransition(TypedDict, total=False):
+    """One transition in a v2 ``task_plan`` event."""
+
+    kind: str
+    stepId: str
 
 
 def plan_only(*, steps: list[str] | None = None, brief: str | None = None) -> PlanOptions:
@@ -1088,23 +1104,39 @@ def normalize_supervisor(
     return out
 
 
+_PLAN_MODES = frozenset({"off", "auto", "required"})
+_TASK_PLAN_STEP_STATUSES = frozenset({"pending", "in_progress", "done", "blocked", "skipped"})
+
+
+def _assert_plan_mode(field: str, value: object) -> str:
+    if not isinstance(value, str) or value not in _PLAN_MODES:
+        raise ValueError(f'{field} must be "off", "auto", or "required"; got {value!r}')
+    return value
+
+
 def normalize_plan(
     value: PlanSpec | None,
-) -> bool | dict[str, Any] | None:
+) -> bool | str | dict[str, Any] | None:
     """Validate a :data:`PlanSpec` value and return the wire shape unchanged.
 
-    Accepts ``True`` / ``False`` or ``{ planOnly?, brief?, steps? }``.
+    Accepts ``"off"`` / ``"auto"`` / ``"required"``, boolean aliases, or
+    ``{ mode?, planOnly?, brief?, steps? }``.
     """
     if value is None:
         return None
     if value is True or value is False:
         return value
+    if isinstance(value, str):
+        return _assert_plan_mode("plan", value)
     if not isinstance(value, Mapping):
         raise ValueError(
-            "plan must be True, False, or a mapping { planOnly?, brief?, steps? }; "
+            'plan must be "off", "auto", "required", True, False, or a mapping '
+            "{ mode?, planOnly?, brief?, steps? }; "
             f"got {type(value).__name__}"
         )
     out: dict[str, Any] = {}
+    if "mode" in value and value["mode"] is not None:
+        out["mode"] = _assert_plan_mode("plan.mode", value["mode"])
     if "planOnly" in value and value["planOnly"] is not None:
         plan_only_raw = value["planOnly"]
         if not isinstance(plan_only_raw, bool):
@@ -1130,8 +1162,24 @@ def normalize_plan(
     return out
 
 
+def _parse_task_plan_step(entry: Any) -> TaskPlanStep | None:
+    if not isinstance(entry, Mapping):
+        return None
+    title = entry.get("title")
+    status = entry.get("status")
+    if not isinstance(title, str) or not isinstance(status, str):
+        return None
+    if status not in _TASK_PLAN_STEP_STATUSES:
+        return None
+    step: TaskPlanStep = {"title": title, "status": status}
+    step_id = entry.get("id")
+    if isinstance(step_id, str) and step_id:
+        step["id"] = step_id
+    return step
+
+
 def parse_task_plan(raw: Any) -> TaskPlan | None:
-    """Parse a terminal ``result.data.plan`` blob into a :class:`TaskPlan`."""
+    """Parse a terminal ``result.data.plan`` or v2 ``task_plan.data.plan`` blob."""
     if not isinstance(raw, Mapping):
         return None
     steps_raw = raw.get("steps")
@@ -1139,20 +1187,39 @@ def parse_task_plan(raw: Any) -> TaskPlan | None:
         return None
     steps: list[TaskPlanStep] = []
     for entry in steps_raw:
-        if not isinstance(entry, Mapping):
-            continue
-        title = entry.get("title")
-        status = entry.get("status")
-        if not isinstance(title, str) or not isinstance(status, str):
-            continue
-        if status not in ("pending", "in_progress", "done"):
-            continue
-        steps.append({"title": title, "status": status})
+        step = _parse_task_plan_step(entry)
+        if step is not None:
+            steps.append(step)
     out: TaskPlan = {"steps": steps}
+    v_raw = raw.get("v")
+    if isinstance(v_raw, (int, float)):
+        out["v"] = int(v_raw)
+    plan_id = raw.get("planId")
+    if isinstance(plan_id, str) and plan_id:
+        out["planId"] = plan_id
+    revision_raw = raw.get("revision")
+    if isinstance(revision_raw, (int, float)):
+        out["revision"] = int(revision_raw)
+    mode_raw = raw.get("mode")
+    if isinstance(mode_raw, str) and mode_raw in _PLAN_MODES:
+        out["mode"] = mode_raw
+    source_raw = raw.get("source")
+    if isinstance(source_raw, str) and source_raw:
+        out["source"] = source_raw
     brief_raw = raw.get("brief")
     if isinstance(brief_raw, str) and brief_raw:
         out["brief"] = brief_raw
     return out
+
+
+def task_plan_from_event_data(data: Mapping[str, Any]) -> TaskPlan | None:
+    """Parse a ``task_plan`` event payload, preferring canonical v2 ``plan``."""
+    canonical = data.get("plan")
+    if canonical is not None:
+        parsed = parse_task_plan(canonical)
+        if parsed is not None:
+            return parsed
+    return parse_task_plan(data)
 
 
 def normalize_output_schema(
@@ -1211,12 +1278,14 @@ __all__ = [
     "MantyxPluginToolRef",
     "MantyxToolRef",
     "OutputSchema",
+    "PlanMode",
     "PlanOptions",
     "PlanSpec",
     "ReasoningLevel",
     "Supervisor",
     "TaskPlan",
     "TaskPlanStep",
+    "TaskPlanTransition",
     "ToolBudget",
     "ToolBudgets",
     "ToolName",
@@ -1246,4 +1315,5 @@ __all__ = [
     "parse_task_plan",
     "plan_only",
     "serialize_tool_refs",
+    "task_plan_from_event_data",
 ]

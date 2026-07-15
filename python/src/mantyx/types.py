@@ -130,7 +130,7 @@ class AgentSpec(TypedDict, total=False):
     loopDetection: bool | dict[str, Any]
     toolBudgets: dict[str, dict[str, int]]
     supervisor: bool | dict[str, Any]
-    plan: bool | dict[str, Any]
+    plan: bool | str | dict[str, Any]
     outputSchema: dict[str, Any]
     metadata: Metadata
     budgets: RunBudgets

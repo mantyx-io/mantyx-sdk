@@ -538,14 +538,19 @@ describe("MantyxClient.runAgent", () => {
     expect(server.lastRunCreateBody?.plan).toBe(true);
 
     server.scriptForNextRun = ok;
+    await client.runAgent({ systemPrompt: "x", prompt: "y", plan: "required" });
+    expect(server.lastRunCreateBody?.plan).toBe("required");
+
+    server.scriptForNextRun = ok;
     await client.runAgent({
       systemPrompt: "x",
       prompt: "y",
-      plan: { steps: ["A", "B"], brief: "Do it" },
+      plan: { steps: ["A", "B"], brief: "Do it", mode: "required" },
     });
     expect(server.lastRunCreateBody?.plan).toEqual({
       steps: ["A", "B"],
       brief: "Do it",
+      mode: "required",
     });
 
     server.scriptForNextRun = ok;
@@ -561,6 +566,16 @@ describe("MantyxClient.runAgent", () => {
       events: [
         {
           type: "task_plan",
+          v: 2,
+          planId: "plan-1",
+          revision: 1,
+          plan: {
+            v: 2,
+            planId: "plan-1",
+            revision: 1,
+            brief: "Migrate billing",
+            steps: [{ id: "step-1", title: "Snapshot schema", status: "pending" }],
+          },
           brief: "Migrate billing",
           steps: [{ title: "Snapshot schema", status: "pending" }],
         },
@@ -583,6 +598,31 @@ describe("MantyxClient.runAgent", () => {
     expect(result.plan?.steps).toEqual([
       { title: "Snapshot schema", status: "pending" },
     ]);
+  });
+
+  it("prefers canonical v2 plan on task_plan events", async () => {
+    const { taskPlanFromEventData } = await import("../src/index.js");
+    const plan = taskPlanFromEventData({
+      v: 2,
+      planId: "plan-1",
+      revision: 2,
+      brief: "Mirrored",
+      steps: [{ title: "Stale", status: "pending" }],
+      plan: {
+        v: 2,
+        planId: "plan-1",
+        revision: 2,
+        brief: "Canonical",
+        steps: [{ id: "s1", title: "Pull data", status: "in_progress" }],
+      },
+    });
+    expect(plan?.brief).toBe("Canonical");
+    expect(plan?.planId).toBe("plan-1");
+    expect(plan?.steps[0]).toEqual({
+      id: "s1",
+      title: "Pull data",
+      status: "in_progress",
+    });
   });
 
   it("builds messages with attachments from prompt shorthand", async () => {

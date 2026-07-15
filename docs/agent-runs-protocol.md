@@ -993,12 +993,17 @@ the verdict by the time the event arrives.
 
 `plan` turns on the in-product **task plan** — the same live-checklist engine
 that powers MANTYX chat / Hive Mind. It is **opt-in** on API/ephemeral runs,
-same as `supervisor` (§4.8), because both features add extra LLM calls.
+same as `supervisor` (§4.8). Active plans are owned by the executing agent
+through the host `update_task_plan` tool; there is no pre-flight classifier or
+separate tracker LLM call.
 
 ```jsonc
-"plan": true        // auto: classify, emit a task_plan event, track during the run
+"plan": true        // compatibility alias for "auto"
+"plan": "auto"      // agent decides during its normal first turn
+"plan": "required"  // agent must initialize a plan before substantive tools
 
 "plan": {           // caller-provided checklist — skips the classifier
+  "mode": "required",
   "brief": "Migrate the billing tables and backfill",   // optional
   "steps": ["Snapshot current schema", "Apply migration", "Backfill rows", "Verify counts"]
 }
@@ -1012,19 +1017,22 @@ same as `supervisor` (§4.8), because both features add extra LLM calls.
 | Form                         | Behavior                                                                                                                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | omitted / `false`            | No planning. Default.                                                                                                                                                            |
-| `true`                       | Pre-flight classifier decides whether a multi-step plan is warranted. If so, a `task_plan` event is emitted (see §7), the checklist is injected into the user turn, and step statuses are tracked (advancing on tool activity and supervisor reviews) until the run ends. If it declines, the run proceeds with no plan. |
-| `{ steps, brief? }`          | Caller-provided checklist used verbatim — **skips** the classifier (and its `MIN_STEPS` gate). Injected + tracked like the auto case.                                            |
+| `true` / `"auto"`            | Exposes `update_task_plan`; the executing agent decides during its normal first turn whether multi-step tracking is useful. No separate planning LLM call. |
+| `"required"`                 | Requires `update_task_plan` before substantive tools and rejects premature final answers while required steps remain unfinished (bounded continuation guard). |
+| `{ mode?, steps, brief? }`   | Seeds an authoritative checklist. `mode` defaults to `auto`; use `required` to enforce initialization/execution. |
 | `{ planOnly: true, steps? }` | Produce the plan (classifier when `steps` omitted, otherwise the provided checklist) and **terminate without executing the agent loop**. The terminal `result` carries `data.plan` (see §7). |
 
 | Field      | Type     | Required | Notes                                                                                                  |
 | ---------- | -------- | -------- | ---------------------------------------------------------------------------------------------------- |
 | `planOnly` | boolean  | no       | When `true`, the run stops after producing the plan.                                                  |
+| `mode`     | string   | no       | `off`, `auto`, or `required`. Defaults to `auto`.                                                     |
 | `brief`    | string   | no       | One-line objective for a caller-provided plan. Clamped server-side.                                   |
 | `steps`    | string[] | no       | Caller-provided checklist titles. Empty/omitted ⇒ auto-classify. Count + per-step length clamped server-side. |
 
 Plan-only runs do **not** append an assistant turn to a session (the plan is
-not the answer). Planner LLM usage (classifier + per-run tracker) is metered
-under the `task_planning` usage surface.
+not the answer). When no steps are supplied, this compatibility-only path
+still uses the one-shot planner and meters it under `task_planning`; executed
+runs do not use the classifier/tracker path.
 
 **Inheritance for sessions.**
 
@@ -1293,10 +1301,37 @@ data: <utf-8 JSON>
 // mid-turn reasoning review (phase: "reasoning") — fired while the agent was still thinking
 { "seq": 6, "type": "supervisor", "data": { "action": "redirect", "phase": "reasoning", "reason": "Overthinking a simple case.", "redirect": "Commit and answer.", "llmCalls": 4 } }
 
-// in-product task plan (see §4.9). Emitted only when the run carries a `plan` spec
-// field: once after classify / caller-supplied plan, then on each tracker advance.
-// Non-terminal — render as a live checklist. status ∈ "pending" | "in_progress" | "done".
-{ "seq": 4, "type": "task_plan", "data": { "brief": "Compare Q3 vs Q4 revenue.", "steps": [ { "title": "Pull revenue", "status": "in_progress" }, { "title": "Compute deltas", "status": "pending" } ] } }
+// Agent-owned task plan (see §4.9). Every transition carries the canonical
+// post-transition snapshot. `revision` is monotonic per plan; run-event `seq`
+// orders multiple transitions in one accepted update. `brief` and `steps`
+// remain mirrored at the top level for pre-v2 SDK clients.
+// status ∈ pending | in_progress | done | blocked | skipped.
+{ "seq": 4, "type": "task_plan", "data": {
+    "v": 2,
+    "planId": "3b5f...",
+    "revision": 2,
+    "mode": "required",
+    "source": "agent",
+    "transition": { "kind": "step_completed", "stepId": "step-1" },
+    "transitionIndex": 0,
+    "transitionCount": 2,
+    "brief": "Compare Q3 vs Q4 revenue.",
+    "steps": [
+      { "id": "step-1", "title": "Pull revenue", "status": "done" },
+      { "id": "step-2", "title": "Compute deltas", "status": "in_progress" }
+    ],
+    "plan": {
+      "v": 2,
+      "planId": "3b5f...",
+      "revision": 2,
+      "mode": "required",
+      "brief": "Compare Q3 vs Q4 revenue.",
+      "steps": [
+        { "id": "step-1", "title": "Pull revenue", "status": "done" },
+        { "id": "step-2", "title": "Compute deltas", "status": "in_progress" }
+      ]
+    }
+} }
 
 // terminal event
 // Every terminal `result` event also carries `tokens`, `turns`, and `model`
@@ -1604,18 +1639,19 @@ A reference SDK should:
      defaults; passing `loopDetection: false` opts out; passing `toolBudgets: {}`
      clears the defaults. `supervisor` and `plan` are opt-in — omitting them
      keeps both off; pass `supervisor: true` / `{}` / `{ interval?, modelId? }`
-     or `plan: true` / `{ … }` to enable.
+     or `plan: "auto"` / `"required"` / `{ … }` to enable.
    - Treat `loop_detected`, `tool_budget_exceeded`, and `supervisor` SSE
      events as observability-only — the server already substituted synthetic
      tool-results / steering nudges / supervisor verdicts where applicable, so
      the SDK's job is just to surface the event to the caller (status banner,
      log line, telemetry). Do **not** abort the run on these events; the run
      continues through `result` / `error` / `cancelled` as usual.
-   - Accept `plan` from the caller (`true` | `{ steps?, brief?, planOnly? }` |
-     `false`) and pass it through unchanged (see §4.9). It is opt-in — omitting
-     it (or `false`) means no planning. Render `task_plan` events as a live,
-     non-terminal checklist; for `planOnly` runs read the final checklist from
-     the terminal `result.data.plan`.
+   - Accept `plan` from the caller (`off` / `auto` / `required`, the boolean
+     compatibility aliases, or `{ mode?, steps?, brief?, planOnly? }`) and pass
+     it through unchanged (see §4.9). Render `task_plan.data.plan` as the
+     canonical checklist. Apply snapshots idempotently by `planId` + `revision`
+     and use run-event `seq` to order multiple transitions in one revision.
+     For `planOnly` runs read the final checklist from `result.data.plan`.
    - On terminal `result`, resolve the call. On `error` subtype, throw.
 4. Re-emit assistant deltas/events as a stream/iterator for callers who care
    about live output.
