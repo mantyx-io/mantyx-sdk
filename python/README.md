@@ -259,7 +259,7 @@ Use the metadata you attached at create time to find earlier sessions, then repl
 result = client.list_sessions(
     metadata={"customer": "acme"},
     status="active",  # optional: "active" | "ended"
-    limit=50,          # optional pagination
+    limit=50,  # optional pagination
     offset=0,
 )
 for s in result.sessions:
@@ -374,6 +374,7 @@ import asyncio
 from mantyx import AsyncMantyxClient
 from mantyx.a2a_server import build_agent_card, serve_agent_over_a2a
 
+
 async def main() -> None:
     async with AsyncMantyxClient(api_key="...", workspace_slug="acme") as client:
         handle = await serve_agent_over_a2a(
@@ -389,6 +390,7 @@ async def main() -> None:
         )
         print(f"A2A peer up on {handle.url}")
         await handle.serve_forever()
+
 
 asyncio.run(main())
 ```
@@ -435,7 +437,7 @@ local_fs_stdio = define_local_mcp(
     command="mcp-server-filesystem",
     args=["."],
     env={"FOO": "bar"},  # optional
-    cwd="/workspace",     # optional
+    cwd="/workspace",  # optional
 )
 ```
 
@@ -478,14 +480,16 @@ JSON Schema, and decode it with a Pydantic (or any) validator via
 from pydantic import BaseModel
 from mantyx import MantyxClient, parse_run_output
 
+
 class Weather(BaseModel):
     city: str
     temperature_c: float
 
+
 WEATHER_SCHEMA = {
     "type": "object",
     "properties": {
-        "city":          {"type": "string"},
+        "city": {"type": "string"},
         "temperature_c": {"type": "number"},
     },
     "required": ["city", "temperature_c"],
@@ -522,12 +526,15 @@ model-facing description.
 from pydantic import BaseModel
 from mantyx import define_local_tool
 
+
 class KickOffArgs(BaseModel):
     dataset: str
+
 
 class KickOffResult(BaseModel):
     job_id: str
     status: str  # "pending" | "done"
+
 
 define_local_tool(
     name="kick_off_export",
@@ -592,8 +599,8 @@ transparent:
 from mantyx import MantyxClient, MantyxOAuthClient
 
 oauth = MantyxOAuthClient(
-    client_id=os.environ["MANTYX_OAUTH_CLIENT_ID"],         # mantyx_oa_…
-    client_secret=os.environ["MANTYX_OAUTH_CLIENT_SECRET"], # mantyx_oas_…
+    client_id=os.environ["MANTYX_OAUTH_CLIENT_ID"],  # mantyx_oa_…
+    client_secret=os.environ["MANTYX_OAUTH_CLIENT_SECRET"],  # mantyx_oas_…
 )
 
 # (1) Hand the SDK a stored refresh token — it caches the access token in
@@ -601,7 +608,7 @@ oauth = MantyxOAuthClient(
 #     request once on a 401.
 client = MantyxClient(
     token_source=oauth.refresh_token_source(
-        refresh_token=stored_refresh_token,                  # mantyx_rt_…
+        refresh_token=stored_refresh_token,  # mantyx_rt_…
     ),
     workspace_slug="acme",
 )
