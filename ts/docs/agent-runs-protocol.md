@@ -433,11 +433,23 @@ Rules:
 | `input_file`      | `mimeType`, `filename`, `data` (base64, no data-URL prefix) | Inline bytes. Total inline bytes per run are capped (currently 5 MB); larger files must use a URL. |
 | `input_file_url`  | `url` (https only), `mimeType?`, `filename?`        | Publicly fetchable HTTPS URL. The provider fetches it directly.                            |
 
-Allowed MIME types match the workspace chat allowlist (images, PDF, DOCX,
-and `text/*` subtypes). Disallowed types, non-HTTPS URLs, malformed base64, or
-oversized inline payloads return `400 invalid_request`. Attachments on older
-history turns are not re-sent to the model (text only); only the current
-turn's files reach the LLM.
+Allowed MIME types match the workspace chat allowlist:
+
+- **Audio:** `audio/mp4` (M4A), `audio/mpeg` (MP3), `audio/wav`, `audio/webm`.
+- **Images:** `image/jpeg`, `image/png`, `image/webp`, `image/gif`.
+- **Documents:** PDF (`application/pdf`), DOCX
+  (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`),
+  TXT (`text/plain`), Markdown (`text/markdown`, `text/x-markdown`), CSV/TSV
+  (`text/csv`, `application/csv`, `text/comma-separated-values`,
+  `text/tab-separated-values`), JSON (`application/json`), XML
+  (`application/xml`, `text/xml`), and HTML (`text/html`). Other `text/*`
+  subtypes remain accepted.
+
+Disallowed types, non-HTTPS URLs, malformed base64, or oversized inline
+payloads return `400 invalid_request`. Attachments on older history turns are
+not re-sent to the model (text only); only the current turn's files reach the
+LLM. Whether the model can interpret an accepted file depends on the selected
+model and provider.
 
 ### 4.1 Triggering a persisted MANTYX agent (`agentId`)
 

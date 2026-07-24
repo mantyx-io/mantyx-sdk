@@ -162,6 +162,13 @@ messages are merged after `systemPrompt`; the last non-system message must be a
   "url": "https://example.com/image.png", // https only; provider fetches it
   "mimeType": "image/png", // optional
 }
+// — or audio —
+{
+  "type": "input_file",
+  "mimeType": "audio/mp4", // M4A recordings use audio/mp4
+  "filename": "recording.m4a",
+  "data": "<base64>",
+}
 ```
 
 See [`agent-runs-protocol.md` §4.0.1](./agent-runs-protocol.md) for the full
