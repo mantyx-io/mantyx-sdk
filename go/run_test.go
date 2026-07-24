@@ -950,7 +950,7 @@ func TestRunAgent_BuildsMessagesFromPromptAttachments(t *testing.T) {
 		SystemPrompt: "x",
 		Prompt:       "read this",
 		Attachments: []map[string]any{
-			InputFileAttachment("text/plain", "note.txt", "aGVsbG8="),
+			InputFileAttachment("audio/mp4", "recording.m4a", "aGVsbG8="),
 		},
 	}); err != nil {
 		t.Fatalf("RunAgent: %v", err)
@@ -966,6 +966,14 @@ func TestRunAgent_BuildsMessagesFromPromptAttachments(t *testing.T) {
 	msg, ok := msgs[0].(map[string]any)
 	if !ok || msg["role"] != "user" || msg["content"] != "read this" {
 		t.Fatalf("unexpected message: %#v", msgs[0])
+	}
+	attachments, ok := msg["attachments"].([]any)
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("expected one attachment, got %#v", msg["attachments"])
+	}
+	attachment, ok := attachments[0].(map[string]any)
+	if !ok || attachment["mimeType"] != "audio/mp4" || attachment["filename"] != "recording.m4a" {
+		t.Fatalf("unexpected audio attachment: %#v", attachments[0])
 	}
 }
 

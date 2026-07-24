@@ -635,8 +635,8 @@ describe("MantyxClient.runAgent", () => {
       prompt: "read this",
       attachments: [
         inputFileAttachment({
-          mimeType: "text/plain",
-          filename: "note.txt",
+          mimeType: "audio/mp4",
+          filename: "recording.m4a",
           data: "aGVsbG8=",
         }),
       ],
@@ -651,8 +651,8 @@ describe("MantyxClient.runAgent", () => {
           attachments: [
             {
               type: "input_file",
-              mimeType: "text/plain",
-              filename: "note.txt",
+              mimeType: "audio/mp4",
+              filename: "recording.m4a",
               data: "aGVsbG8=",
             },
           ],

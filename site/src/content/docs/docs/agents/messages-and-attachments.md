@@ -9,6 +9,32 @@ Runs accept either a single `prompt` string or a multi-role `messages` array. Fi
 
 Runnable examples live under `examples/message-attachments` for [TypeScript](https://github.com/mantyx-io/mantyx-sdk/tree/main/ts/examples/message-attachments), [Go](https://github.com/mantyx-io/mantyx-sdk/tree/main/go/examples/message-attachments), and [Python](https://github.com/mantyx-io/mantyx-sdk/tree/main/python/examples/message-attachments). See also the [Examples](/docs/examples/) index.
 
+## Supported file types
+
+- **Audio:** M4A (`audio/mp4`), MP3 (`audio/mpeg`), WAV (`audio/wav`), and WebM audio (`audio/webm`).
+- **Images:** JPEG, PNG, WebP, and GIF.
+- **Documents:** PDF, DOCX, TXT, Markdown, CSV/TSV, JSON, XML, and HTML. Other `text/*` files are also accepted.
+
+M4A recordings from mobile devices must use `audio/mp4`:
+
+```ts
+const recording = fs.readFileSync("recording.m4a").toString("base64");
+
+await client.runAgent({
+  systemPrompt: "You analyze voice notes.",
+  prompt: "Summarize this recording.",
+  attachments: [
+    inputFileAttachment({
+      mimeType: "audio/mp4",
+      filename: "recording.m4a",
+      data: recording,
+    }),
+  ],
+});
+```
+
+Accepted files are forwarded to the selected model provider. Choose a model that supports the file modality you attach.
+
 ## Single prompt with files
 
 Pass `attachments` alongside `prompt` — the SDK builds the wire `messages` shape for you.

@@ -643,8 +643,8 @@ def test_run_agent_builds_messages_from_prompt_attachments(
         prompt="read this",
         attachments=[
             input_file_attachment(
-                mime_type="text/plain",
-                filename="note.txt",
+                mime_type="audio/mp4",
+                filename="recording.m4a",
                 data="aGVsbG8=",
             )
         ],
@@ -658,8 +658,8 @@ def test_run_agent_builds_messages_from_prompt_attachments(
             "attachments": [
                 {
                     "type": "input_file",
-                    "mimeType": "text/plain",
-                    "filename": "note.txt",
+                    "mimeType": "audio/mp4",
+                    "filename": "recording.m4a",
                     "data": "aGVsbG8=",
                 }
             ],
