@@ -46,6 +46,41 @@ func TestRunAgent_OneShotWithDeltas(t *testing.T) {
 	}
 }
 
+func TestRunAgent_StructuredOutputObservability(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "result",
+				data: map[string]any{
+					"subtype": "success",
+					"text":    `{"answer":"yes"}`,
+					"structuredOutput": map[string]any{
+						"schemaRequested":               true,
+						"schemaEnforced":                true,
+						"enforcementMechanism":          "native_schema",
+						"unconstrainedFallbackOccurred": false,
+					},
+				},
+			},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	out, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if out.StructuredOutput == nil {
+		t.Fatalf("expected StructuredOutput to be populated")
+	}
+	if !out.StructuredOutput.SchemaRequested || !out.StructuredOutput.SchemaEnforced ||
+		out.StructuredOutput.EnforcementMechanism != StructuredOutputEnforcementNativeSchema ||
+		out.StructuredOutput.UnconstrainedFallbackOccurred {
+		t.Fatalf("unexpected StructuredOutput: %+v", out.StructuredOutput)
+	}
+}
+
 func TestRunAgent_LocalToolDispatch(t *testing.T) {
 	server := newMockServer()
 	defer server.close()
@@ -696,6 +731,56 @@ func TestRunAgent_ErrorEventFallsBackToCode(t *testing.T) {
 	if runErr.FinishReason != "" || runErr.PartialText != "" || runErr.Retryable != nil {
 		t.Fatalf("expected unset triage attrs, got %+v", runErr)
 	}
+	if runErr.APIStatus != 0 || runErr.APICode != "" || runErr.StructuredOutput != nil {
+		t.Fatalf("expected unset provider and structured-output attrs, got %+v", runErr)
+	}
+}
+
+func TestRunAgent_PreservesStructuredOutputProviderErrorDetails(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	const providerMessage = "OpenAI rejected response_format: property 'answer' must be required."
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{
+			{
+				kind: "error",
+				data: map[string]any{
+					"error":      providerMessage,
+					"code":       "structured_output_schema_rejected",
+					"errorClass": "structured_output_schema_rejected",
+					"apiStatus":  400,
+					"apiCode":    "invalid_json_schema",
+					"structuredOutput": map[string]any{
+						"schemaRequested":               true,
+						"schemaEnforced":                false,
+						"enforcementMechanism":          "none",
+						"unconstrainedFallbackOccurred": false,
+					},
+				},
+			},
+		},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	_, err := client.RunAgent(context.Background(), RunSpec{SystemPrompt: "x", Prompt: "y"})
+	var runErr *RunError
+	if !errors.As(err, &runErr) {
+		t.Fatalf("expected *RunError, got %T: %v", err, err)
+	}
+	if runErr.Message != providerMessage {
+		t.Fatalf("provider message changed: %q", runErr.Message)
+	}
+	if runErr.Code != "structured_output_schema_rejected" ||
+		runErr.ErrorClass != "structured_output_schema_rejected" {
+		t.Fatalf("unexpected structured-output error class: %+v", runErr)
+	}
+	if runErr.APIStatus != 400 || runErr.APICode != "invalid_json_schema" {
+		t.Fatalf("unexpected provider details: %+v", runErr)
+	}
+	if runErr.StructuredOutput == nil ||
+		runErr.StructuredOutput.EnforcementMechanism != StructuredOutputEnforcementNone ||
+		runErr.StructuredOutput.SchemaEnforced {
+		t.Fatalf("unexpected StructuredOutput: %+v", runErr.StructuredOutput)
+	}
 }
 
 // TestRunAgent_AssistantMessageSurfacesTriageFields verifies that the
@@ -836,6 +921,9 @@ func TestRunAgent_LegacyServerOmitsCostAttribution(t *testing.T) {
 	}
 	if out.Model != nil {
 		t.Fatalf("expected Model=nil against legacy server, got %+v", out.Model)
+	}
+	if out.StructuredOutput != nil {
+		t.Fatalf("expected StructuredOutput=nil against legacy server, got %+v", out.StructuredOutput)
 	}
 }
 

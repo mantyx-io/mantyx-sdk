@@ -121,6 +121,7 @@ short-circuit, etc.) see `agent-runs-protocol.md` §4.
   "outputSchema": {
     // optional; see §7
     "name": "weather_report", //   defaults to "output"
+    "enforcement": "strict", // optional; "best_effort" (default) | "strict"
     "schema": {
       /* JSON Schema */
     },
@@ -426,21 +427,22 @@ Every event payload has the same envelope:
 
 The vocabulary (`EphemeralEventType` in `bus.ts`):
 
-| Type                   | Direction | Frequency                                        | Purpose                                                                                                                                                                                                                                     |
-| ---------------------- | --------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `assistant_delta`      | M → SDK   | Many                                             | Streamed assistant text token / chunk.                                                                                                                                                                                                      |
-| `thinking_delta`       | M → SDK   | Many (iff `reasoningLevel > 0`)                  | Streamed extended-thinking text (provider redacts when policy requires).                                                                                                                                                                    |
-| `tool_result`          | M → SDK   | Per server-resolved tool call                    | Informational — tells the SDK that MANTYX ran a server-resolved tool (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) and got a result. The SDK does not need to act on it.                                                                        |
-| `local_tool_call`      | M → SDK   | Per client-resolved tool call                    | **Action required.** SDK must POST a tool-result.                                                                                                                                                                                           |
-| `local_tool_result_in` | M → SDK   | Per client-resolved tool call                    | Informational mirror of the tool-result the SDK just posted, persisted for observability. Re-emitted to late subscribers so they can replay the conversation.                                                                               |
-| `loop_detected`        | M → SDK   | 0–2× per run (soft nudge + optional hard cutoff) | Observability for the loop-detection guard (see §8). The server already substituted the synthetic skip + steering nudge — SDK clients render a status note (`looping — nudged` / `looping — gave up`) and otherwise leave the run alone.    |
-| `tool_budget_exceeded` | M → SDK   | Per intercepted tool call                        | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner. |
+| Type                   | Direction | Frequency                                        | Purpose                                                                                                                                                                                                                                                                                             |
+| ---------------------- | --------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `assistant_delta`      | M → SDK   | Many                                             | Streamed assistant text token / chunk.                                                                                                                                                                                                                                                              |
+| `thinking_delta`       | M → SDK   | Many (iff `reasoningLevel > 0`)                  | Streamed extended-thinking text (provider redacts when policy requires).                                                                                                                                                                                                                            |
+| `tool_result`          | M → SDK   | Per server-resolved tool call                    | Informational — tells the SDK that MANTYX ran a server-resolved tool (`mantyx`, `mantyx_plugin`, `a2a`, `mcp`) and got a result. The SDK does not need to act on it.                                                                                                                                |
+| `tool_files`           | M → SDK   | Per server-resolved tool call that returns files | Informational metadata for files a server-resolved tool produced (see §4.2.1). Precedes the matching `tool_result`. Inline bytes are redacted from the stream; download via the admin route.                                                                                                        |
+| `local_tool_call`      | M → SDK   | Per client-resolved tool call                    | **Action required.** SDK must POST a tool-result.                                                                                                                                                                                                                                                   |
+| `local_tool_result_in` | M → SDK   | Per client-resolved tool call                    | Informational mirror of the tool-result the SDK just posted, persisted for observability. Re-emitted to late subscribers so they can replay the conversation. Any `files` carry only metadata on the wire (base64 `data` is redacted).                                                              |
+| `loop_detected`        | M → SDK   | 0–2× per run (soft nudge + optional hard cutoff) | Observability for the loop-detection guard (see §8). The server already substituted the synthetic skip + steering nudge — SDK clients render a status note (`looping — nudged` / `looping — gave up`) and otherwise leave the run alone.                                                            |
+| `tool_budget_exceeded` | M → SDK   | Per intercepted tool call                        | Observability for per-tool call budgets (see §8). The synthetic `tool_result` carrying the "budget exceeded — pivot or finalize" body lands on the normal tool-result channel; this event is purely so SDK clients can surface a UI banner.                                                         |
 | `supervisor`           | M → SDK   | 0–N× per run (every `interval` LLM calls)        | Run-supervisor check (see §4.7 / §8.4). Fired on **every** review — including `on_track` — so SDK clients can render supervisor activity. When the judge steers the run (`redirect` / `finalize`), the pipeline has already injected the steering message or forced a tools-disabled finalize turn. |
-| `task_plan`            | M → SDK   | 0–N× per run (iff `plan` set)                    | Observability for the in-product task plan (see §4.9 / §8.5). Emitted once after classify / caller-supplied plan, then again whenever the tracker advances step statuses. **Non-terminal.** For `planOnly` runs the final plan also rides on the terminal `result` under `data.plan`.            |
-| `assistant_message`    | M → SDK   | 1× per turn                                      | Final assistant message for the turn (concatenated, persistence-ready).                                                                                                                                                                     |
-| `result`               | M → SDK   | 1× terminal                                      | Successful completion. Carries the final assistant text and run summary.                                                                                                                                                                    |
-| `error`                | M → SDK   | 1× terminal                                      | Failure. Carries `error` (message), `code` / `errorClass` (category), `finishReason`, and an optional `partialText` salvage payload. See §4.7.                                                                                              |
-| `cancelled`            | M → SDK   | 1× terminal                                      | Cancellation. Run was aborted via `POST /cancel`.                                                                                                                                                                                           |
+| `task_plan`            | M → SDK   | 0–N× per run (iff `plan` set)                    | Observability for the in-product task plan (see §4.9 / §8.5). Emitted once after classify / caller-supplied plan, then again whenever the tracker advances step statuses. **Non-terminal.** For `planOnly` runs the final plan also rides on the terminal `result` under `data.plan`.               |
+| `assistant_message`    | M → SDK   | 1× per turn                                      | Final assistant message for the turn (concatenated, persistence-ready).                                                                                                                                                                                                                             |
+| `result`               | M → SDK   | 1× terminal                                      | Successful completion. Carries the final assistant text and run summary.                                                                                                                                                                                                                            |
+| `error`                | M → SDK   | 1× terminal                                      | Failure. Carries `error` (message), `code` / `errorClass` (category), `finishReason`, and an optional `partialText` salvage payload. See §4.7.                                                                                                                                                      |
+| `cancelled`            | M → SDK   | 1× terminal                                      | Cancellation. Run was aborted via `POST /cancel`.                                                                                                                                                                                                                                                   |
 
 `result`, `error`, and `cancelled` are the **terminal** events — the SDK
 should close the SSE stream after one of them arrives.
@@ -472,6 +474,48 @@ progress text — it's not part of the canonical assistant response.
 ```
 
 Purely informational. The SDK does not respond.
+
+### 4.2.1 `tool_files` (server-resolved tool outputs)
+
+Emitted when a **server-resolved** tool returns files alongside (or instead of)
+text — e.g. a `mantyx` tool that renders a chart or exports a PDF. The bytes also
+reach the model natively (as file parts), so this event is purely for
+observability: it lets the Calls dashboard (and any SDK client that cares) list
+and download a run's produced artifacts. It always precedes the matching
+`tool_result` summary and shares its display `name`.
+
+```jsonc
+{
+  "seq": 6,
+  "type": "tool_files",
+  "data": {
+    "name": "render_chart", // matches the paired tool_result `name`
+    "files": [
+      {
+        "filename": "chart.png",
+        "mimeType": "image/png",
+        "sizeBytes": 20480,
+        "storageKey": "chat-attachments/<tenant>/tool-results/<tool>/<uuid>.png",
+      },
+    ],
+  },
+}
+```
+
+| Field        | Type    | Notes                                                                                                                                        |
+| ------------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `filename`   | string  | Original filename.                                                                                                                           |
+| `mimeType`   | string  | Content type.                                                                                                                                |
+| `sizeBytes`  | integer | Decoded byte length (`0` when only a pre-existing URI was available).                                                                        |
+| `storageKey` | string? | Object-store key when MANTYX persisted the bytes (the canonical case in production). Resolve via the admin download route; not a public URL. |
+| `url`        | string? | Public HTTPS URL when the tool itself returned a `file_uri` to a public file.                                                                |
+
+When object storage is **not** configured (e.g. local dev), MANTYX inlines the
+bytes as base64 on the persisted event row instead of a `storageKey`. That inline
+`data` is **redacted from the SSE/stream payload** (only the metadata above is
+sent); the bytes are served on demand by the admin download route. The
+client-resolved equivalent (`local_tool_result_in.files`) is redacted the same
+way.
 
 ### 4.3 `local_tool_call` (client-resolved tools)
 
@@ -706,14 +750,14 @@ See §8 for the wire-spec field that defines budgets.
   "data": { "action": "redirect", "phase": "reasoning", "reason": "Overthinking; looping on the same edge case.", "redirect": "Commit to the straightforward approach and answer.", "llmCalls": 7 } }
 ```
 
-| Field      | Type    | Notes                                                                                                                                                                                                                         |
-| ---------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `action`   | string  | One of `"on_track"`, `"redirect"`, `"finalize"`.                                                                                                                                                                              |
-| `reason`   | string  | One- or two-sentence explanation from the judge.                                                                                                                                                                              |
-| `redirect` | string  | Present when `action === "redirect"`: the steering message injected into the conversation (same text the agent sees as a user message). Omitted for `on_track` / `finalize`.                                                 |
-| `llmCalls` | integer | Number of LLM calls (`completeTurn` invocations) completed when this review fired. Matches the pipeline's `modelInvocations` counter at the check boundary.                                                                   |
-| `phase`    | string  | Optional. `"turn_boundary"` (default cadence review) or `"reasoning"` (mid-turn review fired while a long reasoning span was still streaming). Absent is equivalent to `"turn_boundary"`.                                     |
-| `model`      | object  | Optional. Resolved judge model (`{ id, provider, vendorModelId }`) — same shape as terminal `result.model` (§4.7.1). Present on platform-hosted runs for cost attribution and debug UIs.                                      |
+| Field      | Type    | Notes                                                                                                                                                                                     |
+| ---------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`   | string  | One of `"on_track"`, `"redirect"`, `"finalize"`.                                                                                                                                          |
+| `reason`   | string  | One- or two-sentence explanation from the judge.                                                                                                                                          |
+| `redirect` | string  | Present when `action === "redirect"`: the steering message injected into the conversation (same text the agent sees as a user message). Omitted for `on_track` / `finalize`.              |
+| `llmCalls` | integer | Number of LLM calls (`completeTurn` invocations) completed when this review fired. Matches the pipeline's `modelInvocations` counter at the check boundary.                               |
+| `phase`    | string  | Optional. `"turn_boundary"` (default cadence review) or `"reasoning"` (mid-turn review fired while a long reasoning span was still streaming). Absent is equivalent to `"turn_boundary"`. |
+| `model`    | object  | Optional. Resolved judge model (`{ id, provider, vendorModelId }`) — same shape as terminal `result.model` (§4.7.1). Present on platform-hosted runs for cost attribution and debug UIs.  |
 
 Observability for the run-supervisor guard (see §8.4). The event fires on
 **every** check, not only when the judge intervenes — `on_track` reviews are
@@ -734,10 +778,16 @@ supervisor **off** on ephemeral API runs.
 
 ```jsonc
 // Every terminal `result` and `error` event also carries `tokens`, `turns`,
-// and `model` for cost attribution and dashboards — see §4.7.1.
+// `model`, and `structuredOutput` — see below and §4.8.1.
 { "seq": 14, "type": "result",    "data": {
-    "ok":      true,
+    "subtype": "success",
     "text":    "...",
+    "structuredOutput": {
+      "schemaRequested": true,
+      "schemaEnforced": true,
+      "enforcementMechanism": "native_schema",
+      "unconstrainedFallbackOccurred": false
+    },
     "tokens":  { "inputTokens": 1283, "cachedTokens": 512, "reasoningTokens": 96, "outputTokens": 240 },
     "turns":   3,
     "model":   { "id": "platform:demo", "provider": "openai", "vendorModelId": "gpt-5.4-mini", "reasoningEffort": "low" }
@@ -749,6 +799,12 @@ supervisor **off** on ephemeral API runs.
     "finishReason": "max_tokens",     // canonical lowercase stop reason
     "partialText":  "{\n  \"answer\":… (truncated JSON) …",
     "retryable":    false,             // optional; per-class retry hint
+    "structuredOutput": {
+      "schemaRequested": true,
+      "schemaEnforced": false,
+      "enforcementMechanism": "native_schema",
+      "unconstrainedFallbackOccurred": false
+    },
     "tokens":       { "inputTokens": 8190, "cachedTokens": 0, "reasoningTokens": 0, "outputTokens": 1024 },
     "turns":        1,
     "model":        { "id": "provider:cmf…", "provider": "google", "vendorModelId": "gemini-2.5-pro" }
@@ -763,14 +819,37 @@ SSE stream.
 with structured triage attributes when the failure carried a salvage path
 (typically truncation, upstream deadline, or max-budget-with-text):
 
-| Field          | Type         | Required | Notes                                                                                                                                                                                                                                                                                       |
-| -------------- | ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `error`        | string       | yes      | Human-readable message (also persisted on `EphemeralAgentRun.error`).                                                                                                                                                                                                                       |
-| `code`         | string       | yes      | Legacy alias for `errorClass`. Equals `errorClass` when present; otherwise a small lowercase token (`"error"`, `"invalid_spec"`, `"worker_error"`, …) the SDK can switch on.                                                                                                                |
-| `errorClass`   | string       | no       | Canonical category. One of `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"` (input too big), `"truncation"` (output budget exhausted), `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, `"unknown"`. New categories may land additively. |
-| `finishReason` | string\|null | no       | Canonical lowercase stop reason normalized across providers (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When present, mirrors the value on the last `assistant_message`.                                                                                                 |
-| `partialText`  | string       | no       | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is likely **incomplete JSON** that will fail `JSON.parse` — see §7 below. Also persisted on `EphemeralAgentRun.finalText` so the Calls UI can render it alongside a truncation banner.         |
-| `retryable`    | boolean      | no       | Coarse retry hint inherited from the pipeline's error classifier. Informational; the SDK still owns the actual retry decision.                                                                                                                                                              |
+| Field              | Type         | Required | Notes                                                                                                                                                                                                                                                                                       |
+| ------------------ | ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `error`            | string       | yes      | Human-readable message (also persisted on `EphemeralAgentRun.error`).                                                                                                                                                                                                                       |
+| `code`             | string       | yes      | Legacy alias for `errorClass`. Equals `errorClass` when present; otherwise a small lowercase token (`"error"`, `"invalid_spec"`, `"worker_error"`, …) the SDK can switch on.                                                                                                                |
+| `errorClass`       | string       | no       | Canonical category. One of `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"` (input too big), `"truncation"` (output budget exhausted), `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, `"unknown"`. New categories may land additively. |
+| `finishReason`     | string\|null | no       | Canonical lowercase stop reason normalized across providers (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). When present, mirrors the value on the last `assistant_message`.                                                                                                 |
+| `partialText`      | string       | no       | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is likely **incomplete JSON** that will fail `JSON.parse` — see §7 below. Also persisted on `EphemeralAgentRun.finalText` so the Calls UI can render it alongside a truncation banner.         |
+| `retryable`        | boolean      | no       | Coarse retry hint inherited from the pipeline's error classifier. Informational; the SDK still owns the actual retry decision.                                                                                                                                                              |
+| `apiStatus`        | integer      | no       | HTTP status returned by the model provider, when available. Preserved on structured-output schema rejection and other classified provider errors.                                                                                                                                           |
+| `apiCode`          | string       | no       | Provider-specific error code, when available. This is distinct from MANTYX's canonical `code` / `errorClass`.                                                                                                                                                                               |
+| `structuredOutput` | object       | yes      | Actual structured-output execution state described below. New servers include it on terminal `result` and `error` events; SDKs treat omission as a legacy-server response.                                                                                                                  |
+
+**`structuredOutput` execution metadata.** This block describes what the
+runtime actually did, not merely what appeared in the request:
+
+| Field                           | Type    | Notes                                                                                                                                               |
+| ------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaRequested`               | boolean | `true` when the resolved run spec carried `outputSchema`.                                                                                           |
+| `schemaEnforced`                | boolean | `true` only when the successful provider call used a native schema, or the runtime captured the required synthetic final-result tool.               |
+| `enforcementMechanism`          | string  | `"native_schema"`, `"synthetic_tool"`, or `"none"`. On a rejection it records the attempted mechanism; after unconstrained fallback it is `"none"`. |
+| `unconstrainedFallbackOccurred` | boolean | Run-level flag: `true` when any provider call retried or completed without the requested schema. Always `false` in strict mode.                     |
+
+Without `outputSchema`, new servers emit
+`{ schemaRequested: false, schemaEnforced: false, enforcementMechanism:
+"none", unconstrainedFallbackOccurred: false }`.
+
+`errorClass: "rate_limit"` specifically means the model provider throttled an
+LLM request. The agent pipeline retries that provider failure before emitting a
+terminal event. It is not the MANTYX Developer API HTTP limiter, which rejects
+an incoming request immediately with HTTP 429 and
+`code: "rate_limit_exceeded"` plus `Retry-After`.
 
 When `errorClass` is `"truncation"`, the `EphemeralAgentRun` row that the
 SDK can re-fetch via `GET /agent-runs/:runId` will have:
@@ -892,7 +971,7 @@ non-breaking since those return types were already objects).
                        { "title": "Summarize the top drivers", "status": "pending" } ] } }
 ```
 
-| Field   | Type   | Notes                                                                                                   |
+| Field   | Type   | Notes                                                                                                 |
 | ------- | ------ | ----------------------------------------------------------------------------------------------------- |
 | `brief` | string | Optional one-line summary of the overall objective.                                                   |
 | `steps` | array  | Ordered checklist. Each `{ title, status }` where `status` is `"pending" \| "in_progress" \| "done"`. |
@@ -925,11 +1004,11 @@ Authorization: Bearer <api-key>
 }
 ```
 
-| Field       | Type   | Required | Notes                                                                                                                          |
-| ----------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `toolUseId` | string | yes      | Must match a pending `local_tool_call`'s id.                                                                                   |
-| `result`    | string | one-of   | Successful textual result (≤ 2 MB). For MCP tools, flatten content blocks to text. For A2A delegations, the peer's reply text. |
-| `error`     | string | one-of   | Human-readable failure message (≤ 8 KB). Surfaced to the model so it can recover.                                              |
+| Field       | Type   | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `toolUseId` | string | yes      | Must match a pending `local_tool_call`'s id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `result`    | string | one-of   | Successful textual result (≤ 2 MB). For MCP tools, flatten content blocks to text. For A2A delegations, the peer's reply text.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `error`     | string | one-of   | Human-readable failure message (≤ 8 KB). Surfaced to the model so it can recover.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `files`     | array  | no       | Files the client-resolved tool produced, surfaced to the model on the next turn as native file parts (Anthropic / Gemini / Bedrock inside `tool_result`; OpenAI as a synthetic follow-up user turn). Each entry is `{ filename, mimeType, data }` with `data` base64 (no data-URL prefix). Only honored alongside `result`; ignored when `error` is set. `mimeType` must be an allowed attachment type. Up to 20 files; combined decoded bytes are capped (currently 5 MB), and large files are persisted to object storage and forwarded by reference. For bigger artifacts, upload out of band and reference a URL in `result`. |
 
 Server response codes:
@@ -975,22 +1054,41 @@ will include `thinking_delta` events alongside `assistant_delta`.
 
 ## 7. `outputSchema` (structured final reply)
 
-`outputSchema` constrains the final assistant message to a JSON document
-conforming to a JSON Schema. When set, the run's terminal `result` event
-still carries the reply as `data.text: string`, but that string is
-guaranteed-parseable JSON matching the supplied schema.
+`outputSchema` asks the provider to constrain the final assistant message to a
+JSON document conforming to a JSON Schema. The terminal `result` event still
+carries the reply as `data.text: string`. Use `enforcement: "strict"` when a
+caller must fail instead of accepting a provider rejection, an unsupported
+provider, or an unconstrained result.
 
 ```jsonc
 "outputSchema": {
   "name":   "weather_report",          // optional; default "output"; /^[a-zA-Z0-9_-]{1,64}$/
-  "schema": { /* JSON Schema */ }      // required, root must be a JSON object
+  "schema": { /* JSON Schema */ },     // required, root must be a JSON object
+  "enforcement": "strict"              // optional; default "best_effort"
 }
 ```
 
-| Field    | Type   | Required | Notes                                                                                                                                                                                                         |
-| -------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`   | string | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`.                                                                                     |
-| `schema` | object | yes      | JSON Schema for the assistant text. Root must be a JSON object — most providers reject array/scalar roots in structured-output mode. Passed through verbatim; MANTYX does not validate the schema's contents. |
+| Field         | Type   | Required | Notes                                                                                                                                                                                                         |
+| ------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`        | string | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`.                                                                                     |
+| `schema`      | object | yes      | JSON Schema for the assistant text. Root must be a JSON object — most providers reject array/scalar roots in structured-output mode. Passed through verbatim; MANTYX does not validate the schema's contents. |
+| `enforcement` | string | no       | `"best_effort"` (default) preserves the historical fallback behavior. `"strict"` requires actual enforcement and forbids an unconstrained retry.                                                              |
+
+**Enforcement modes:**
+
+- `best_effort` is the backward-compatible default. When OpenAI or Gemini
+  rejects the schema request, MANTYX may memoize that incompatibility and retry
+  without the schema. The run may still succeed; inspect
+  `structuredOutput.schemaEnforced` and
+  `unconstrainedFallbackOccurred` before treating it as provider compatibility.
+- `strict` never retries without the schema, never consults or writes the
+  best-effort unsupported-schema memo, and never silently ignores the schema.
+  Provider rejection terminates with
+  `errorClass: "structured_output_schema_rejected"` while preserving
+  `apiStatus`, `apiCode`, and the provider message. A provider/model with no
+  enforcement path fails as `structured_output_not_supported`; bypassing a
+  required synthetic final-result tool fails as
+  `structured_output_not_enforced`.
 
 Per provider:
 
@@ -1001,12 +1099,22 @@ Per provider:
 | Gemini ≤ 2.5 with no tools              | Same as Gemini 3+: `responseMimeType: "application/json"` + `responseJsonSchema`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Gemini ≤ 2.5 **with tools**             | Synthetic `set_model_response` function declaration is injected; its `parametersJsonSchema` is the supplied schema. The system instruction is augmented to direct the model to call this tool with the final answer. The engine intercepts the call, hides it from the SDK, and surfaces the call's arguments as the assistant text (JSON-stringified). Sidesteps the API rejection ("Function calling with a response mime type: 'application/json' is unsupported") without round-tripping a 4xx. |
 | Anthropic / Bedrock-Anthropic           | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text.                                                                                                                                                                                                                                                                                                              |
-| xAI Grok, others                        | Ignored — the model returns plain text.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| xAI Grok, others                        | Best effort may return plain text and reports `enforcementMechanism: "none"`. Strict mode fails explicitly instead of calling this a schema-enforced success.                                                                                                                                                                                                                                                                                                                                       |
 
 The synthetic-tool paths (Gemini 2.5 + tools, Anthropic) are entirely
 internal: the SDK still receives `data.text: string` on the terminal
 `result` event and never sees a `local_tool_call` for `set_model_response`
 or `final_report`. They never appear in the tools array the SDK declared.
+
+Every terminal `result` and `error` includes the `structuredOutput` block from
+§4.8. A strict compatibility test succeeds only when `schemaRequested` and
+`schemaEnforced` are both `true`,
+`unconstrainedFallbackOccurred` is `false`, and the mechanism is the expected
+provider path.
+
+`plan: { planOnly: true }` does not execute the agent loop and therefore cannot
+enforce a run-level output schema. Combining it with strict enforcement
+terminates explicitly as `structured_output_not_supported`.
 
 Validation (server-side, `400 invalid_request` on violation):
 
@@ -1137,10 +1245,9 @@ entries are layered on top so per-run overrides win):
 | ---------------------------------------------------------------------------------------- | ------------------ |
 | `recall` (workspace memory hybrid search)                                                | `4`                |
 | `traverse` (memory graph BFS)                                                            | `3`                |
-| `hive_consult_ontology` (per-hive ontology read; same name across all three hives)       | `4`                |
+| `hive_consult_ontology` (per-hive ontology read; same name across both active hives)     | `4`                |
 | `hive_search_deals` / `_meetings` / `_companies` / `_people` (Sales Hive general search) | `5`                |
 | `hive_search_tickets` / `_conversations` / `_accounts` (Customer Hive general search)    | `5`                |
-| `hive_search_releases` / `_issues` (Product Hive general search)                         | `5`                |
 
 Pass `"toolBudgets": {}` to start from a clean slate (no defaults applied
 on top — useful for runs that intentionally want unbounded research). When
@@ -1173,18 +1280,18 @@ An optional LLM **run supervisor** periodically reviews the agent's
 transcript (reasoning, tool calls, tool results, visible text) and may
 steer the run:
 
-| Verdict     | Server action                                                                                                                                      |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `on_track`  | No-op — the run continues unchanged.                                                                                                               |
-| `redirect`  | A steering **user message** is injected; tools stay available on the next turn.                                                                    |
-| `finalize`  | The next turn is forced **tools-disabled** so the run lands a clean final answer (optionally prefaced by the supervisor's message).                |
+| Verdict    | Server action                                                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `on_track` | No-op — the run continues unchanged.                                                                                                |
+| `redirect` | A steering **user message** is injected; tools stay available on the next turn.                                                     |
+| `finalize` | The next turn is forced **tools-disabled** so the run lands a clean final answer (optionally prefaced by the supervisor's message). |
 
 Reviews fire on two triggers:
 
 - **Cadence** — every **`interval` LLM calls** (`completeTurn` invocations),
   measured at the bottom of tool-emitting rounds (`phase: "turn_boundary"`).
   Default interval is **5** when the field is omitted.
-- **Mid-turn reasoning** — while a *single* turn is still streaming reasoning,
+- **Mid-turn reasoning** — while a _single_ turn is still streaming reasoning,
   once the current reasoning span crosses **3000 characters or 30s** (whichever
   first), a `phase: "reasoning"` review runs on the in-progress reasoning. A
   `redirect` / `finalize` verdict **aborts the in-flight turn** and steers the
@@ -1209,13 +1316,13 @@ Reviews fire on two triggers:
 "supervisor": false   // explicitly disable (same as omitting the field)
 ```
 
-| Field      | Type            | Notes                                                                                                                              |
-| ---------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| (literal `true`) | `true`    | Enables the run supervisor with platform defaults (`interval` 5, reasoning trigger 3000 chars / 30s, workspace judge model).        |
-| `interval` | integer ≥ 1     | Optional. Default **5** when omitted. Capped at **100** server-side.                                                                |
-| `modelId`  | string          | Optional. Same selector grammar as top-level `modelId` (§2). When omitted, the platform resolves the judge model from the workspace default supervisor model, then the workspace default model. |
-| `reasoningTrigger` | `false` \| `{ chars?, ms? }` | Optional. Mid-turn reasoning trigger. Defaults to `{ chars: 3000, ms: 30000 }`. `chars` capped at 50000, `ms` at 600000. Pass `false` to only review at tool-round boundaries. |
-| (literal `false`) | `false`  | Disables the run supervisor for this run. Loop detection and tool budgets still apply.                                             |
+| Field              | Type                         | Notes                                                                                                                                                                                           |
+| ------------------ | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| (literal `true`)   | `true`                       | Enables the run supervisor with platform defaults (`interval` 5, reasoning trigger 3000 chars / 30s, workspace judge model).                                                                    |
+| `interval`         | integer ≥ 1                  | Optional. Default **5** when omitted. Capped at **100** server-side.                                                                                                                            |
+| `modelId`          | string                       | Optional. Same selector grammar as top-level `modelId` (§2). When omitted, the platform resolves the judge model from the workspace default supervisor model, then the workspace default model. |
+| `reasoningTrigger` | `false` \| `{ chars?, ms? }` | Optional. Mid-turn reasoning trigger. Defaults to `{ chars: 3000, ms: 30000 }`. `chars` capped at 50000, `ms` at 600000. Pass `false` to only review at tool-round boundaries.                  |
+| (literal `false`)  | `false`                      | Disables the run supervisor for this run. Loop detection and tool budgets still apply.                                                                                                          |
 
 **Model resolution.** When the supervisor is enabled, the judge model is chosen in order:
 
@@ -1259,31 +1366,43 @@ features add extra LLM calls.
 "plan": false       // (or omit) no planning — a plain run
 ```
 
-| Form                              | Behavior                                                                                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| omitted / `false`                 | No planning. Default.                                                                                                                              |
-| `true`                            | Pre-flight classifier decides whether a multi-step plan is warranted. If so, a `task_plan` event is emitted, the checklist is injected into the user turn, and step statuses are tracked (advancing on tool activity and on each supervisor review) until the run ends. If the classifier declines, the run proceeds normally with no plan. |
-| `{ steps, brief? }`               | Caller-provided checklist used verbatim — **skips** the classifier (and its `MIN_STEPS` gate). Injected + tracked like the auto case.               |
-| `{ planOnly: true, steps? }`      | Produce the plan (classifier when `steps` omitted, otherwise the provided checklist) and **terminate without executing the agent loop**.            |
+| Form                         | Behavior                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| omitted / `false`            | No planning. Default.                                                                                                                                                                                                                                                                                                                       |
+| `true`                       | Pre-flight classifier decides whether a multi-step plan is warranted. If so, a `task_plan` event is emitted, the checklist is injected into the user turn, and step statuses are tracked (advancing on tool activity and on each supervisor review) until the run ends. If the classifier declines, the run proceeds normally with no plan. |
+| `{ steps, brief? }`          | Caller-provided checklist used verbatim — **skips** the classifier (and its `MIN_STEPS` gate). Injected + tracked like the auto case.                                                                                                                                                                                                       |
+| `{ planOnly: true, steps? }` | Produce the plan (classifier when `steps` omitted, otherwise the provided checklist) and **terminate without executing the agent loop**.                                                                                                                                                                                                    |
 
-| Field      | Type     | Notes                                                                                                                  |
-| ---------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
-| `planOnly` | boolean  | Optional. When `true`, the run stops after producing the plan; the terminal `result` carries it under `data.plan`.    |
-| `brief`    | string   | Optional one-line objective for a caller-provided plan. Clamped server-side.                                         |
-| `steps`    | string[] | Optional caller-provided checklist titles. Empty/omitted ⇒ auto-classify. Count and per-step length clamped server-side. |
-| (literal `true`)  | `true`  | Auto pre-flight classifier + live tracking.                                                                  |
+| Field            | Type     | Notes                                                                                                                    |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `planOnly`       | boolean  | Optional. When `true`, the run stops after producing the plan; the terminal `result` carries it under `data.plan`.       |
+| `brief`          | string   | Optional one-line objective for a caller-provided plan. Clamped server-side.                                             |
+| `steps`          | string[] | Optional caller-provided checklist titles. Empty/omitted ⇒ auto-classify. Count and per-step length clamped server-side. |
+| (literal `true`) | `true`   | Auto pre-flight classifier + live tracking.                                                                              |
 
 **Plan-only terminal shape.** A `planOnly` run terminates with the normal
 terminal `result` event (§4.8), plus a structured `plan`:
 
 ```jsonc
-{ "seq": 5, "type": "result",
-  "data": { "subtype": "success",
-            "text": "Migrate the billing tables and backfill\n\n1. Snapshot current schema\n2. Apply migration\n3. Backfill rows\n4. Verify counts",
-            "plan": { "brief": "Migrate the billing tables and backfill",
-                      "steps": [ { "title": "Snapshot current schema", "status": "pending" }, /* … */ ] },
-            "tokens": { /* zeroed — classifier usage is metered separately */ },
-            "turns": 0, "model": { "id": "…", "provider": "…", "vendorModelId": "…" } } }
+{
+  "seq": 5,
+  "type": "result",
+  "data": {
+    "subtype": "success",
+    "text": "Migrate the billing tables and backfill\n\n1. Snapshot current schema\n2. Apply migration\n3. Backfill rows\n4. Verify counts",
+    "plan": {
+      "brief": "Migrate the billing tables and backfill",
+      "steps": [
+        { "title": "Snapshot current schema", "status": "pending" } /* … */,
+      ],
+    },
+    "tokens": {
+      /* zeroed — classifier usage is metered separately */
+    },
+    "turns": 0,
+    "model": { "id": "…", "provider": "…", "vendorModelId": "…" },
+  },
+}
 ```
 
 When the classifier declines in plan-only mode, `data.plan.steps` is `[]` and

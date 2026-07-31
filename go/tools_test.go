@@ -489,6 +489,35 @@ func TestOutputSchema_ForwardedOnRun(t *testing.T) {
 		!strings.Contains(string(server.lastRunCreateBody), `"temperature_c"`) {
 		t.Fatalf("expected outputSchema in body: %s", server.lastRunCreateBody)
 	}
+	if strings.Contains(string(server.lastRunCreateBody), `"enforcement"`) {
+		t.Fatalf("expected omitted enforcement to preserve default behavior: %s", server.lastRunCreateBody)
+	}
+}
+
+func TestOutputSchema_StrictEnforcementForwarded(t *testing.T) {
+	server := newMockServer()
+	defer server.close()
+	server.scriptForNextRun = &runScript{
+		events: []scriptEvent{{kind: "result", data: map[string]any{"subtype": "success", "text": "{}"}}},
+	}
+	client := NewClient(Options{APIKey: "k", WorkspaceSlug: "demo", BaseURL: server.baseURL()})
+	if _, err := client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x",
+		Prompt:       "y",
+		OutputSchema: &OutputSchema{
+			Name:        "weather_report",
+			Schema:      weatherSchema(),
+			Enforcement: OutputSchemaEnforcementStrict,
+		},
+	}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if !strings.Contains(
+		string(server.lastRunCreateBody),
+		`"enforcement":"strict"`,
+	) {
+		t.Fatalf("expected strict enforcement in body: %s", server.lastRunCreateBody)
+	}
 }
 
 func TestOutputSchema_OmittedWhenNil(t *testing.T) {
@@ -527,6 +556,18 @@ func TestOutputSchema_LocalValidationRejectsBadShape(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error for nil Schema")
+	}
+
+	// Unknown enforcement.
+	_, err = client.RunAgent(context.Background(), RunSpec{
+		SystemPrompt: "x", Prompt: "y",
+		OutputSchema: &OutputSchema{
+			Schema:      weatherSchema(),
+			Enforcement: OutputSchemaEnforcement("invalid"),
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected error for invalid enforcement")
 	}
 }
 

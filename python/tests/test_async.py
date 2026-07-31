@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from mantyx import (
     AsyncMantyxClient,
+    MantyxRunError,
     define_local_a2a,
     define_local_mcp,
     define_local_tool,
@@ -237,6 +238,12 @@ async def test_async_run_agent_surfaces_cost_attribution(
                         "vendorModelId": "gpt-test",
                         "reasoningEffort": "high",
                     },
+                    "structuredOutput": {
+                        "schemaRequested": True,
+                        "schemaEnforced": True,
+                        "enforcementMechanism": "synthetic_tool",
+                        "unconstrainedFallbackOccurred": False,
+                    },
                 },
             )
         ]
@@ -249,6 +256,39 @@ async def test_async_run_agent_surfaces_cost_attribution(
     assert result.model is not None
     assert result.model.provider == "openai"
     assert result.model.reasoning_effort == "high"
+    assert result.structured_output is not None
+    assert result.structured_output.enforcement_mechanism == "synthetic_tool"
+
+
+@pytest.mark.asyncio
+async def test_async_run_agent_preserves_structured_output_provider_error(
+    async_mantyx_client: AsyncMantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="error",
+                data={
+                    "error": "Provider does not support strict schema output.",
+                    "errorClass": "structured_output_not_supported",
+                    "apiStatus": 400,
+                    "apiCode": "unsupported_response_format",
+                    "structuredOutput": {
+                        "schemaRequested": True,
+                        "schemaEnforced": False,
+                        "enforcementMechanism": "none",
+                        "unconstrainedFallbackOccurred": False,
+                    },
+                },
+            )
+        ]
+    )
+    with pytest.raises(MantyxRunError) as exc:
+        await async_mantyx_client.run_agent(system_prompt="x", prompt="y")
+    assert exc.value.message == "Provider does not support strict schema output."
+    assert exc.value.api_status == 400
+    assert exc.value.api_code == "unsupported_response_format"
+    assert exc.value.structured_output is not None
 
 
 @pytest.mark.asyncio

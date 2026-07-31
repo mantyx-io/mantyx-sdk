@@ -24,15 +24,15 @@ but is not editable from the dashboard.
 **Tool refs.** Seven flavours, all carried inside the agent spec's `tools`
 array:
 
-| `kind`          | Resolved by | Notes                                                                                                                                                                                                                                       |
-| --------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mantyx`        | server      | A workspace `Tool` row referenced by id (HTTP / Code / Plugin).                                                                                                                                                                             |
-| `mantyx_plugin` | server      | A platform plugin tool referenced by name.                                                                                                                                                                                                  |
-| `local`         | client      | A custom tool defined and executed in the SDK's process. Carries `parameters` (input JSON Schema) plus optional `outputSchema` (return-value JSON Schema), `longRunning`, `readOnly` (parallel-batch), and `retain` (cross-turn replay) flags — see §4.1.1.                                              |
-| `a2a`           | server      | A _remote_ Agent2Agent peer MANTYX can reach; invoked via `message/send` and the reply is surfaced as the tool result.                                                                                                                      |
-| `a2a_local`     | client      | An A2A peer MANTYX **cannot** reach. SDK resolves the [Agent Card](https://google.github.io/A2A/specification/#agent-card) locally and ships it inline; MANTYX uses it for the model description and routes calls back to the SDK over SSE. |
-| `mcp`           | server      | A _remote_ MCP server (Streamable HTTP). At run start MANTYX lists the catalog and exposes every tool as `<server>_<tool>` (subject to `toolFilter`).                                                                                       |
-| `mcp_local`     | client      | An MCP server MANTYX **cannot** reach. SDK runs `Initialize` + `tools/list` locally and ships the resolved `Tool[]` (with `inputSchema`); MANTYX exposes them to the model with the SDK-declared names and routes calls back over SSE.      |
+| `kind`          | Resolved by | Notes                                                                                                                                                                                                                                                       |
+| --------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mantyx`        | server      | A workspace `Tool` row referenced by id (HTTP / Code / Plugin).                                                                                                                                                                                             |
+| `mantyx_plugin` | server      | A platform plugin tool referenced by name.                                                                                                                                                                                                                  |
+| `local`         | client      | A custom tool defined and executed in the SDK's process. Carries `parameters` (input JSON Schema) plus optional `outputSchema` (return-value JSON Schema), `longRunning`, `readOnly` (parallel-batch), and `retain` (cross-turn replay) flags — see §4.1.1. |
+| `a2a`           | server      | A _remote_ Agent2Agent peer MANTYX can reach; invoked via `message/send` and the reply is surfaced as the tool result.                                                                                                                                      |
+| `a2a_local`     | client      | An A2A peer MANTYX **cannot** reach. SDK resolves the [Agent Card](https://google.github.io/A2A/specification/#agent-card) locally and ships it inline; MANTYX uses it for the model description and routes calls back to the SDK over SSE.                 |
+| `mcp`           | server      | A _remote_ MCP server (Streamable HTTP). At run start MANTYX lists the catalog and exposes every tool as `<server>_<tool>` (subject to `toolFilter`).                                                                                                       |
+| `mcp_local`     | client      | An MCP server MANTYX **cannot** reach. SDK runs `Initialize` + `tools/list` locally and ships the resolved `Tool[]` (with `inputSchema`); MANTYX exposes them to the model with the SDK-declared names and routes calls back over SSE.                      |
 
 The split is deliberate:
 
@@ -352,6 +352,7 @@ The agent spec is the body shape used by `POST /agent-runs` and `POST
   "outputSchema": {
     // optional, see §4.5
     "name": "weather_report",
+    "enforcement": "strict",
     "schema": {
       "type": "object",
       "properties": {
@@ -407,11 +408,20 @@ append to the session).
       "role": "user",
       "content": "What's in this file?",
       "attachments": [
-        { "type": "input_file", "mimeType": "application/pdf", "filename": "report.pdf", "data": "<base64>" },
-        { "type": "input_file_url", "url": "https://example.com/image.png", "mimeType": "image/png" }
-      ]
-    }
-  ]
+        {
+          "type": "input_file",
+          "mimeType": "application/pdf",
+          "filename": "report.pdf",
+          "data": "<base64>",
+        },
+        {
+          "type": "input_file_url",
+          "url": "https://example.com/image.png",
+          "mimeType": "image/png",
+        },
+      ],
+    },
+  ],
 }
 ```
 
@@ -428,10 +438,10 @@ Rules:
 
 **File attachments** (`attachments` on the last `user` message, max 20):
 
-| `type`            | Fields                                              | Notes                                                                                     |
-| ----------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `input_file`      | `mimeType`, `filename`, `data` (base64, no data-URL prefix) | Inline bytes. Total inline bytes per run are capped (currently 5 MB); larger files must use a URL. |
-| `input_file_url`  | `url` (https only), `mimeType?`, `filename?`        | Publicly fetchable HTTPS URL. The provider fetches it directly.                            |
+| `type`           | Fields                                                      | Notes                                                                                              |
+| ---------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `input_file`     | `mimeType`, `filename`, `data` (base64, no data-URL prefix) | Inline bytes. Total inline bytes per run are capped (currently 5 MB); larger files must use a URL. |
+| `input_file_url` | `url` (https only), `mimeType?`, `filename?`                | Publicly fetchable HTTPS URL. The provider fetches it directly.                                    |
 
 Allowed MIME types match the workspace chat allowlist:
 
@@ -483,15 +493,15 @@ the handler in its own process. MANTYX never executes the body — it
 emits a `local_tool_call` event when the model picks the tool and waits
 for the SDK to POST a tool-result.
 
-| Field          | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `kind`         | yes      | Discriminator literal `"local"`.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `name`         | yes      | Model-facing tool name. Must match `/^[a-zA-Z0-9_]{1,64}$/`.                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `description`  | no       | Free-form. Empty when omitted (acceptable, but reduces tool-selection accuracy).                                                                                                                                                                                                                                                                                                                                                                                              |
-| `parameters`   | no       | JSON Schema for the tool's input. Must be a `type: "object"` schema with `properties`; non-object roots are coerced to an empty object schema server-side. Forwarded **verbatim** to the LLM provider so nested constraints (`array.items`, `enum`, `anyOf`, numeric formats, …) survive. Args that fail server-side validation produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the call.                                |
-| `outputSchema` | no       | JSON Schema for the structured value the tool returns. When present, forwarded to providers that accept per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. Helps the model emit follow-up arguments that round-trip cleanly. Must be an object schema; non-object roots are dropped server-side.                                                        |
-| `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the model-facing description so every provider treats the tool as long-running:<br>_"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."_<br>Useful for tools that return `pending` and rely on SDK-side polling — without the hint the model routinely fires repeat calls and burns turns. Pure declarative — MANTYX does not change scheduling. |
-| `readOnly`     | no       | When `true`, the tool may run **in parallel** with other read-only tools the model emits in the same turn — MANTYX publishes every such `local_tool_call` concurrently and resolves them together, instead of one-at-a-time in model-emit order. Set this only for side-effect-free tools whose results don't depend on each other, and make sure your SDK can service several outstanding `local_tool_call` events at once (each carries its own `toolUseId`; post a tool-result per id in any order). Mutating tools (the default, `false`) stay strictly sequential. |
+| Field          | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`         | yes      | Discriminator literal `"local"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `name`         | yes      | Model-facing tool name. Must match `/^[a-zA-Z0-9_]{1,64}$/`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `description`  | no       | Free-form. Empty when omitted (acceptable, but reduces tool-selection accuracy).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `parameters`   | no       | JSON Schema for the tool's input. Must be a `type: "object"` schema with `properties`; non-object roots are coerced to an empty object schema server-side. Forwarded **verbatim** to the LLM provider so nested constraints (`array.items`, `enum`, `anyOf`, numeric formats, …) survive. Args that fail server-side validation produce a structured `tool_input_invalid` tool result the model can recover from instead of crashing the call.                                                                                                                                                                                                        |
+| `outputSchema` | no       | JSON Schema for the structured value the tool returns. When present, forwarded to providers that accept per-tool response schemas (Gemini's `responseJsonSchema` on the FunctionDeclaration); other engines surface it through the description and rely on host-side validation. Helps the model emit follow-up arguments that round-trip cleanly. Must be an object schema; non-object roots are dropped server-side.                                                                                                                                                                                                                                |
+| `longRunning`  | no       | When `true`, MANTYX appends a stable hint to the model-facing description so every provider treats the tool as long-running:<br>_"NOTE: This is a long-running operation. Do not call this tool again if it has already returned an intermediate or pending status."_<br>Useful for tools that return `pending` and rely on SDK-side polling — without the hint the model routinely fires repeat calls and burns turns. Pure declarative — MANTYX does not change scheduling.                                                                                                                                                                         |
+| `readOnly`     | no       | When `true`, the tool may run **in parallel** with other read-only tools the model emits in the same turn — MANTYX publishes every such `local_tool_call` concurrently and resolves them together, instead of one-at-a-time in model-emit order. Set this only for side-effect-free tools whose results don't depend on each other, and make sure your SDK can service several outstanding `local_tool_call` events at once (each carries its own `toolUseId`; post a tool-result per id in any order). Mutating tools (the default, `false`) stay strictly sequential.                                                                               |
 | `retain`       | no       | When `true`, the tool's result is **persisted with the session and replayed to the model on later turns** of the same session — reconstructed as a `tool_use` + `tool_result` pair in its original place in the transcript. Ordinary tool results only live for the current run (session history keeps user/assistant text only); a retained result survives so a follow-up turn can reference a value it can no longer recompute (a freshly minted id, a one-shot lookup, etc.). Only meaningful for **session-scoped** runs. Keep outputs small — they are stored verbatim (text only; file parts dropped) and capped (~8 KB). Defaults to `false`. |
 
 The `outputSchema`, `longRunning`, `readOnly`, and `retain` fields are
@@ -709,6 +719,15 @@ provider:
 - **Anthropic / Bedrock-Anthropic** — extended thinking with a budget that
   scales with strength (≈512 tokens at `low` → ≈8000 at `high`).
 
+For direct OpenAI reasoning runs, MANTYX keeps `store: false` and carries the
+Responses API's encrypted reasoning items across tool turns. Long-running
+OpenAI contexts can additionally use provider-native compaction, which replaces
+the earlier in-run prefix with an opaque retained-context item instead of
+silently dropping it. These opaque items survive HITL and shutdown checkpoints,
+but are intentionally not persisted into the next separate user chat message.
+OpenRouter, Grok, and generic OpenAI-compatible providers do not receive these
+OpenAI-specific request fields.
+
 Two equivalent input shapes are accepted:
 
 | Form       | Values                                 | Notes                                                                                                                 |
@@ -744,14 +763,27 @@ reply directly into downstream code without LLM-flavoured prose to parse out.
       "temperature_c": { "type": "number" }
     },
     "required": ["city", "temperature_c"]
-  }
+  },
+  "enforcement": "strict"           // optional; default "best_effort"
 }
 ```
 
-| Field    | Required | Notes                                                                                                                                                                                                                                                     |
-| -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`   | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`. Must match `/^[a-zA-Z0-9_-]{1,64}$/`.                                                                                           |
-| `schema` | yes      | JSON Schema describing the final assistant text. Root must be a JSON **object** (most providers reject array / scalar roots in structured-output mode). The schema is passed through verbatim — MANTYX does not validate its contents; the provider does. |
+| Field         | Required | Notes                                                                                                                                                                                                                                                     |
+| ------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`        | no       | Stable identifier passed to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`. Must match `/^[a-zA-Z0-9_-]{1,64}$/`.                                                                                           |
+| `schema`      | yes      | JSON Schema describing the final assistant text. Root must be a JSON **object** (most providers reject array / scalar roots in structured-output mode). The schema is passed through verbatim — MANTYX does not validate its contents; the provider does. |
+| `enforcement` | no       | `"best_effort"` (default) preserves the historical provider-rejection fallback. `"strict"` forbids unconstrained fallback and requires evidence that a provider-native schema or synthetic final-result tool was actually used.                           |
+
+`best_effort` is deliberately the default for backward compatibility. OpenAI
+or Gemini schema rejection may be memoized and retried without the schema; the
+terminal event reports that outcome rather than presenting it as enforcement.
+`strict` never consults or writes that memo and never retries without the
+schema. Provider rejection fails with
+`errorClass: "structured_output_schema_rejected"` and preserves the provider's
+message plus `apiStatus` / `apiCode` when available. An unsupported
+provider/model fails as `structured_output_not_supported`; a final response
+that bypasses its required synthetic tool fails as
+`structured_output_not_enforced`.
 
 Validation (server-side, `400 invalid_request` on violation):
 
@@ -770,7 +802,7 @@ Validation (server-side, `400 invalid_request` on violation):
 | Gemini ≤ 2.5 (no-tools turn)            | `responseMimeType: "application/json"` + `responseJsonSchema`.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Gemini ≤ 2.5 (with tools)               | Synthetic `set_model_response` function declaration is injected; its `parametersJsonSchema` is the supplied schema. The system instruction is augmented to direct the model to call this tool with the final answer. The engine intercepts the call, hides it from the SDK, and surfaces the call's arguments as the assistant text (JSON-stringified). Sidesteps the API rejection ("Function calling with a response mime type: 'application/json' is unsupported") without round-tripping a 4xx. |
 | Anthropic / Bedrock-Anthropic           | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text.                                                                                                                                                                                                                                                                                                              |
-| xAI Grok, others                        | Ignored (the model returns plain text).                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| xAI Grok, others                        | Best effort may return plain text and reports no enforcement. Strict mode fails explicitly instead of returning an unconstrained success.                                                                                                                                                                                                                                                                                                                                                           |
 
 The synthetic-tool paths (Gemini 2.5 + tools, Anthropic) are entirely
 internal: the SDK never receives a `local_tool_call` for
@@ -782,6 +814,31 @@ The terminal `result` event still carries the reply as
 `data.text: string` — the SDK is expected to `JSON.parse` and validate
 against its own source-of-truth schema (Zod, Pydantic, …) so it keeps
 control of error handling on malformed-but-rare provider outputs.
+
+Every terminal `result` and `error` from a new server also carries actual
+execution metadata:
+
+```json
+{
+  "structuredOutput": {
+    "schemaRequested": true,
+    "schemaEnforced": true,
+    "enforcementMechanism": "native_schema",
+    "unconstrainedFallbackOccurred": false
+  }
+}
+```
+
+`enforcementMechanism` is `"native_schema"`, `"synthetic_tool"`, or `"none"`.
+`unconstrainedFallbackOccurred` is run-level and remains `true` if any provider
+call in the run fell back without the requested schema.
+SDK result/error fields are optional so they remain compatible with older
+servers. A strict compatibility test should require `schemaEnforced: true` and
+`unconstrainedFallbackOccurred: false`.
+
+`plan: { planOnly: true }` skips the agent execution loop, so it cannot enforce
+a run-level output schema. Combining plan-only execution with strict
+enforcement terminates as `structured_output_not_supported`.
 
 **Inheritance for sessions:**
 
@@ -896,10 +953,9 @@ default research-tool surface is:
 | ---------------------------------------------------------------------------------------- | ------------------ |
 | `recall` (workspace memory hybrid search)                                                | `4`                |
 | `traverse` (memory graph BFS)                                                            | `3`                |
-| `hive_consult_ontology` (per-hive ontology read; same name across all three hives)       | `4`                |
+| `hive_consult_ontology` (per-hive ontology read; same name across both active hives)     | `4`                |
 | `hive_search_deals` / `_meetings` / `_companies` / `_people` (Sales Hive general search) | `5`                |
 | `hive_search_tickets` / `_conversations` / `_accounts` (Customer Hive general search)    | `5`                |
-| `hive_search_releases` / `_issues` (Product Hive general search)                         | `5`                |
 
 Pass `"toolBudgets": {}` to start from a clean slate (no defaults applied
 on top — useful for runs that intentionally want unbounded research). When
@@ -963,13 +1019,13 @@ Reviews fire on two triggers:
 "supervisor": false   // explicitly disable (same as omitting the field)
 ```
 
-| Field             | Type            | Required | Notes                                                                                                                        |
-| ----------------- | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| (literal `true`)  | `true`          | no       | Enables the run supervisor with platform defaults (`interval` 5, reasoning trigger 3000 chars / 30s, workspace judge model).   |
-| `interval`        | integer ≥ 1     | no       | Defaults to **5** when the supervisor is enabled and `interval` is omitted. Capped at **100** server-side.                   |
-| `modelId`         | string          | no       | Judge model selector (same grammar as `modelId`). Falls back to workspace `defaultSupervisorModelId`, then workspace default model. |
-| `reasoningTrigger` | `false` \| `{ chars?, ms? }` | no | Mid-turn reasoning trigger. Defaults to `{ chars: 3000, ms: 30000 }`. `chars` capped at 50000, `ms` at 600000. Pass `false` to only review at tool-round boundaries. |
-| (literal `false`) | `false`         | no       | Disables the run supervisor for this run. `loopDetection` and `toolBudgets` still apply.                                       |
+| Field              | Type                         | Required | Notes                                                                                                                                                                |
+| ------------------ | ---------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| (literal `true`)   | `true`                       | no       | Enables the run supervisor with platform defaults (`interval` 5, reasoning trigger 3000 chars / 30s, workspace judge model).                                         |
+| `interval`         | integer ≥ 1                  | no       | Defaults to **5** when the supervisor is enabled and `interval` is omitted. Capped at **100** server-side.                                                           |
+| `modelId`          | string                       | no       | Judge model selector (same grammar as `modelId`). Falls back to workspace `defaultSupervisorModelId`, then workspace default model.                                  |
+| `reasoningTrigger` | `false` \| `{ chars?, ms? }` | no       | Mid-turn reasoning trigger. Defaults to `{ chars: 3000, ms: 30000 }`. `chars` capped at 50000, `ms` at 600000. Pass `false` to only review at tool-round boundaries. |
+| (literal `false`)  | `false`                      | no       | Disables the run supervisor for this run. `loopDetection` and `toolBudgets` still apply.                                                                             |
 
 **Defaults.** When `supervisor` is **omitted** (or `false`), MANTYX does **not**
 run the platform LLM judge on ephemeral API runs. Pass `"supervisor": true`,
@@ -984,8 +1040,8 @@ on API/ephemeral runs only.
 
 Validation (server-side, `400 invalid_request` on violation):
 
-| Constraint        | Limit |
-| ----------------- | ----- |
+| Constraint             | Limit |
+| ---------------------- | ----- |
 | `interval` upper bound | `100` |
 
 **Inheritance for sessions.**
@@ -1026,19 +1082,19 @@ separate tracker LLM call.
 "plan": false       // (or omit) no planning — a plain run
 ```
 
-| Form                         | Behavior                                                                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| omitted / `false`            | No planning. Default.                                                                                                                                                            |
-| `true` / `"auto"`            | Exposes `update_task_plan`; the executing agent decides during its normal first turn whether multi-step tracking is useful. No separate planning LLM call. |
-| `"required"`                 | Requires `update_task_plan` before substantive tools and rejects premature final answers while required steps remain unfinished (bounded continuation guard). |
-| `{ mode?, steps, brief? }`   | Seeds an authoritative checklist. `mode` defaults to `auto`; use `required` to enforce initialization/execution. |
+| Form                         | Behavior                                                                                                                                                                                     |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| omitted / `false`            | No planning. Default.                                                                                                                                                                        |
+| `true` / `"auto"`            | Exposes `update_task_plan`; the executing agent decides during its normal first turn whether multi-step tracking is useful. No separate planning LLM call.                                   |
+| `"required"`                 | Requires `update_task_plan` before substantive tools and rejects premature final answers while required steps remain unfinished (bounded continuation guard).                                |
+| `{ mode?, steps, brief? }`   | Seeds an authoritative checklist. `mode` defaults to `auto`; use `required` to enforce initialization/execution.                                                                             |
 | `{ planOnly: true, steps? }` | Produce the plan (classifier when `steps` omitted, otherwise the provided checklist) and **terminate without executing the agent loop**. The terminal `result` carries `data.plan` (see §7). |
 
-| Field      | Type     | Required | Notes                                                                                                  |
-| ---------- | -------- | -------- | ---------------------------------------------------------------------------------------------------- |
-| `planOnly` | boolean  | no       | When `true`, the run stops after producing the plan.                                                  |
-| `mode`     | string   | no       | `off`, `auto`, or `required`. Defaults to `auto`.                                                     |
-| `brief`    | string   | no       | One-line objective for a caller-provided plan. Clamped server-side.                                   |
+| Field      | Type     | Required | Notes                                                                                                         |
+| ---------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `planOnly` | boolean  | no       | When `true`, the run stops after producing the plan.                                                          |
+| `mode`     | string   | no       | `off`, `auto`, or `required`. Defaults to `auto`.                                                             |
+| `brief`    | string   | no       | One-line objective for a caller-provided plan. Clamped server-side.                                           |
 | `steps`    | string[] | no       | Caller-provided checklist titles. Empty/omitted ⇒ auto-classify. Count + per-step length clamped server-side. |
 
 Plan-only runs do **not** append an assistant turn to a session (the plan is
@@ -1138,8 +1194,8 @@ Lists the workspace's sessions, most-recently-used first. Supports paging
 and metadata filtering so callers can find earlier sessions by the
 application identifiers they attached at create time (see §4.9).
 
-| Query param | Notes                                                                                       |
-| ----------- | ------------------------------------------------------------------------------------------- |
+| Query param | Notes                                                                                        |
+| ----------- | -------------------------------------------------------------------------------------------- |
 | `metadata`  | Repeatable `key:value` filter; AND-combined. Malformed entries return `400 invalid_request`. |
 | `status`    | Optional exact match (`active` / `ended`).                                                   |
 | `limit`     | Default `50`, max `200`.                                                                     |
@@ -1157,13 +1213,13 @@ GET /api/v1/workspaces/acme/agent-sessions?metadata=customer:acme&metadata=env:p
   "sessions": [
     {
       "sessionId": "ses_abc",
-      "creationDate": "2026-06-08T17:00:00.000Z",   // ISO 8601 — when created
+      "creationDate": "2026-06-08T17:00:00.000Z", // ISO 8601 — when created
       "lastInteractionDate": "2026-06-08T17:42:10.000Z", // ISO 8601 — last message run
-      "summary": "How do I reset my password?",     // derived from the first user prompt
+      "summary": "How do I reset my password?", // derived from the first user prompt
       "metadata": { "customer": "acme", "env": "prod" },
-      "status": "active"
-    }
-  ]
+      "status": "active",
+    },
+  ],
 }
 ```
 
@@ -1177,10 +1233,10 @@ Returns the session's stored conversation as realtime-style event frames so a
 UI can restore the thread through the same handler it uses for the live SSE
 stream (§7). Unknown session ids return `404 not_found`.
 
-| Query param    | Notes                                                                                          |
-| -------------- | ---------------------------------------------------------------------------------------------- |
-| `full`         | `1` / `true` returns every message (the default when no paging param is given).                |
-| `lastMessages` | Return only the last `N` messages. Ignored when `full` is set.                                 |
+| Query param    | Notes                                                                           |
+| -------------- | ------------------------------------------------------------------------------- |
+| `full`         | `1` / `true` returns every message (the default when no paging param is given). |
+| `lastMessages` | Return only the last `N` messages. Ignored when `full` is set.                  |
 
 ```http
 GET /api/v1/workspaces/acme/agent-sessions/ses_abc/events?lastMessages=2
@@ -1189,11 +1245,11 @@ GET /api/v1/workspaces/acme/agent-sessions/ses_abc/events?lastMessages=2
 ```jsonc
 {
   "sessionId": "ses_abc",
-  "total": 4,                 // total messages in the session (not the page size)
+  "total": 4, // total messages in the session (not the page size)
   "events": [
-    { "seq": 3, "type": "user_message",      "text": "three" },
-    { "seq": 4, "type": "assistant_message", "text": "four" }
-  ]
+    { "seq": 3, "type": "user_message", "text": "three" },
+    { "seq": 4, "type": "assistant_message", "text": "four" },
+  ],
 }
 ```
 
@@ -1201,10 +1257,10 @@ Frames use the flattened wire shape clients already consume from SSE
 (`{ seq, type, ...payload }`). `seq` is the message's position in the full
 conversation (stable across paging). Reconstructed turns map as:
 
-| Stored role | Frame `type`        |
-| ----------- | ------------------- |
-| `user`      | `user_message`      |
-| `assistant` | `assistant_message` |
+| Stored role | Frame `type`                       |
+| ----------- | ---------------------------------- |
+| `user`      | `user_message`                     |
+| `assistant` | `assistant_message`                |
 | other       | `message` (carries a `role` field) |
 
 `user_message` is a **replay/restore-only** frame — the live SSE stream never
@@ -1353,6 +1409,12 @@ data: <utf-8 JSON>
 { "seq": 8, "type": "result",    "data": {
     "subtype": "success",
     "text":    "Final reply",
+    "structuredOutput": {
+      "schemaRequested": true,
+      "schemaEnforced": true,
+      "enforcementMechanism": "native_schema",
+      "unconstrainedFallbackOccurred": false
+    },
     "tokens":  { "inputTokens": 1283, "cachedTokens": 512, "reasoningTokens": 96, "outputTokens": 240 },
     "turns":   3,
     "model":   { "id": "platform:demo", "provider": "openai", "vendorModelId": "gpt-5.4-mini", "reasoningEffort": "low" }
@@ -1554,9 +1616,9 @@ Request body:
 
 ```jsonc
 {
-  "verdict": "UP",            // "UP" | "DOWN" (required)
+  "verdict": "UP", // "UP" | "DOWN" (required)
   "explanation": "Nailed it", // optional free-text note (≤ 8000 chars)
-  "contentSnapshot": "..."    // optional; defaults to the run's finalText
+  "contentSnapshot": "...", // optional; defaults to the run's finalText
 }
 ```
 
@@ -1565,7 +1627,12 @@ repeated call updates the existing row (last-write-wins) and returns `200`; the
 first call returns `201`. Response:
 
 ```jsonc
-{ "id": "fb_…", "verdict": "UP", "targetKind": "agent_run", "agentRunId": "run_…" }
+{
+  "id": "fb_…",
+  "verdict": "UP",
+  "targetKind": "agent_run",
+  "agentRunId": "run_…",
+}
 ```
 
 The author is attributed to the calling workspace **API key** (`apiKeyId`); OAuth
@@ -1575,7 +1642,24 @@ tokens leave the author null. Recorded feedback surfaces in the workspace
 only** — in-product chat and artifact feedback is workspace-admin only). Unknown
 runs return `404 { "error": "Run not found" }`.
 
-## 10. Errors
+## 10. Rate limits and errors
+
+Developer API requests use fixed 60-second sliding windows keyed by workspace
+and credential. New run starts have their own bucket (default 120/min);
+tool-result callbacks, approvals, feedback, and cancellation use the lifecycle
+bucket (default 600/min); other mutations default to 120/min. Platform
+operators can override those three maxima per workspace. Reads, status checks,
+and SSE opens/reconnects use a separate high transport limit and never consume
+run-start capacity.
+
+Metered responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
+`X-RateLimit-Reset`, and `X-RateLimit-Bucket`. A MANTYX limit returns HTTP
+`429`, `Retry-After`, and `code: "rate_limit_exceeded"`.
+
+This is distinct from model-provider throttling. A provider 429 is classified
+as `errorClass: "rate_limit"` and retried by the agent pipeline. If retries are
+exhausted, it appears asynchronously in the run's terminal `error` event; the
+original run-creation request remains `202 Accepted`.
 
 All non-2xx responses use this body shape:
 
@@ -1591,15 +1675,15 @@ All non-2xx responses use this body shape:
 
 Common codes:
 
-| Code               | HTTP | Notes                                  |
-| ------------------ | ---: | -------------------------------------- |
-| `unauthorized`     |  401 | Missing/invalid API key                |
-| `not_found`        |  404 | Workspace, run, or session unknown     |
-| `invalid_request`  |  400 | Body failed Zod validation             |
-| `invalid_model`    |  400 | `modelId` couldn't be resolved         |
-| `unknown_tool_use` |  404 | Tool-result for an unknown `toolUseId` |
-| `run_terminal`     |  409 | Tool-result after run finished         |
-| `rate_limited`     |  429 | Per-API-key sliding window             |
+| Code                  | HTTP | Notes                                  |
+| --------------------- | ---: | -------------------------------------- |
+| `unauthorized`        |  401 | Missing/invalid API key                |
+| `not_found`           |  404 | Workspace, run, or session unknown     |
+| `invalid_request`     |  400 | Body failed Zod validation             |
+| `invalid_model`       |  400 | `modelId` couldn't be resolved         |
+| `unknown_tool_use`    |  404 | Tool-result for an unknown `toolUseId` |
+| `run_terminal`        |  409 | Tool-result after run finished         |
+| `rate_limit_exceeded` |  429 | MANTYX Developer API request bucket    |
 
 ## 11. Suggested client architecture
 

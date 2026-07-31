@@ -40,6 +40,31 @@ describe("MantyxClient.runAgent", () => {
     expect(server.lastAuthHeader).toBe("Bearer test-key");
   });
 
+  it("surfaces structured-output observability on successful runs", async () => {
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "result",
+          subtype: "success",
+          text: '{"answer":"yes"}',
+          structuredOutput: {
+            schemaRequested: true,
+            schemaEnforced: true,
+            enforcementMechanism: "native_schema",
+            unconstrainedFallbackOccurred: false,
+          },
+        },
+      ],
+    };
+    const result = await client.runAgent({ systemPrompt: "x", prompt: "y" });
+    expect(result.structuredOutput).toEqual({
+      schemaRequested: true,
+      schemaEnforced: true,
+      enforcementMechanism: "native_schema",
+      unconstrainedFallbackOccurred: false,
+    });
+  });
+
   it("dispatches local tools and posts results back", async () => {
     server.scriptForNextRun = {
       events: [
@@ -189,6 +214,49 @@ describe("MantyxClient.runAgent", () => {
     expect(e.finishReason).toBeUndefined();
     expect(e.partialText).toBeUndefined();
     expect(e.retryable).toBeUndefined();
+    expect(e.apiStatus).toBeUndefined();
+    expect(e.apiCode).toBeUndefined();
+    expect(e.structuredOutput).toBeUndefined();
+  });
+
+  it("preserves structured-output provider error details and message", async () => {
+    const providerMessage =
+      "OpenAI rejected response_format: object property 'answer' must be required.";
+    server.scriptForNextRun = {
+      events: [
+        {
+          type: "error",
+          error: providerMessage,
+          code: "structured_output_schema_rejected",
+          errorClass: "structured_output_schema_rejected",
+          apiStatus: 400,
+          apiCode: "invalid_json_schema",
+          structuredOutput: {
+            schemaRequested: true,
+            schemaEnforced: false,
+            enforcementMechanism: "none",
+            unconstrainedFallbackOccurred: false,
+          },
+        },
+      ],
+    };
+    const err = await client
+      .runAgent({ systemPrompt: "x", prompt: "y" })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MantyxRunError);
+    const e = err as MantyxRunError;
+    expect(e.message).toBe(providerMessage);
+    expect(e.subtype).toBe("structured_output_schema_rejected");
+    expect(e.errorClass).toBe("structured_output_schema_rejected");
+    expect(e.apiStatus).toBe(400);
+    expect(e.apiCode).toBe("invalid_json_schema");
+    expect(e.structuredOutput).toEqual({
+      schemaRequested: true,
+      schemaEnforced: false,
+      enforcementMechanism: "none",
+      unconstrainedFallbackOccurred: false,
+    });
   });
 
   it("surfaces enriched assistant_message fields (turn, finishReason, toolCalls) on the event stream", async () => {
@@ -259,7 +327,7 @@ describe("MantyxClient.runAgent", () => {
     });
   });
 
-  it("leaves tokens/turns/model undefined against legacy servers (no usage data)", async () => {
+  it("leaves optional terminal fields undefined against legacy servers", async () => {
     server.scriptForNextRun = {
       events: [{ type: "result", subtype: "success", text: "ok" }],
     };
@@ -267,6 +335,7 @@ describe("MantyxClient.runAgent", () => {
     expect(result.tokens).toBeUndefined();
     expect(result.turns).toBeUndefined();
     expect(result.model).toBeUndefined();
+    expect(result.structuredOutput).toBeUndefined();
   });
 
   it("surfaces cost-attribution fields on terminal error events too", async () => {

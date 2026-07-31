@@ -376,6 +376,26 @@ describe("outputSchema forwarding + parseRunOutput", () => {
     });
   });
 
+  it("serializes explicit strict enforcement", async () => {
+    server.scriptForNextRun = {
+      events: [{ type: "result", subtype: "success", text: "{}" }],
+    };
+    await client.runAgent({
+      systemPrompt: "x",
+      prompt: "y",
+      outputSchema: {
+        name: "weather_report",
+        schema: weatherSchema,
+        enforcement: "strict",
+      },
+    });
+    expect(server.lastRunCreateBody?.outputSchema).toEqual({
+      name: "weather_report",
+      schema: weatherSchema,
+      enforcement: "strict",
+    });
+  });
+
   it("omits the field entirely when not set", async () => {
     server.scriptForNextRun = {
       events: [{ type: "result", subtype: "success", text: "ok" }],
@@ -406,6 +426,17 @@ describe("outputSchema forwarding + parseRunOutput", () => {
         systemPrompt: "x",
         prompt: "y",
         outputSchema: { schema: null as unknown as Record<string, unknown> },
+      }),
+    ).rejects.toBeInstanceOf(MantyxError);
+
+    await expect(
+      client.runAgent({
+        systemPrompt: "x",
+        prompt: "y",
+        outputSchema: {
+          schema: weatherSchema,
+          enforcement: "invalid" as "strict",
+        },
       }),
     ).rejects.toBeInstanceOf(MantyxError);
   });

@@ -409,6 +409,27 @@ def test_output_schema_forwarded_on_run(
     }
 
 
+def test_output_schema_strict_enforcement_forwarded(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mantyx_client.run_agent(
+        system_prompt="x",
+        prompt="y",
+        output_schema={
+            "name": "weather_report",
+            "schema": _WEATHER_SCHEMA,
+            "enforcement": "strict",
+        },
+    )
+    body = mock_server.last_run_create_body
+    assert body is not None
+    assert body["outputSchema"] == {
+        "name": "weather_report",
+        "schema": _WEATHER_SCHEMA,
+        "enforcement": "strict",
+    }
+
+
 def test_output_schema_omitted_when_unset(
     mantyx_client: MantyxClient, mock_server: MockServer
 ) -> None:
@@ -435,6 +456,10 @@ def test_output_schema_validation() -> None:
         normalize_output_schema({"name": "ok"})  # type: ignore[typeddict-item]
     with pytest.raises(ValueError):
         normalize_output_schema("not a mapping")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="enforcement"):
+        normalize_output_schema(
+            {"schema": _WEATHER_SCHEMA, "enforcement": "invalid"}  # type: ignore[typeddict-item]
+        )
 
 
 def test_output_schema_size_limit_is_enforced() -> None:

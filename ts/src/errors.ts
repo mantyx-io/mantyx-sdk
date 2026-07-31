@@ -1,6 +1,7 @@
 /**
  * Error types raised by the MANTYX SDK.
  */
+import type { StructuredOutputInfo } from "./structured-output.js";
 
 export class MantyxError extends Error {
   readonly code: string;
@@ -149,6 +150,12 @@ export interface MantyxRunErrorInit {
   turns?: number;
   /** Resolved model that executed the run. See {@link MantyxRunErrorModel}. */
   model?: MantyxRunErrorModel;
+  /** Provider HTTP status associated with the failure, when available. */
+  apiStatus?: number;
+  /** Provider-specific error code associated with the failure, when available. */
+  apiCode?: string;
+  /** Structured-output enforcement metadata, when reported by the server. */
+  structuredOutput?: StructuredOutputInfo;
 }
 
 export class MantyxRunError extends MantyxError {
@@ -168,6 +175,12 @@ export class MantyxRunError extends MantyxError {
   readonly turns: number | undefined;
   /** See {@link MantyxRunErrorInit.model}. */
   readonly model: MantyxRunErrorModel | undefined;
+  /** Provider HTTP status associated with the failure, when available. */
+  readonly apiStatus: number | undefined;
+  /** Provider-specific error code associated with the failure, when available. */
+  readonly apiCode: string | undefined;
+  /** Structured-output enforcement metadata, when reported by the server. */
+  readonly structuredOutput: StructuredOutputInfo | undefined;
 
   constructor(
     runId: string,
@@ -186,6 +199,9 @@ export class MantyxRunError extends MantyxError {
     this.tokens = init.tokens;
     this.turns = init.turns;
     this.model = init.model;
+    this.apiStatus = init.apiStatus;
+    this.apiCode = init.apiCode;
+    this.structuredOutput = init.structuredOutput;
   }
 }
 

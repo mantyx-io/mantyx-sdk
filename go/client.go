@@ -331,11 +331,11 @@ func (r *ReasoningLevel) MarshalJSON() ([]byte, error) {
 	return json.Marshal(r.raw)
 }
 
-// OutputSchema constrains the model's final assistant text to a JSON
-// document matching a JSON Schema. The terminal `result` event still
-// carries the reply as `Text: string`, but that string is
-// guaranteed-parseable JSON. Use ParseRunOutput to JSON-decode it (and
-// optionally validate against your own type).
+// OutputSchema asks the provider to constrain the model's final assistant
+// text to a JSON document matching a JSON Schema. The terminal `result` event
+// still carries the reply as `Text: string`. Set Enforcement to
+// OutputSchemaEnforcementStrict when provider rejection or unconstrained
+// fallback must fail. Use ParseRunOutput to JSON-decode the result.
 //
 // Name (optional, default "output") is forwarded to the provider as the
 // stable schema identifier (OpenAI `text.format.name`, Anthropic synthetic
@@ -355,9 +355,19 @@ func (r *ReasoningLevel) MarshalJSON() ([]byte, error) {
 //
 // See `docs/wire-protocol.md` §7 for the full per-provider mapping.
 type OutputSchema struct {
-	Name   string
-	Schema any
+	Name        string
+	Schema      any
+	Enforcement OutputSchemaEnforcement
 }
+
+// OutputSchemaEnforcement controls how strictly the platform must constrain
+// the final assistant output. The zero value preserves best-effort behavior.
+type OutputSchemaEnforcement string
+
+const (
+	OutputSchemaEnforcementBestEffort OutputSchemaEnforcement = "best_effort"
+	OutputSchemaEnforcementStrict     OutputSchemaEnforcement = "strict"
+)
 
 const outputSchemaMaxBytes = 32 * 1024
 
@@ -397,6 +407,9 @@ func (s *OutputSchema) MarshalJSON() ([]byte, error) {
 	if s.Name != "" {
 		out["name"] = s.Name
 	}
+	if s.Enforcement != "" {
+		out["enforcement"] = s.Enforcement
+	}
 	return json.Marshal(out)
 }
 
@@ -411,6 +424,19 @@ func (s *OutputSchema) validate() error {
 		return &Error{
 			Code:    "invalid_request",
 			Message: fmt.Sprintf("OutputSchema.Name must match /^[a-zA-Z0-9_-]{1,64}$/, got %q", s.Name),
+		}
+	}
+	if s.Enforcement != "" &&
+		s.Enforcement != OutputSchemaEnforcementBestEffort &&
+		s.Enforcement != OutputSchemaEnforcementStrict {
+		return &Error{
+			Code: "invalid_request",
+			Message: fmt.Sprintf(
+				"OutputSchema.Enforcement must be %q or %q, got %q",
+				OutputSchemaEnforcementBestEffort,
+				OutputSchemaEnforcementStrict,
+				s.Enforcement,
+			),
 		}
 	}
 	if _, err := s.resolve(); err != nil {
@@ -676,13 +702,13 @@ type TaskPlanStep struct {
 // TaskPlan is the structured checklist on `task_plan` events and
 // plan-only terminal results. See `docs/agent-runs-protocol.md` §4.9.
 type TaskPlan struct {
-	V        int                `json:"v,omitempty"`
-	PlanID   string             `json:"planId,omitempty"`
-	Revision int                `json:"revision,omitempty"`
-	Mode     string             `json:"mode,omitempty"`
-	Source   string             `json:"source,omitempty"`
-	Brief    string             `json:"brief,omitempty"`
-	Steps    []TaskPlanStep     `json:"steps"`
+	V        int            `json:"v,omitempty"`
+	PlanID   string         `json:"planId,omitempty"`
+	Revision int            `json:"revision,omitempty"`
+	Mode     string         `json:"mode,omitempty"`
+	Source   string         `json:"source,omitempty"`
+	Brief    string         `json:"brief,omitempty"`
+	Steps    []TaskPlanStep `json:"steps"`
 }
 
 // TaskPlanTransition is one transition in a v2 `task_plan` event.
@@ -903,6 +929,25 @@ type RunModelInfo struct {
 	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 
+// StructuredOutputEnforcementMechanism identifies how the platform
+// constrained a structured-output run.
+type StructuredOutputEnforcementMechanism string
+
+const (
+	StructuredOutputEnforcementNativeSchema  StructuredOutputEnforcementMechanism = "native_schema"
+	StructuredOutputEnforcementSyntheticTool StructuredOutputEnforcementMechanism = "synthetic_tool"
+	StructuredOutputEnforcementNone          StructuredOutputEnforcementMechanism = "none"
+)
+
+// StructuredOutputInfo is terminal observability metadata for output-schema
+// enforcement.
+type StructuredOutputInfo struct {
+	SchemaRequested               bool                                 `json:"schemaRequested"`
+	SchemaEnforced                bool                                 `json:"schemaEnforced"`
+	EnforcementMechanism          StructuredOutputEnforcementMechanism `json:"enforcementMechanism"`
+	UnconstrainedFallbackOccurred bool                                 `json:"unconstrainedFallbackOccurred"`
+}
+
 // RunResult is the outcome of a successful run.
 type RunResult struct {
 	RunID  string
@@ -921,6 +966,9 @@ type RunResult struct {
 	// Model identifies the resolved model that executed the run. nil
 	// against legacy MANTYX servers. See RunModelInfo.
 	Model *RunModelInfo
+	// StructuredOutput carries output-schema enforcement metadata. nil
+	// against legacy servers and runs without terminal observability data.
+	StructuredOutput *StructuredOutputInfo
 	// Plan carries the final structured checklist for plan-only runs.
 	// nil for normal executed runs — use `task_plan` events for live
 	// progress. See `docs/agent-runs-protocol.md` §4.9.
@@ -1318,6 +1366,7 @@ func (c *Client) driveRunWithRegistry(
 	var tokens *RunTokenUsage
 	var turns int
 	var modelInfo *RunModelInfo
+	var structuredOutput *StructuredOutputInfo
 	var taskPlan *TaskPlan
 	terminalErr, err := c.consumeStream(ctx, runID, handlers, func(ev RunEvent) {
 		collected = append(collected, ev)
@@ -1342,6 +1391,9 @@ func (c *Client) driveRunWithRegistry(
 			if m := parseRunModel(ev.Data["model"]); m != nil {
 				modelInfo = m
 			}
+			if info := parseStructuredOutputInfo(ev.Data["structuredOutput"]); info != nil {
+				structuredOutput = info
+			}
 			if p := parseTaskPlan(ev.Data["plan"]); p != nil {
 				taskPlan = p
 			}
@@ -1354,13 +1406,14 @@ func (c *Client) driveRunWithRegistry(
 		return RunResult{}, terminalErr
 	}
 	return RunResult{
-		RunID:  runID,
-		Text:   finalText,
-		Events: collected,
-		Tokens: tokens,
-		Turns:  turns,
-		Model:  modelInfo,
-		Plan:   taskPlan,
+		RunID:            runID,
+		Text:             finalText,
+		Events:           collected,
+		Tokens:           tokens,
+		Turns:            turns,
+		Model:            modelInfo,
+		StructuredOutput: structuredOutput,
+		Plan:             taskPlan,
 	}, nil
 }
 
@@ -1437,7 +1490,12 @@ func (c *Client) consumeStream(
 					if msg == "" {
 						msg = subtype
 					}
-					terminalErr = &RunError{RunID: runID, Code: subtype, Message: msg}
+					terminalErr = &RunError{
+						RunID:            runID,
+						Code:             subtype,
+						Message:          msg,
+						StructuredOutput: parseStructuredOutputInfo(payload["structuredOutput"]),
+					}
 				}
 				return false
 			case "error":
@@ -1475,6 +1533,11 @@ func (c *Client) consumeStream(
 					rerr.Turns = n
 				}
 				rerr.Model = parseRunModel(payload["model"])
+				if n, ok := parseRunTurns(payload["apiStatus"]); ok {
+					rerr.APIStatus = n
+				}
+				rerr.APICode, _ = payload["apiCode"].(string)
+				rerr.StructuredOutput = parseStructuredOutputInfo(payload["structuredOutput"])
 				terminalErr = rerr
 				return false
 			case "cancelled":
@@ -2522,9 +2585,8 @@ func serializeToolBudgets(b ToolBudgets) map[string]any {
 
 // ParseRunOutput JSON-decodes the terminal text of a RunResult into `dest`.
 //
-// When the run was submitted with OutputSchema, MANTYX (via the LLM
-// provider) guarantees the reply parses as JSON in the *vast* majority of
-// cases. Transient model errors (refusal text, truncation under
+// Provider-enforced output should parse as JSON, but transient model errors
+// (refusal text, truncation under
 // max_tokens pressure, exotic Unicode) can still produce strings that
 // fail to json.Unmarshal in rare edge cases — this helper centralises
 // that brittle step and surfaces a typed *ParseError on failure with the
@@ -2576,6 +2638,33 @@ func parseRunTurns(raw any) (int, bool) {
 		return 0, true
 	}
 	return int(f), true
+}
+
+// parseStructuredOutputInfo decodes optional terminal output-schema
+// observability metadata. Invalid or partial values are ignored.
+func parseStructuredOutputInfo(raw any) *StructuredOutputInfo {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	schemaRequested, okRequested := m["schemaRequested"].(bool)
+	schemaEnforced, okEnforced := m["schemaEnforced"].(bool)
+	mechanism, okMechanism := m["enforcementMechanism"].(string)
+	fallback, okFallback := m["unconstrainedFallbackOccurred"].(bool)
+	if !okRequested || !okEnforced || !okMechanism || !okFallback {
+		return nil
+	}
+	if mechanism != string(StructuredOutputEnforcementNativeSchema) &&
+		mechanism != string(StructuredOutputEnforcementSyntheticTool) &&
+		mechanism != string(StructuredOutputEnforcementNone) {
+		return nil
+	}
+	return &StructuredOutputInfo{
+		SchemaRequested:               schemaRequested,
+		SchemaEnforced:                schemaEnforced,
+		EnforcementMechanism:          StructuredOutputEnforcementMechanism(mechanism),
+		UnconstrainedFallbackOccurred: fallback,
+	}
 }
 
 // parseRunModel decodes a wire `model` object into a *RunModelInfo.

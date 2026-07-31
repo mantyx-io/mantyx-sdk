@@ -335,8 +335,11 @@ session-wide value for one turn.
 
 ## Structured output (`OutputSchema`)
 
-Constrain the assistant's **final reply** to a JSON document matching a
-JSON Schema, and decode it into a Go struct with `mantyx.ParseRunOutput`.
+Ask the provider to constrain the assistant's **final reply** to a JSON
+document matching a JSON Schema. Set `Enforcement` to
+`mantyx.OutputSchemaEnforcementStrict` when an unsupported schema or
+unconstrained fallback must fail, and decode it into a Go struct with
+`mantyx.ParseRunOutput`.
 `OutputSchema.Schema` accepts either a hand-rolled `map[string]any` /
 `json.RawMessage` *or* a Go struct (or pointer-to-struct) — the SDK runs
 the same struct-to-JSON-Schema reflection used by `LocalToolSpec.Parameters`
@@ -353,8 +356,9 @@ result, err := client.RunAgent(ctx, mantyx.RunSpec{
     SystemPrompt: "Return the weather as JSON.",
     Prompt:       "What's the weather in San Francisco right now?",
     OutputSchema: &mantyx.OutputSchema{
-        Name:   "weather_report",
-        Schema: &WeatherReport{},
+        Name:        "weather_report",
+        Schema:      &WeatherReport{},
+        Enforcement: mantyx.OutputSchemaEnforcementStrict,
     },
 })
 if err != nil { /* ... */ }
@@ -378,6 +382,12 @@ The SDK validates `Name` (regex `^[a-zA-Z0-9_-]{1,64}$`), schema shape
 typed `*mantyx.Error` up front instead of a server round-trip rejection.
 On parse failure, `ParseRunOutput` returns `*mantyx.ParseError` with the
 raw model text preserved on `Text`.
+
+On success, `result.StructuredOutput` reports whether enforcement occurred,
+its native-schema or synthetic-tool mechanism, and whether a best-effort
+unconstrained fallback occurred. Strict provider rejection returns
+`*mantyx.RunError` with `ErrorClass == "structured_output_schema_rejected"`
+and preserves `APIStatus`, `APICode`, and the provider message.
 
 `OutputSchema` is independent of `ReasoningLevel` — combine the two for
 deep-reasoning JSON outputs. On sessions it inherits from

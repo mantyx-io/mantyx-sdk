@@ -3,9 +3,8 @@
 //
 // The model is asked for a structured weather report. MANTYX forwards the
 // schema to the provider (OpenAI Responses, Gemini ≥ 2.5, Anthropic synthetic
-// final_report tool), so the terminal `result.text` is guaranteed-parseable
-// JSON. mantyx.ParseRunOutput just runs json.Unmarshal and surfaces a typed
-// *mantyx.ParseError on the rare occasions a model still returns non-JSON.
+// final_report tool). Strict enforcement makes provider rejection, unsupported
+// models, and unconstrained fallback fail explicitly.
 //
 // The schema itself is reflected from the WeatherReport struct via
 // google/jsonschema-go — the same path LocalToolSpec.Parameters uses — so
@@ -45,14 +44,31 @@ func main() {
 		SystemPrompt: "You return weather reports as JSON conforming to the response schema.",
 		Prompt:       "What's the weather in San Francisco right now? Make up plausible numbers.",
 		OutputSchema: &mantyx.OutputSchema{
-			Name:   "weather_report",
-			Schema: &WeatherReport{},
+			Name:        "weather_report",
+			Schema:      &WeatherReport{},
+			Enforcement: mantyx.OutputSchemaEnforcementStrict,
 		},
 	})
 	if err != nil {
+		var runErr *mantyx.RunError
+		if errors.As(err, &runErr) {
+			log.Fatalf(
+				"structured output failed: class=%s provider_status=%d provider_code=%s message=%s",
+				runErr.ErrorClass,
+				runErr.APIStatus,
+				runErr.APICode,
+				runErr.Message,
+			)
+		}
 		log.Fatal(err)
 	}
 
+	if result.StructuredOutput == nil ||
+		!result.StructuredOutput.SchemaRequested ||
+		!result.StructuredOutput.SchemaEnforced ||
+		result.StructuredOutput.UnconstrainedFallbackOccurred {
+		log.Fatal("MANTYX did not report structured-output enforcement")
+	}
 	fmt.Println("Raw model reply:", result.Text)
 
 	var report WeatherReport

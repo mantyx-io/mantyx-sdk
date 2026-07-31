@@ -5,23 +5,25 @@ sidebar:
   order: 5
 ---
 
-`outputSchema` (TypeScript / Python: `outputSchema` / `output_schema`; Go: `OutputSchema`) constrains the model's **final assistant message** to a JSON document conforming to a [JSON Schema](https://json-schema.org/). Useful when the SDK feeds the reply directly into downstream code without LLM-flavoured prose to parse out — typed extraction, agent-to-agent handoffs, function-style RPCs, etc.
+`outputSchema` (TypeScript / Python: `outputSchema` / `output_schema`; Go: `OutputSchema`) asks the provider to constrain the model's **final assistant message** to a JSON document conforming to a [JSON Schema](https://json-schema.org/). Useful when the SDK feeds the reply directly into downstream code without LLM-flavoured prose to parse out — typed extraction, agent-to-agent handoffs, function-style RPCs, compatibility tests, etc.
 
-The terminal `result` event still carries the reply as `text: string`, but that string is guaranteed-parseable JSON that matches the schema you supply. Each SDK ships a helper (`parseRunOutput` / `parse_run_output` / `ParseRunOutput`) that turns it into a typed value with a clean error path on the rare occasions a model still returns non-JSON.
+The terminal `result` event still carries the reply as `text: string`. Each SDK ships a helper (`parseRunOutput` / `parse_run_output` / `ParseRunOutput`) that turns it into a typed value. Use strict enforcement when accepting an unconstrained provider fallback would be incorrect.
 
 ## Wire shape
 
 ```jsonc
 "outputSchema": {
   "name":   "weather_report",        // optional; default "output"; /^[a-zA-Z0-9_-]{1,64}$/
-  "schema": { /* JSON Schema */ }    // required, root must be a JSON object
+  "schema": { /* JSON Schema */ },   // required, root must be a JSON object
+  "enforcement": "strict"            // optional; default "best_effort"
 }
 ```
 
-| Field    | Type   | Required | Notes |
-| -------- | ------ | -------- | ----- |
-| `name`   | string | no       | Stable identifier the server forwards to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`. |
-| `schema` | object | yes      | JSON Schema describing the assistant text. Root must be a JSON object — most providers reject array / scalar roots in structured-output mode. Shipped verbatim; MANTYX does not validate the schema's contents (the provider does). |
+| Field         | Type   | Required | Notes |
+| ------------- | ------ | -------- | ----- |
+| `name`        | string | no       | Stable identifier the server forwards to providers (OpenAI `text.format.name`, Anthropic synthetic-tool name). Defaults to `"output"`. |
+| `schema`      | object | yes      | JSON Schema describing the assistant text. Root must be a JSON object — most providers reject array / scalar roots in structured-output mode. Shipped verbatim; MANTYX does not validate the schema's contents (the provider does). |
+| `enforcement` | string | no       | `"best_effort"` preserves the historical fallback behavior and is the default. `"strict"` fails unless MANTYX actually enforces the schema. |
 
 Server-side limits (mirrored locally by every reference SDK so you get an early typed error):
 
@@ -31,6 +33,31 @@ Server-side limits (mirrored locally by every reference SDK so you get an early 
 | `name` regex                                 | `/^[a-zA-Z0-9_-]{1,64}$/` |
 | `schema` shape                               | non-`null`, non-array JSON object |
 
+## Enforcement and observability
+
+`best_effort` remains the default. If OpenAI or Gemini rejects a provider-facing
+schema, MANTYX may retry without it so existing applications still receive an
+answer. `strict` never makes that unconstrained retry and fails providers or
+models that have no enforceable path.
+
+Every new-server terminal result/error reports actual execution:
+
+```json
+{
+  "schemaRequested": true,
+  "schemaEnforced": true,
+  "enforcementMechanism": "native_schema",
+  "unconstrainedFallbackOccurred": false
+}
+```
+
+The block is exposed as `result.structuredOutput` /
+`result.structured_output` / `result.StructuredOutput`. Its fields are optional
+at the SDK boundary for compatibility with older MANTYX servers. Strict
+provider-compatibility tests should require `schemaEnforced` and reject any
+`unconstrainedFallbackOccurred`. The fallback flag is run-level: once any
+provider call falls back unconstrained, the terminal value remains `true`.
+
 ## Per provider
 
 | Provider                       | How the schema is enforced |
@@ -38,7 +65,7 @@ Server-side limits (mirrored locally by every reference SDK so you get an early 
 | OpenAI Responses (o-series, GPT-5.x, …) | `text.format = { type: "json_schema", strict: true, name, schema }` on every `completeTurn` (compatible with tool calls). |
 | Gemini ≥ 2.5                   | `responseMimeType: "application/json"` + `responseJsonSchema` on no-tools turns (Gemini rejects schemas alongside `functionDeclarations`). |
 | Anthropic / Bedrock-Anthropic  | Synthetic `final_report` tool whose `input_schema` is the supplied schema; `tool_choice` is forced on the no-tools finishing turn. The tool's input is surfaced as the assistant text. |
-| xAI Grok, others               | Ignored — the model returns plain text. |
+| xAI Grok, others               | Best effort may return unconstrained text; strict mode fails explicitly. |
 
 `outputSchema` is independent of [`reasoningLevel`](/docs/reasoning/): the model can think extensively *and* emit JSON.
 
@@ -70,7 +97,7 @@ const Weather = z.object({
 const result = await client.runAgent({
   systemPrompt: "Return the weather as JSON.",
   prompt: "What's the weather in San Francisco right now?",
-  outputSchema: { name: "weather_report", schema: WeatherJsonSchema },
+  outputSchema: { name: "weather_report", schema: WeatherJsonSchema, enforcement: "strict" },
 });
 
 const report = parseRunOutput(result, (v) => Weather.parse(v));
@@ -104,7 +131,7 @@ client = MantyxClient(api_key="...", workspace_slug="acme")
 result = client.run_agent(
     system_prompt="Return the weather as JSON.",
     prompt="What's the weather in San Francisco right now?",
-    output_schema={"name": "weather_report", "schema": WEATHER_SCHEMA},
+    output_schema={"name": "weather_report", "schema": WEATHER_SCHEMA, "enforcement": "strict"},
 )
 
 report = parse_run_output(result, Weather.model_validate)
@@ -140,8 +167,9 @@ result, err := client.RunAgent(ctx, mantyx.RunSpec{
     SystemPrompt: "Return the weather as JSON.",
     Prompt:       "What's the weather in San Francisco right now?",
     OutputSchema: &mantyx.OutputSchema{
-        Name:   "weather_report",
-        Schema: &WeatherReport{},
+        Name:        "weather_report",
+        Schema:      &WeatherReport{},
+        Enforcement: mantyx.OutputSchemaEnforcementStrict,
     },
 })
 if err != nil { /* ... */ }
@@ -174,7 +202,11 @@ weatherSchema := map[string]any{
 result, err := client.RunAgent(ctx, mantyx.RunSpec{
     SystemPrompt: "Return the weather as JSON.",
     Prompt:       "What's the weather in San Francisco right now?",
-    OutputSchema: &mantyx.OutputSchema{Name: "weather_report", Schema: weatherSchema},
+    OutputSchema: &mantyx.OutputSchema{
+        Name:        "weather_report",
+        Schema:      weatherSchema,
+        Enforcement: mantyx.OutputSchemaEnforcementStrict,
+    },
 })
 ```
 
@@ -203,7 +235,16 @@ await session.send("Now summarise our chat in plain prose.", {
 
 ## Error handling
 
-Even though the server enforces JSON shape via the provider, transient model errors (refusal text, truncation under `max_tokens` pressure, exotic Unicode normalisation) can still occasionally produce a string that fails to parse. The reference SDKs:
+Strict provider rejection raises a typed run error with
+`errorClass: "structured_output_schema_rejected"`. The provider's human
+message is preserved along with `apiStatus` / `apiCode` when available.
+`structured_output_not_supported` means the selected provider/model has no
+enforceable path; `structured_output_not_enforced` means a required synthetic
+final-result tool was bypassed.
+
+Even after provider enforcement, transient model errors (refusal text,
+truncation under `max_tokens` pressure, exotic Unicode normalisation) can still
+occasionally produce a string that fails to parse. The reference SDKs:
 
 1. Pass the schema through unchanged from your code to the wire.
 2. Run a `JSON.parse` / `json.loads` / `json.Unmarshal` on the terminal `result.text` only when you call `parseRunOutput` / `parse_run_output` / `ParseRunOutput`.

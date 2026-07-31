@@ -39,6 +39,34 @@ def test_run_agent_success(mantyx_client: MantyxClient, mock_server: MockServer)
     assert any(ev.type == "result" for ev in result.events)
 
 
+def test_run_agent_surfaces_structured_output_observability(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="result",
+                data={
+                    "subtype": "success",
+                    "text": '{"answer":"yes"}',
+                    "structuredOutput": {
+                        "schemaRequested": True,
+                        "schemaEnforced": True,
+                        "enforcementMechanism": "native_schema",
+                        "unconstrainedFallbackOccurred": False,
+                    },
+                },
+            )
+        ]
+    )
+    result = mantyx_client.run_agent(system_prompt="x", prompt="y")
+    assert result.structured_output is not None
+    assert result.structured_output.schema_requested is True
+    assert result.structured_output.schema_enforced is True
+    assert result.structured_output.enforcement_mechanism == "native_schema"
+    assert result.structured_output.unconstrained_fallback_occurred is False
+
+
 def test_run_agent_with_local_tool(mantyx_client: MantyxClient, mock_server: MockServer) -> None:
     class Args(BaseModel):
         path: str
@@ -210,6 +238,46 @@ def test_run_agent_error_event_falls_back_to_code(
     assert err.finish_reason is None
     assert err.partial_text is None
     assert err.retryable is None
+    assert err.api_status is None
+    assert err.api_code is None
+    assert err.structured_output is None
+
+
+def test_run_agent_preserves_structured_output_provider_error_details(
+    mantyx_client: MantyxClient, mock_server: MockServer
+) -> None:
+    provider_message = "OpenAI rejected response_format: object property 'answer' must be required."
+    mock_server.script_for_next_run = RunScript(
+        events=[
+            ScriptEvent(
+                kind="error",
+                data={
+                    "error": provider_message,
+                    "code": "structured_output_schema_rejected",
+                    "errorClass": "structured_output_schema_rejected",
+                    "apiStatus": 400,
+                    "apiCode": "invalid_json_schema",
+                    "structuredOutput": {
+                        "schemaRequested": True,
+                        "schemaEnforced": False,
+                        "enforcementMechanism": "none",
+                        "unconstrainedFallbackOccurred": False,
+                    },
+                },
+            )
+        ]
+    )
+    with pytest.raises(MantyxRunError) as exc:
+        mantyx_client.run_agent(system_prompt="x", prompt="y")
+    err = exc.value
+    assert err.message == provider_message
+    assert err.subtype == "structured_output_schema_rejected"
+    assert err.error_class == "structured_output_schema_rejected"
+    assert err.api_status == 400
+    assert err.api_code == "invalid_json_schema"
+    assert err.structured_output is not None
+    assert err.structured_output.schema_enforced is False
+    assert err.structured_output.enforcement_mechanism == "none"
 
 
 def test_run_agent_assistant_message_surfaces_triage_fields(
@@ -296,6 +364,7 @@ def test_run_agent_legacy_server_omits_cost_attribution(
     assert result.tokens is None
     assert result.turns is None
     assert result.model is None
+    assert result.structured_output is None
 
 
 def test_run_agent_error_event_carries_cost_attribution(

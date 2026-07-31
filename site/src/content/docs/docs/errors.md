@@ -27,10 +27,13 @@ retry policy without re-parsing the human-readable message:
 
 | Attribute (TS / Python / Go) | Meaning |
 | --- | --- |
-| `errorClass` / `error_class` / `ErrorClass` | Canonical category — `"rate_limit"`, `"overloaded"`, `"server"`, `"context_window"`, `"truncation"`, `"invalid_request"`, `"auth"`, `"timeout"`, `"local_timeout"`, `"upstream_deadline"`, or `"unknown"`. New categories may land additively. |
+| `errorClass` / `error_class` / `ErrorClass` | Canonical category — including `"rate_limit"`, `"truncation"`, `"structured_output_schema_rejected"`, `"structured_output_not_supported"`, `"structured_output_not_enforced"`, or `"unknown"`. New categories may land additively. |
 | `finishReason` / `finish_reason` / `FinishReason` | Canonical lowercase provider stop reason (`"max_tokens"`, `"refusal"`, `"malformed_function_call"`, …). Mirrors the last `assistant_message` event's `finishReason`. |
 | `partialText` / `partial_text` / `PartialText` | **Best-effort raw bytes** the model emitted before the failure. For `outputSchema` runs this is usually incomplete JSON that will fail `JSON.parse` — treat it as diagnostic data, never as a schema-conformant reply. |
 | `retryable` / `retryable` / `Retryable` | Coarse retry hint inherited from the pipeline's classifier. Informational; the SDK does not retry on your behalf. |
+| `apiStatus` / `api_status` / `APIStatus` | Provider HTTP status, when the upstream SDK exposed one. |
+| `apiCode` / `api_code` / `APICode` | Provider-specific error code. This is separate from MANTYX's canonical `errorClass`. |
+| `structuredOutput` / `structured_output` / `StructuredOutput` | Actual structured-output execution metadata, including the enforcement mechanism and whether unconstrained fallback occurred. |
 
 All four are optional: older runners that haven't classified the failure
 yet, or non-terminal `error` paths, leave them unset (`undefined` in TS,

@@ -43,6 +43,7 @@ ToolName = str
 #: provider thinking on reasoning models. The MANTYX server maps this onto
 #: each LLM's native dial — see ``docs/agent-runs-protocol.md`` §4.4.
 ReasoningLevel = Literal["off", "low", "medium", "high"] | int
+OutputSchemaEnforcement = Literal["best_effort", "strict"]
 
 
 class OutputSchema(TypedDict, total=False):
@@ -61,6 +62,7 @@ class OutputSchema(TypedDict, total=False):
 
     name: str
     schema: JsonSchema
+    enforcement: OutputSchemaEnforcement
 
 
 class LoopDetection(TypedDict, total=False):
@@ -1246,6 +1248,13 @@ def normalize_output_schema(
                 f"output_schema.name must match /^[a-zA-Z0-9_-]{{1,64}}$/; got {name!r}"
             )
         out["name"] = name
+    if "enforcement" in value and value["enforcement"] is not None:
+        enforcement = value["enforcement"]
+        if enforcement not in ("best_effort", "strict"):
+            raise ValueError(
+                f"output_schema.enforcement must be 'best_effort' or 'strict'; got {enforcement!r}"
+            )
+        out["enforcement"] = enforcement
     if "schema" not in value:
         raise ValueError("output_schema.schema is required")
     schema = value["schema"]
@@ -1278,6 +1287,7 @@ __all__ = [
     "MantyxPluginToolRef",
     "MantyxToolRef",
     "OutputSchema",
+    "OutputSchemaEnforcement",
     "PlanMode",
     "PlanOptions",
     "PlanSpec",
