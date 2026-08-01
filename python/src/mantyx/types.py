@@ -174,6 +174,15 @@ class RunModelInfoWire(TypedDict, total=False):
     reasoningEffort: str
 
 
+class StructuredOutputInfoData(TypedDict):
+    """Terminal structured-output enforcement observability."""
+
+    schemaRequested: bool
+    schemaEnforced: bool
+    enforcementMechanism: Literal["native_schema", "synthetic_tool", "none"]
+    unconstrainedFallbackOccurred: bool
+
+
 class ResultEventData(TypedDict, total=False):
     """Payload on successful terminal ``result`` events."""
 
@@ -183,6 +192,7 @@ class ResultEventData(TypedDict, total=False):
     turns: int
     model: RunModelInfoWire
     plan: dict[str, Any]
+    structuredOutput: StructuredOutputInfoData
 
 
 class ErrorEventData(TypedDict, total=False):
@@ -196,6 +206,9 @@ class ErrorEventData(TypedDict, total=False):
     tokens: RunTokenUsageWire
     turns: int
     model: RunModelInfoWire
+    apiStatus: int
+    apiCode: str
+    structuredOutput: StructuredOutputInfoData
 
 
 __all__ = [
@@ -218,6 +231,7 @@ __all__ = [
     "RunModelInfoWire",
     "RunTokenUsageWire",
     "SessionStatus",
+    "StructuredOutputInfoData",
     "UserMessageEventData",
     "input_file_attachment",
     "input_file_url_attachment",

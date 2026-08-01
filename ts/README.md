@@ -306,10 +306,10 @@ inherits from the session and can be overridden per `session.send`.
 
 ## Structured output (`outputSchema`)
 
-Constrain the assistant's **final reply** to a JSON document matching a
-JSON Schema. The wire still ships the reply as `text: string`, but that
-string is guaranteed-parseable JSON. Pair with `parseRunOutput` for a
-typed value with a clean error path:
+Ask the provider to constrain the assistant's **final reply** to a JSON
+document matching a JSON Schema. The wire still ships the reply as
+`text: string`. Set `enforcement: "strict"` when an unsupported schema or
+unconstrained fallback must fail, and pair it with `parseRunOutput`:
 
 ```ts
 import { z } from "zod";
@@ -329,7 +329,11 @@ const WeatherJsonSchema = {
 const result = await client.runAgent({
   systemPrompt: "Return the weather as JSON.",
   prompt: "What's the weather in San Francisco right now?",
-  outputSchema: { name: "weather_report", schema: WeatherJsonSchema },
+  outputSchema: {
+    name: "weather_report",
+    schema: WeatherJsonSchema,
+    enforcement: "strict",
+  },
 });
 
 const report = parseRunOutput(result, (v) => Weather.parse(v));
@@ -341,6 +345,12 @@ The SDK validates `name` (regex `/^[a-zA-Z0-9_-]{1,64}$/`), schema shape
 typed `MantyxError` up front instead of a server round-trip rejection.
 On parse failure (rare; bad model output), `parseRunOutput` throws
 `MantyxParseError` with the original `text` preserved.
+
+On success, `result.structuredOutput` reports whether enforcement actually
+occurred, its `native_schema` / `synthetic_tool` mechanism, and whether a
+best-effort unconstrained fallback occurred. Strict provider rejection raises
+`MantyxRunError` with `errorClass === "structured_output_schema_rejected"` and
+preserves `apiStatus`, `apiCode`, and the provider message.
 
 `outputSchema` is independent of `reasoningLevel` — combine them for
 deep-reasoning JSON outputs. On sessions it inherits from

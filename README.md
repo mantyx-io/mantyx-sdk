@@ -59,8 +59,9 @@ at <https://mantyx-io.github.io/mantyx-sdk/>.
   `reasoning_level` (string anchor `"off"|"low"|"medium"|"high"` or an
   integer in `[0, 100]`) to dial the LLM's reasoning budget per run.
 - **Constrain replies to JSON** — pass `outputSchema` /
-  `output_schema` / `OutputSchema` (a JSON Schema) and the model's final
-  message is guaranteed to be parseable JSON. Each SDK ships a
+  `output_schema` / `OutputSchema` (a JSON Schema), optionally with strict
+  enforcement when provider rejection or unconstrained fallback must fail.
+  Each SDK reports the mechanism actually used and ships a
   `parseRunOutput` / `parse_run_output` / `ParseRunOutput` helper that
   decodes it into your own typed value.
 - **Stream tokens** — assistant deltas, thinking deltas, server tool results,

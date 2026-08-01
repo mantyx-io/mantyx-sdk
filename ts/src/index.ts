@@ -171,6 +171,11 @@ export type {
   MantyxRunErrorTokens,
   MantyxRunErrorModel,
 } from "./errors.js";
+export type {
+  OutputSchemaEnforcement,
+  StructuredOutputEnforcementMechanism,
+  StructuredOutputInfo,
+} from "./structured-output.js";
 
 export {
   MantyxOAuthClient,

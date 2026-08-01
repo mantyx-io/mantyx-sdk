@@ -15,6 +15,13 @@ export interface MockToolCallScript {
   args: Record<string, unknown>;
 }
 
+interface MockStructuredOutputInfo {
+  schemaRequested: boolean;
+  schemaEnforced: boolean;
+  enforcementMechanism: "native_schema" | "synthetic_tool" | "none";
+  unconstrainedFallbackOccurred: boolean;
+}
+
 export interface MockRunScript {
   id?: string;
   /** Sequence of events emitted to the SSE stream (after replay completes). */
@@ -61,6 +68,7 @@ export type MockEvent =
       tokens?: Record<string, unknown>;
       turns?: number;
       model?: Record<string, unknown>;
+      structuredOutput?: MockStructuredOutputInfo;
       /** Structured checklist on plan-only terminal results (§4.9). */
       plan?: {
         brief?: string;
@@ -101,6 +109,9 @@ export type MockEvent =
       tokens?: Record<string, unknown>;
       turns?: number;
       model?: Record<string, unknown>;
+      apiStatus?: number;
+      apiCode?: string;
+      structuredOutput?: MockStructuredOutputInfo;
     }
   | { type: "cancelled"; reason?: string };
 

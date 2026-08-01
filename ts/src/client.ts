@@ -15,6 +15,10 @@ import { callA2A, callMcpTool, closeMcpRefs, resolveLocalRefs } from "./local-re
 import type { TokenSource } from "./oauth.js";
 import { readSseStream } from "./sse.js";
 import type {
+  OutputSchemaEnforcement,
+  StructuredOutputInfo,
+} from "./structured-output.js";
+import type {
   LocalA2ATool,
   LocalMcpServer,
   LocalTool,
@@ -429,9 +433,10 @@ export interface AgentSpecBase {
   reasoningLevel?: ReasoningLevel;
   budgets?: { maxToolTurns?: number };
   /**
-   * Constrains the model's **final assistant text** to a JSON document
-   * matching a JSON Schema. The terminal `result` event still carries the
-   * reply as `text: string`, but that string is guaranteed-parseable JSON.
+   * Asks the provider to constrain the model's **final assistant text** to a
+   * JSON document matching a JSON Schema. The terminal `result` event still
+   * carries the reply as `text: string`. Set `enforcement: "strict"` when
+   * provider rejection or unconstrained fallback must fail.
    *
    * `name` (optional) is a stable identifier the server forwards to the
    * provider (OpenAI `text.format.name`, Anthropic synthetic-tool name).
@@ -572,6 +577,8 @@ export interface OutputSchema {
   name?: string;
   /** Required. Zod schema or JSON Schema describing the final assistant text. Root must be a JSON object. */
   schema: OutputSchemaValue;
+  /** Enforcement policy. Omission preserves the platform's best-effort default. */
+  enforcement?: OutputSchemaEnforcement;
 }
 
 /**
@@ -827,6 +834,8 @@ export interface RunResult {
   turns?: number;
   /** Resolved model that executed the run. See {@link RunModelInfo}. */
   model?: RunModelInfo;
+  /** Structured-output enforcement metadata, when reported by the server. */
+  structuredOutput?: StructuredOutputInfo;
   /**
    * Final structured checklist for `planOnly` runs. Undefined for normal
    * executed runs (use `task_plan` events for live progress). See
@@ -1048,6 +1057,8 @@ export interface ResultEvent extends RunEventBase {
   turns?: number;
   /** Resolved model that executed the run. See {@link RunModelInfo}. */
   model?: RunModelInfo;
+  /** Structured-output enforcement metadata, when reported by the server. */
+  structuredOutput?: StructuredOutputInfo;
 }
 
 export interface ErrorEvent extends RunEventBase {
@@ -1099,6 +1110,12 @@ export interface ErrorEvent extends RunEventBase {
   turns?: number;
   /** Resolved model that executed the run. See {@link RunModelInfo}. */
   model?: RunModelInfo;
+  /** Provider HTTP status associated with this terminal failure, when available. */
+  apiStatus?: number;
+  /** Provider-specific error code associated with this terminal failure, when available. */
+  apiCode?: string;
+  /** Structured-output enforcement metadata, when reported by the server. */
+  structuredOutput?: StructuredOutputInfo;
 }
 
 export interface CancelledEvent extends RunEventBase {
@@ -1456,6 +1473,7 @@ export class MantyxClient {
     let tokens: RunTokenUsage | undefined;
     let turns: number | undefined;
     let modelInfo: RunModelInfo | undefined;
+    let structuredOutput: StructuredOutputInfo | undefined;
     let plan: TaskPlan | undefined;
     for await (const ev of this.streamRunEvents(runId, handlers, opts.signal)) {
       collected.push(ev);
@@ -1468,6 +1486,7 @@ export class MantyxClient {
         tokens = parseRunTokens(r.tokens) ?? tokens;
         turns = parseRunTurns(r.turns) ?? turns;
         modelInfo = parseRunModel(r.model) ?? modelInfo;
+        structuredOutput = parseStructuredOutputInfo(r.structuredOutput) ?? structuredOutput;
         if (r.subtype === "success") {
           finalText = typeof r.text === "string" ? r.text : "";
           const parsedPlan = parseTaskPlan(r.plan);
@@ -1479,6 +1498,7 @@ export class MantyxClient {
           if (tokens !== undefined) errInit.tokens = tokens;
           if (turns !== undefined) errInit.turns = turns;
           if (modelInfo !== undefined) errInit.model = modelInfo;
+          if (structuredOutput !== undefined) errInit.structuredOutput = structuredOutput;
           throw new MantyxRunError(runId, r.subtype, r.error ?? r.subtype, errInit);
         }
       } else if (ev.type === "error") {
@@ -1493,12 +1513,16 @@ export class MantyxClient {
         if (e.finishReason !== undefined) errInit.finishReason = e.finishReason;
         if (typeof e.partialText === "string") errInit.partialText = e.partialText;
         if (typeof e.retryable === "boolean") errInit.retryable = e.retryable;
+        if (typeof e.apiStatus === "number") errInit.apiStatus = e.apiStatus;
+        if (typeof e.apiCode === "string") errInit.apiCode = e.apiCode;
         const errTokens = parseRunTokens(e.tokens);
         if (errTokens !== undefined) errInit.tokens = errTokens;
         const errTurns = parseRunTurns(e.turns);
         if (errTurns !== undefined) errInit.turns = errTurns;
         const errModel = parseRunModel(e.model);
         if (errModel !== undefined) errInit.model = errModel;
+        const errStructuredOutput = parseStructuredOutputInfo(e.structuredOutput);
+        if (errStructuredOutput !== undefined) errInit.structuredOutput = errStructuredOutput;
         throw new MantyxRunError(runId, subtype, e.error, errInit);
       } else if (ev.type === "cancelled") {
         throw new MantyxRunError(runId, "cancelled", "Run was cancelled");
@@ -1508,6 +1532,7 @@ export class MantyxClient {
     if (tokens !== undefined) result.tokens = tokens;
     if (turns !== undefined) result.turns = turns;
     if (modelInfo !== undefined) result.model = modelInfo;
+    if (structuredOutput !== undefined) result.structuredOutput = structuredOutput;
     if (plan !== undefined) result.plan = plan;
     return result;
   }
@@ -2508,6 +2533,14 @@ function normalizeOutputSchema(value: OutputSchema): Record<string, unknown> {
     }
     out.name = value.name;
   }
+  if (value.enforcement !== undefined) {
+    if (value.enforcement !== "best_effort" && value.enforcement !== "strict") {
+      throw new MantyxError(
+        `outputSchema.enforcement must be "best_effort" or "strict", got ${JSON.stringify(value.enforcement)}`,
+      );
+    }
+    out.enforcement = value.enforcement;
+  }
   const schema = toToolParametersWire(
     value.schema as NonNullable<Parameters<typeof toToolParametersWire>[0]>,
   );
@@ -2822,9 +2855,8 @@ function normalizeToolBudgets(value: ToolBudgets): Record<string, { maxCalls: nu
 /**
  * Parse the terminal text of a `RunResult` as JSON.
  *
- * When the run was submitted with `outputSchema`, MANTYX (via the LLM
- * provider) guarantees the reply parses as JSON in the *vast* majority of
- * cases. Transient model errors (refusal text, truncation under
+ * Provider-enforced output should parse as JSON, but transient model errors
+ * (refusal text, truncation under
  * `max_tokens` pressure, exotic Unicode) can still produce strings that
  * fail to `JSON.parse` in rare edge cases — this helper centralises that
  * brittle step and surfaces a typed {@link MantyxParseError} on failure
@@ -2926,6 +2958,29 @@ function parseRunTokens(value: unknown): RunTokenUsage | undefined {
 function parseRunTurns(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   return Math.max(0, Math.trunc(value));
+}
+
+/** Defensively parse optional terminal structured-output metadata. */
+function parseStructuredOutputInfo(value: unknown): StructuredOutputInfo | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  const mechanism = v.enforcementMechanism;
+  if (
+    typeof v.schemaRequested !== "boolean" ||
+    typeof v.schemaEnforced !== "boolean" ||
+    (mechanism !== "native_schema" &&
+      mechanism !== "synthetic_tool" &&
+      mechanism !== "none") ||
+    typeof v.unconstrainedFallbackOccurred !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    schemaRequested: v.schemaRequested,
+    schemaEnforced: v.schemaEnforced,
+    enforcementMechanism: mechanism,
+    unconstrainedFallbackOccurred: v.unconstrainedFallbackOccurred,
+  };
 }
 
 /**

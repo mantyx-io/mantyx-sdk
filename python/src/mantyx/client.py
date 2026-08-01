@@ -37,6 +37,7 @@ from .errors import (
     MantyxRunError,
     MantyxScopeError,
     MantyxToolError,
+    StructuredOutputInfo,
 )
 from .oauth import TokenSource
 from .sse import SseEvent, iter_sse
@@ -375,6 +376,8 @@ class RunResult:
     # Resolved model that executed the run. ``None`` against legacy
     # MANTYX servers.
     model: RunModelInfo | None = None
+    # Structured-output enforcement metadata. ``None`` against legacy servers.
+    structured_output: StructuredOutputInfo | None = None
     # Final structured checklist for plan-only runs. ``None`` for normal
     # executed runs — use ``task_plan`` events for live progress.
     plan: TaskPlan | None = None
@@ -1013,6 +1016,7 @@ class MantyxClient:
         tokens: RunTokenUsage | None = None
         turns: int | None = None
         model_info: RunModelInfo | None = None
+        structured_output: StructuredOutputInfo | None = None
         task_plan: TaskPlan | None = None
         for ev in self._stream_events(run_id, handlers):
             collected.append(ev)
@@ -1033,6 +1037,11 @@ class MantyxClient:
                 parsed_model = _parse_run_model(ev.data.get("model"))
                 if parsed_model is not None:
                     model_info = parsed_model
+                parsed_structured_output = _parse_structured_output_info(
+                    ev.data.get("structuredOutput")
+                )
+                if parsed_structured_output is not None:
+                    structured_output = parsed_structured_output
                 if subtype == "success":
                     txt = ev.data.get("text")
                     final_text = txt if isinstance(txt, str) else ""
@@ -1048,6 +1057,7 @@ class MantyxClient:
                         tokens=tokens,
                         turns=turns,
                         model=model_info,
+                        structured_output=structured_output,
                     )
             elif ev.type == "error":
                 # The wire reports both a coarse `code` (legacy alias)
@@ -1081,6 +1091,13 @@ class MantyxClient:
                     tokens=err_tokens,
                     turns=err_turns,
                     model=err_model,
+                    api_status=_parse_api_status(ev.data.get("apiStatus")),
+                    api_code=(
+                        ev.data.get("apiCode") if isinstance(ev.data.get("apiCode"), str) else None
+                    ),
+                    structured_output=_parse_structured_output_info(
+                        ev.data.get("structuredOutput")
+                    ),
                 )
             elif ev.type == "cancelled":
                 raise MantyxRunError(run_id, "cancelled", "Run was cancelled")
@@ -1091,6 +1108,7 @@ class MantyxClient:
             tokens=tokens,
             turns=turns,
             model=model_info,
+            structured_output=structured_output,
             plan=task_plan,
         )
 
@@ -2293,6 +2311,36 @@ def _parse_run_turns(raw: Any) -> int | None:
     return max(0, int(raw))
 
 
+def _parse_api_status(raw: Any) -> int | None:
+    """Parse an optional provider HTTP status without accepting booleans."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return int(raw)
+
+
+def _parse_structured_output_info(raw: Any) -> StructuredOutputInfo | None:
+    """Defensively parse optional terminal structured-output metadata."""
+    if not isinstance(raw, dict):
+        return None
+    schema_requested = raw.get("schemaRequested")
+    schema_enforced = raw.get("schemaEnforced")
+    mechanism = raw.get("enforcementMechanism")
+    fallback = raw.get("unconstrainedFallbackOccurred")
+    if (
+        not isinstance(schema_requested, bool)
+        or not isinstance(schema_enforced, bool)
+        or mechanism not in ("native_schema", "synthetic_tool", "none")
+        or not isinstance(fallback, bool)
+    ):
+        return None
+    return StructuredOutputInfo(
+        schema_requested=schema_requested,
+        schema_enforced=schema_enforced,
+        enforcement_mechanism=mechanism,
+        unconstrained_fallback_occurred=fallback,
+    )
+
+
 def _parse_run_model(raw: Any) -> RunModelInfo | None:
     """Defensively coerce a wire ``model`` object into
     :class:`RunModelInfo`. Returns ``None`` when the input isn't a
@@ -2330,9 +2378,8 @@ def parse_run_output(
 ) -> Any:
     """Parse the terminal text of a :class:`RunResult` as JSON.
 
-    When the run was submitted with ``output_schema``, MANTYX (via the LLM
-    provider) guarantees the reply parses as JSON in the *vast* majority
-    of cases. Transient model errors (refusal text, truncation under
+    Provider-enforced output should parse as JSON, but transient model errors
+    (refusal text, truncation under
     ``max_tokens`` pressure, exotic Unicode) can still produce strings
     that fail to ``json.loads`` in rare edge cases — this helper
     centralises that brittle step and surfaces a typed

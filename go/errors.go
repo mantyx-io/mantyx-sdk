@@ -155,6 +155,14 @@ type RunError struct {
 	// Model identifies the resolved model that executed the run. nil
 	// against legacy MANTYX servers.
 	Model *RunModelInfo
+	// APIStatus is the provider HTTP status associated with the failure.
+	// Zero means the terminal event did not report one.
+	APIStatus int
+	// APICode is the provider-specific error code associated with the failure.
+	APICode string
+	// StructuredOutput carries output-schema enforcement metadata. nil when
+	// the terminal event did not report it.
+	StructuredOutput *StructuredOutputInfo
 }
 
 func (e *RunError) Error() string {

@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
+
+StructuredOutputEnforcementMechanism = Literal["native_schema", "synthetic_tool", "none"]
+
+
+@dataclass(frozen=True)
+class StructuredOutputInfo:
+    """Terminal output-schema enforcement observability."""
+
+    schema_requested: bool
+    schema_enforced: bool
+    enforcement_mechanism: StructuredOutputEnforcementMechanism
+    unconstrained_fallback_occurred: bool
 
 
 class MantyxError(Exception):
@@ -166,6 +179,9 @@ class MantyxRunError(MantyxError):
         tokens: Any | None = None,
         turns: int | None = None,
         model: Any | None = None,
+        api_status: int | None = None,
+        api_code: str | None = None,
+        structured_output: StructuredOutputInfo | None = None,
     ) -> None:
         super().__init__(message, code=subtype)
         self.run_id = run_id
@@ -180,6 +196,9 @@ class MantyxRunError(MantyxError):
         self.tokens = tokens
         self.turns = turns
         self.model = model
+        self.api_status = api_status
+        self.api_code = api_code
+        self.structured_output = structured_output
 
 
 class MantyxParseError(MantyxError):
@@ -212,4 +231,6 @@ __all__ = [
     "MantyxRunError",
     "MantyxScopeError",
     "MantyxToolError",
+    "StructuredOutputEnforcementMechanism",
+    "StructuredOutputInfo",
 ]

@@ -51,6 +51,7 @@ from .client import (
     _describe_handler,
     _eval_event_to_run_event,
     _is_tool_result_post_retryable,
+    _parse_api_status,
     _parse_eval_dataset_detail,
     _parse_eval_dataset_list,
     _parse_eval_run_accepted,
@@ -67,6 +68,7 @@ from .client import (
     _parse_session_events,
     _parse_session_info,
     _parse_session_list,
+    _parse_structured_output_info,
     _quote,
     _resolve_credential,
     _serialize_agent_spec,
@@ -82,6 +84,7 @@ from .errors import (
     MantyxRunError,
     MantyxScopeError,
     MantyxToolError,
+    StructuredOutputInfo,
 )
 from .oauth import AsyncTokenSource
 from .sse import aiter_sse
@@ -673,6 +676,7 @@ class AsyncMantyxClient:
         tokens: RunTokenUsage | None = None
         turns: int | None = None
         model_info: RunModelInfo | None = None
+        structured_output: StructuredOutputInfo | None = None
         async for ev in self._stream_events(run_id, handlers):
             collected.append(ev)
             if on_event is not None:
@@ -692,6 +696,11 @@ class AsyncMantyxClient:
                 parsed_model = _parse_run_model(ev.data.get("model"))
                 if parsed_model is not None:
                     model_info = parsed_model
+                parsed_structured_output = _parse_structured_output_info(
+                    ev.data.get("structuredOutput")
+                )
+                if parsed_structured_output is not None:
+                    structured_output = parsed_structured_output
                 if subtype == "success":
                     txt = ev.data.get("text")
                     final_text = txt if isinstance(txt, str) else ""
@@ -704,6 +713,7 @@ class AsyncMantyxClient:
                         tokens=tokens,
                         turns=turns,
                         model=model_info,
+                        structured_output=structured_output,
                     )
             elif ev.type == "error":
                 # The wire reports both a coarse `code` (legacy alias)
@@ -734,6 +744,13 @@ class AsyncMantyxClient:
                     tokens=err_tokens,
                     turns=err_turns,
                     model=err_model,
+                    api_status=_parse_api_status(ev.data.get("apiStatus")),
+                    api_code=(
+                        ev.data.get("apiCode") if isinstance(ev.data.get("apiCode"), str) else None
+                    ),
+                    structured_output=_parse_structured_output_info(
+                        ev.data.get("structuredOutput")
+                    ),
                 )
             elif ev.type == "cancelled":
                 raise MantyxRunError(run_id, "cancelled", "Run was cancelled")
@@ -744,6 +761,7 @@ class AsyncMantyxClient:
             tokens=tokens,
             turns=turns,
             model=model_info,
+            structured_output=structured_output,
         )
 
     async def _stream_events(

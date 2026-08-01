@@ -472,9 +472,10 @@ client.run_agent(system_prompt="...", prompt="...", reasoning_level=80)
 
 #### Structured output (`output_schema`)
 
-Constrain the assistant's **final reply** to a JSON document matching a
-JSON Schema, and decode it with a Pydantic (or any) validator via
-`parse_run_output`:
+Ask the provider to constrain the assistant's **final reply** to a JSON
+document matching a JSON Schema. Set `enforcement: "strict"` when an
+unsupported schema or unconstrained fallback must fail, and decode the result
+with a Pydantic (or any) validator via `parse_run_output`:
 
 ```python
 from pydantic import BaseModel
@@ -499,7 +500,11 @@ WEATHER_SCHEMA = {
 result = client.run_agent(
     system_prompt="Return the weather as JSON.",
     prompt="What's the weather in San Francisco right now?",
-    output_schema={"name": "weather_report", "schema": WEATHER_SCHEMA},
+    output_schema={
+        "name": "weather_report",
+        "schema": WEATHER_SCHEMA,
+        "enforcement": "strict",
+    },
 )
 report = parse_run_output(result, Weather.model_validate)
 # report.city / report.temperature_c are typed.
@@ -509,6 +514,11 @@ report = parse_run_output(result, Weather.model_validate)
 schema shape, and serialised size (≤ 32 KB) locally so you get a typed
 `ValueError` up front. On rare parse failures `parse_run_output` raises
 `MantyxParseError` with the raw text preserved on the `text` attribute.
+`result.structured_output` reports actual enforcement, its native-schema or
+synthetic-tool mechanism, and whether a best-effort unconstrained fallback
+occurred. Strict provider rejection raises `MantyxRunError` with
+`error_class == "structured_output_schema_rejected"` and preserves
+`api_status`, `api_code`, and the provider message.
 Available on both sync and async clients, on `run_agent` /
 `stream_agent` / `create_session`, and as a per-message override on
 `session.send` / `session.stream`. See `docs/wire-protocol.md` §7 for
