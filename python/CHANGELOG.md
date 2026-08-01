@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [python/v0.25.0] — 2026-08-01
+
+### Added
+
+- Expose structured output enforcement
+
 ## [python/v0.24.0] — 2026-07-24
 
 ### Documentation
@@ -173,6 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changelog generation
 
+[python/v0.25.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.24.0..python/v0.25.0
 [python/v0.24.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.23.0..python/v0.24.0
 [python/v0.23.0]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.22.1..python/v0.23.0
 [python/v0.22.1]: https://github.com/mantyx-io/mantyx-sdk/compare/python/v0.22.0..python/v0.22.1
