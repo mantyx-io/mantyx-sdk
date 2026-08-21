@@ -1199,7 +1199,8 @@ application identifiers they attached at create time (see §4.9).
 | `metadata`  | Repeatable `key:value` filter; AND-combined. Malformed entries return `400 invalid_request`. |
 | `status`    | Optional exact match (`active` / `ended`).                                                   |
 | `limit`     | Default `50`, max `200`.                                                                     |
-| `offset`    | Default `0`.                                                                                 |
+| `cursor`    | Opaque `nextCursor` from the prior page; preferred for deep paging.                          |
+| `offset`    | Legacy fallback, default `0`; ignored when `cursor` is present.                              |
 
 ```http
 GET /api/v1/workspaces/acme/agent-sessions?metadata=customer:acme&metadata=env:prod&limit=20
@@ -1210,6 +1211,7 @@ GET /api/v1/workspaces/acme/agent-sessions?metadata=customer:acme&metadata=env:p
   "total": 1,
   "limit": 20,
   "offset": 0,
+  "nextCursor": null,
   "sessions": [
     {
       "sessionId": "ses_abc",
@@ -1235,8 +1237,13 @@ stream (§7). Unknown session ids return `404 not_found`.
 
 | Query param    | Notes                                                                           |
 | -------------- | ------------------------------------------------------------------------------- |
-| `full`         | `1` / `true` returns every message (the default when no paging param is given). |
-| `lastMessages` | Return only the last `N` messages. Ignored when `full` is set.                  |
+| `full`         | `1` / `true` returns the complete history and overrides paging parameters.       |
+| `lastMessages` | Opt into paging and return the last `N` messages (max 500).                      |
+| `beforeSeq`    | Page backward from an earlier message sequence (default page size 100).          |
+
+For backwards compatibility, omitting all three parameters returns the complete
+history. New clients should use `lastMessages` and follow `nextBeforeSeq` for
+bounded reads.
 
 ```http
 GET /api/v1/workspaces/acme/agent-sessions/ses_abc/events?lastMessages=2
@@ -1250,12 +1257,15 @@ GET /api/v1/workspaces/acme/agent-sessions/ses_abc/events?lastMessages=2
     { "seq": 3, "type": "user_message", "text": "three" },
     { "seq": 4, "type": "assistant_message", "text": "four" },
   ],
+  "nextBeforeSeq": 3,
+  "truncated": true,
 }
 ```
 
 Frames use the flattened wire shape clients already consume from SSE
 (`{ seq, type, ...payload }`). `seq` is the message's position in the full
-conversation (stable across paging). Reconstructed turns map as:
+conversation (stable across paging). `truncated` is true while older messages
+remain. Reconstructed turns map as:
 
 | Stored role | Frame `type`                       |
 | ----------- | ---------------------------------- |

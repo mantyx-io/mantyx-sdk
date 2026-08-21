@@ -501,12 +501,14 @@ live stream.
 
 ```ts
 // Find sessions by your own identifiers (AND-combined server-side)
-const { sessions, total } = await client.listSessions({
+const { sessions, total, nextCursor } = await client.listSessions({
   metadata: { customer: "acme" },
   status: "active", // optional: "active" | "ended"
   limit: 50, // optional pagination
-  offset: 0,
 });
+const nextPage = nextCursor
+  ? await client.listSessions({ limit: 50, cursor: nextCursor })
+  : null;
 // Each row: { sessionId, creationDate, lastInteractionDate, summary, metadata, status }
 
 // Replay a session as realtime-style frames so a UI can rebuild the thread.
@@ -517,6 +519,14 @@ const events = await client.getSessionEvents(sessions[0].sessionId);
 const recent = await client.getSessionEvents(sessions[0].sessionId, {
   lastMessages: 10,
 });
+
+// For bounded backward paging, use the page response metadata:
+const page = await client.getSessionEventsPage(sessions[0].sessionId);
+const older = page.nextBeforeSeq
+  ? await client.getSessionEventsPage(sessions[0].sessionId, {
+      beforeSeq: page.nextBeforeSeq,
+    })
+  : null;
 ```
 
 Resuming a session from a different process re-binds your local tool
@@ -563,8 +573,9 @@ Opt-in multi-step checklists. Pass `plan: true` (auto-classify + live tracking) 
 | `streamAgent(spec)`                           | `AsyncIterable<RunEvent>`            |
 | `createSession(spec)`                         | `Promise<AgentSession>`              |
 | `resumeSession(sessionId, { tools? })`        | `Promise<AgentSession>`              |
-| `listSessions({ metadata?, status?, limit?, offset? })` | `Promise<SessionListResult>`         |
+| `listSessions({ metadata?, status?, limit?, offset?, cursor? })` | `Promise<SessionListResult>`         |
 | `getSessionEvents(sessionId, { full?, lastMessages? })` | `Promise<RunEvent[]>`                |
+| `getSessionEventsPage(sessionId, { lastMessages?, beforeSeq? })` | `Promise<SessionEventsPage>`         |
 | `endSession(sessionId)`                       | `Promise<void>`                      |
 | `cancelRun(runId)`                            | `Promise<void>`                      |
 

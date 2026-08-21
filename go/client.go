@@ -1012,10 +1012,11 @@ type SessionSummary struct {
 
 // SessionListResult is the paginated response from ListSessions.
 type SessionListResult struct {
-	Total    int              `json:"total"`
-	Limit    int              `json:"limit"`
-	Offset   int              `json:"offset"`
-	Sessions []SessionSummary `json:"sessions"`
+	Total      int              `json:"total"`
+	Limit      int              `json:"limit"`
+	Offset     int              `json:"offset"`
+	NextCursor string           `json:"nextCursor"`
+	Sessions   []SessionSummary `json:"sessions"`
 }
 
 // ListSessionsOptions filters and paginates a ListSessions call. The zero
@@ -1031,6 +1032,8 @@ type ListSessionsOptions struct {
 	Limit int
 	// Offset skips the first N rows for pagination. 0 leaves it unset.
 	Offset int
+	// Cursor is the opaque NextCursor returned by the previous page.
+	Cursor string
 }
 
 // GetSessionEventsOptions controls how much of a session's conversation
@@ -1041,6 +1044,23 @@ type GetSessionEventsOptions struct {
 	// LastMessages, when > 0 and Full is false, returns only the most recent
 	// N message frames.
 	LastMessages int
+}
+
+// SessionEventsPageOptions controls a bounded session-history read.
+type SessionEventsPageOptions struct {
+	// LastMessages is the page size (server max 500). Defaults to 100.
+	LastMessages int
+	// BeforeSeq pages backward from an earlier message sequence.
+	BeforeSeq int
+}
+
+// SessionEventsPage is one bounded page of session event frames.
+type SessionEventsPage struct {
+	SessionID     string
+	Total         int
+	Events        []RunEvent
+	NextBeforeSeq int
+	Truncated     bool
 }
 
 // ----- One-shot run ---------------------------------------------------------
@@ -1269,6 +1289,9 @@ func (c *Client) ListSessions(ctx context.Context, opts ListSessionsOptions) (Se
 	if opts.Offset > 0 {
 		q.Set("offset", strconv.Itoa(opts.Offset))
 	}
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
+	}
 	path := "/agent-sessions"
 	if encoded := q.Encode(); encoded != "" {
 		path += "?" + encoded
@@ -1302,8 +1325,44 @@ func (c *Client) GetSessionEvents(ctx context.Context, id string, opts GetSessio
 	if err := c.do(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, err
 	}
-	events := make([]RunEvent, 0, len(resp.Events))
-	for i, frame := range resp.Events {
+	return decodeSessionEventFrames(resp.Events), nil
+}
+
+// GetSessionEventsPage fetches one bounded page in ascending sequence order.
+// Follow NextBeforeSeq to walk backward through older history.
+func (c *Client) GetSessionEventsPage(ctx context.Context, id string, opts SessionEventsPageOptions) (SessionEventsPage, error) {
+	q := url.Values{}
+	pageSize := opts.LastMessages
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+	q.Set("lastMessages", strconv.Itoa(pageSize))
+	if opts.BeforeSeq > 0 {
+		q.Set("beforeSeq", strconv.Itoa(opts.BeforeSeq))
+	}
+	path := "/agent-sessions/" + pathEscape(id) + "/events?" + q.Encode()
+	var resp struct {
+		SessionID     string           `json:"sessionId"`
+		Total         int              `json:"total"`
+		Events        []map[string]any `json:"events"`
+		NextBeforeSeq int              `json:"nextBeforeSeq"`
+		Truncated     bool             `json:"truncated"`
+	}
+	if err := c.do(ctx, "GET", path, nil, &resp); err != nil {
+		return SessionEventsPage{}, err
+	}
+	return SessionEventsPage{
+		SessionID:     resp.SessionID,
+		Total:         resp.Total,
+		Events:        decodeSessionEventFrames(resp.Events),
+		NextBeforeSeq: resp.NextBeforeSeq,
+		Truncated:     resp.Truncated,
+	}, nil
+}
+
+func decodeSessionEventFrames(frames []map[string]any) []RunEvent {
+	events := make([]RunEvent, 0, len(frames))
+	for i, frame := range frames {
 		seq := i + 1
 		if v, ok := frame["seq"].(float64); ok {
 			seq = int(v)
@@ -1321,7 +1380,7 @@ func (c *Client) GetSessionEvents(ctx context.Context, id string, opts GetSessio
 		}
 		events = append(events, RunEvent{Seq: seq, Type: evType, Data: data})
 	}
-	return events, nil
+	return events
 }
 
 // ----- Run driver -----------------------------------------------------------

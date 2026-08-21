@@ -51,6 +51,27 @@ const session = await client.resumeSession(sessionId, {
 
 Local tool **handlers** are not persisted: the session stores definitions (name, schema, description) so that a restarted SDK can re-bind handlers and keep going. If you don't pass `tools` to `resumeSession`, the session uses whatever it had at create time — which means subsequent `send` calls will fail to dispatch local tools because there are no handlers in this process.
 
+## Restoring long histories
+
+Existing `getSessionEvents(sessionId)` calls continue to return the complete
+history. For bounded reads, fetch the newest page and follow `nextBeforeSeq`
+backward:
+
+```ts
+let page = await client.getSessionEventsPage(sessionId);
+render(page.events);
+
+while (page.nextBeforeSeq) {
+  page = await client.getSessionEventsPage(sessionId, {
+    beforeSeq: page.nextBeforeSeq,
+  });
+  prepend(page.events);
+}
+```
+
+Session lists expose the same cursor pattern through `nextCursor` and the
+`cursor` option on `listSessions`.
+
 ## Session metadata
 
 Anything you pass as `metadata` at session creation is inherited by every run created via `session.send`. See [Metadata](/docs/metadata/) for the validation rules and the per-message override pattern.

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,7 +31,7 @@ type mockServer struct {
 	// failAuthCount, when > 0, makes the next N API requests return
 	// 401; subsequent requests fall through to normal handling. Used
 	// to exercise the SDK's "refresh + retry once on 401" flow.
-	failAuthCount       int
+	failAuthCount int
 	// failToolResultCount, when > 0, makes the next N tool-result POSTs
 	// return 503; subsequent calls succeed. Used to exercise the SDK's
 	// tool-result retry path.
@@ -38,14 +39,14 @@ type mockServer struct {
 	// toolResultFixedStatus, when non-zero, makes every tool-result POST
 	// return that HTTP status.
 	toolResultFixedStatus int
-	toolResultPostCount int
-	lastAuthHeader      string
-	authHeaderHistory   []string
-	lastToolResultBody  []byte
-	lastRunCreateBody   []byte
-	lastFeedbackBody    []byte
-	lastFeedbackCreated bool
-	feedbackByRun       map[string]struct {
+	toolResultPostCount   int
+	lastAuthHeader        string
+	authHeaderHistory     []string
+	lastToolResultBody    []byte
+	lastRunCreateBody     []byte
+	lastFeedbackBody      []byte
+	lastFeedbackCreated   bool
+	feedbackByRun         map[string]struct {
 		id   string
 		body []byte
 	}
@@ -435,11 +436,38 @@ func (m *mockServer) handleAgentSessions(w http.ResponseWriter, r *http.Request,
 			})
 		}
 		m.mu.Unlock()
+		sort.Slice(summaries, func(i, j int) bool {
+			return summaries[i].SessionID < summaries[j].SessionID
+		})
+		offset := 0
+		if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+			for i, summary := range summaries {
+				if summary.SessionID == cursor {
+					offset = i + 1
+					break
+				}
+			}
+		} else if raw := r.URL.Query().Get("offset"); raw != "" {
+			offset, _ = strconv.Atoi(raw)
+		}
+		limit := 50
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		end := min(offset+limit, len(summaries))
+		page := summaries[offset:end]
+		nextCursor := ""
+		if end < len(summaries) && len(page) > 0 {
+			nextCursor = page[len(page)-1].SessionID
+		}
 		m.writeJSON(w, http.StatusOK, SessionListResult{
-			Total:    len(summaries),
-			Limit:    50,
-			Offset:   0,
-			Sessions: summaries,
+			Total:      len(summaries),
+			Limit:      limit,
+			Offset:     offset,
+			NextCursor: nextCursor,
+			Sessions:   page,
 		})
 	case len(rest) == 2 && rest[1] == "events" && r.Method == http.MethodGet:
 		m.mu.Lock()
@@ -450,16 +478,25 @@ func (m *mockServer) handleAgentSessions(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		all := sess.messages
-		selected := all
 		full := r.URL.Query().Get("full") == "1" || r.URL.Query().Get("full") == "true"
+		candidates := all
 		if !full {
-			if v := r.URL.Query().Get("lastMessages"); v != "" {
-				if n, err := strconv.Atoi(v); err == nil && n > 0 && n < len(all) {
-					selected = all[len(all)-n:]
+			if raw := r.URL.Query().Get("beforeSeq"); raw != "" {
+				if before, err := strconv.Atoi(raw); err == nil && before > 0 {
+					end := min(before-1, len(all))
+					candidates = all[:end]
 				}
 			}
 		}
-		startIndex := len(all) - len(selected)
+		selected := candidates
+		if !full {
+			if v := r.URL.Query().Get("lastMessages"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 && n < len(candidates) {
+					selected = candidates[len(candidates)-n:]
+				}
+			}
+		}
+		startIndex := len(candidates) - len(selected)
 		events := []map[string]any{}
 		for i, msg := range selected {
 			seq := startIndex + i + 1
@@ -472,10 +509,18 @@ func (m *mockServer) handleAgentSessions(w http.ResponseWriter, r *http.Request,
 				events = append(events, map[string]any{"seq": seq, "type": "message", "role": msg.Role, "text": msg.Content})
 			}
 		}
+		nextBeforeSeq := 0
+		if len(events) > 0 {
+			if seq, ok := events[0]["seq"].(int); ok && seq > 1 {
+				nextBeforeSeq = seq
+			}
+		}
 		m.writeJSON(w, http.StatusOK, map[string]any{
-			"sessionId": rest[0],
-			"total":     len(all),
-			"events":    events,
+			"sessionId":     rest[0],
+			"total":         len(all),
+			"events":        events,
+			"nextBeforeSeq": nextBeforeSeq,
+			"truncated":     nextBeforeSeq > 0,
 		})
 	case len(rest) == 1 && r.Method == http.MethodGet:
 		m.mu.Lock()

@@ -419,6 +419,18 @@ class SessionListResult:
     limit: int
     offset: int
     sessions: list[SessionSummary]
+    next_cursor: str | None = None
+
+
+@dataclass
+class SessionEventsPage:
+    """One bounded page of session replay events."""
+
+    session_id: str
+    total: int
+    events: list[RunEvent]
+    next_before_seq: int | None
+    truncated: bool
 
 
 # --------------------------------------------------------------------- Client
@@ -952,6 +964,7 @@ class MantyxClient:
         status: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+        cursor: str | None = None,
     ) -> SessionListResult:
         """List the workspace's sessions, most-recently-used first.
 
@@ -968,6 +981,8 @@ class MantyxClient:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
+        if cursor is not None:
+            params["cursor"] = cursor
         body = self._request("GET", "/agent-sessions", params=params) or {}
         return _parse_session_list(body)
 
@@ -995,6 +1010,23 @@ class MantyxClient:
             or {}
         )
         return _parse_session_events(body)
+
+    def get_session_events_page(
+        self,
+        session_id: str,
+        *,
+        last_messages: int = 100,
+        before_seq: int | None = None,
+    ) -> SessionEventsPage:
+        """Fetch one bounded page and follow ``next_before_seq`` for older events."""
+        params: dict[str, Any] = {"lastMessages": last_messages}
+        if before_seq is not None:
+            params["beforeSeq"] = before_seq
+        body = (
+            self._request("GET", f"/agent-sessions/{_quote(session_id)}/events", params=params)
+            or {}
+        )
+        return _parse_session_events_page(body)
 
     # ------------------------------------------------------------ Internals
 
@@ -1561,6 +1593,16 @@ class AgentSession:
         """Replay this session's conversation as realtime-style event frames."""
         return self.client.get_session_events(self.id, full=full, last_messages=last_messages)
 
+    def events_page(
+        self, *, last_messages: int = 100, before_seq: int | None = None
+    ) -> SessionEventsPage:
+        """Return one bounded page of replay frames."""
+        return self.client.get_session_events_page(
+            self.id,
+            last_messages=last_messages,
+            before_seq=before_seq,
+        )
+
     def end(self) -> None:
         try:
             self.client.end_session(self.id)
@@ -1865,6 +1907,7 @@ def _parse_session_list(body: Mapping[str, Any]) -> SessionListResult:
         limit=_int_or_zero(body.get("limit")),
         offset=_int_or_zero(body.get("offset")),
         sessions=sessions,
+        next_cursor=body.get("nextCursor") if isinstance(body.get("nextCursor"), str) else None,
     )
 
 
@@ -1882,6 +1925,19 @@ def _parse_session_events(body: Mapping[str, Any]) -> list[RunEvent]:
         data = {k: v for k, v in frame.items() if k not in ("seq", "type")}
         events.append(RunEvent(seq=seq, type=type_, data=data))
     return events
+
+
+def _parse_session_events_page(body: Mapping[str, Any]) -> SessionEventsPage:
+    next_before_seq_raw = body.get("nextBeforeSeq")
+    return SessionEventsPage(
+        session_id=str(body.get("sessionId") or ""),
+        total=_int_or_zero(body.get("total")),
+        events=_parse_session_events(body),
+        next_before_seq=int(next_before_seq_raw)
+        if isinstance(next_before_seq_raw, (int, float))
+        else None,
+        truncated=body.get("truncated") is True,
+    )
 
 
 def _parse_session_info(body: Mapping[str, Any]) -> SessionInfo:
@@ -2438,6 +2494,7 @@ __all__ = [
     "RunModelInfo",
     "RunResult",
     "RunTokenUsage",
+    "SessionEventsPage",
     "SessionInfo",
     "SessionListResult",
     "SessionSummary",

@@ -1184,7 +1184,21 @@ export interface SessionListResult {
   total: number;
   limit: number;
   offset: number;
+  /** Opaque cursor for the next page. Absent on older MANTYX servers. */
+  nextCursor?: string | null;
   sessions: SessionSummary[];
+}
+
+/** One bounded page from {@link MantyxClient.getSessionEventsPage}. */
+export interface SessionEventsPage {
+  sessionId: string;
+  /** Total messages in the session, not just this page. */
+  total: number;
+  events: RunEvent[];
+  /** Pass this value back as `beforeSeq` to fetch the preceding page. */
+  nextBeforeSeq: number | null;
+  /** True when older messages remain before this page. */
+  truncated: boolean;
 }
 
 /** Build a `?a=1&b=2` query string, repeating array values and dropping `undefined`. */
@@ -1407,6 +1421,8 @@ export class MantyxClient {
       status?: "active" | "ended";
       limit?: number;
       offset?: number;
+      /** Opaque `nextCursor` returned by the previous page. */
+      cursor?: string;
     } = {},
   ): Promise<SessionListResult> {
     const query: Record<string, string | string[] | number | undefined> = {};
@@ -1417,6 +1433,7 @@ export class MantyxClient {
     if (opts.status) query.status = opts.status;
     if (typeof opts.limit === "number") query.limit = opts.limit;
     if (typeof opts.offset === "number") query.offset = opts.offset;
+    if (opts.cursor) query.cursor = opts.cursor;
     return this.request<SessionListResult>({
       method: "GET",
       path: "/agent-sessions",
@@ -1450,6 +1467,38 @@ export class MantyxClient {
       query,
     });
     return res.events ?? [];
+  }
+
+  /**
+   * Fetch one bounded page of session events. Pages are returned in ascending
+   * sequence order; follow `nextBeforeSeq` to walk backward through history.
+   */
+  async getSessionEventsPage(
+    sessionId: string,
+    opts: { lastMessages?: number; beforeSeq?: number } = {},
+  ): Promise<SessionEventsPage> {
+    const query: Record<string, number | undefined> = {
+      lastMessages: opts.lastMessages ?? 100,
+      beforeSeq: opts.beforeSeq,
+    };
+    const res = await this.request<{
+      sessionId: string;
+      total: number;
+      events?: RunEvent[];
+      nextBeforeSeq?: number | null;
+      truncated?: boolean;
+    }>({
+      method: "GET",
+      path: `/agent-sessions/${encodeURIComponent(sessionId)}/events`,
+      query,
+    });
+    return {
+      sessionId: res.sessionId,
+      total: res.total,
+      events: res.events ?? [],
+      nextBeforeSeq: res.nextBeforeSeq ?? null,
+      truncated: res.truncated ?? false,
+    };
   }
 
   // ----------------------------------------------------------- Internals
@@ -2235,6 +2284,18 @@ export class AgentSession {
 
   async info(): Promise<SessionInfo> {
     return this.client.getSessionInfo(this.id);
+  }
+
+  async events(
+    opts: { full?: boolean; lastMessages?: number } = {},
+  ): Promise<RunEvent[]> {
+    return this.client.getSessionEvents(this.id, opts);
+  }
+
+  async eventsPage(
+    opts: { lastMessages?: number; beforeSeq?: number } = {},
+  ): Promise<SessionEventsPage> {
+    return this.client.getSessionEventsPage(this.id, opts);
   }
 
   async end(): Promise<void> {
