@@ -561,6 +561,12 @@ result, err := client.ListSessions(ctx, mantyx.ListSessionsOptions{
     Status:   "active", // optional: "active" | "ended"
     Limit:    50,        // optional pagination
 })
+if result.NextCursor != "" {
+    next, err := client.ListSessions(ctx, mantyx.ListSessionsOptions{
+        Limit:  50,
+        Cursor: result.NextCursor,
+    })
+}
 for _, s := range result.Sessions {
     // s.SessionID, s.CreationDate, s.LastInteractionDate, s.Summary, s.Metadata, s.Status
     fmt.Println(s.SessionID, s.Summary)
@@ -574,6 +580,14 @@ events, err := client.GetSessionEvents(ctx, result.Sessions[0].SessionID, mantyx
 recent, err := client.GetSessionEvents(ctx, result.Sessions[0].SessionID, mantyx.GetSessionEventsOptions{
     LastMessages: 10,
 })
+
+// For bounded backward paging, use the page response metadata:
+page, err := client.GetSessionEventsPage(ctx, result.Sessions[0].SessionID, mantyx.SessionEventsPageOptions{})
+if page.NextBeforeSeq > 0 {
+    older, err := client.GetSessionEventsPage(ctx, result.Sessions[0].SessionID, mantyx.SessionEventsPageOptions{
+        BeforeSeq: page.NextBeforeSeq,
+    })
+}
 ```
 
 An existing `*Session` also exposes `session.Events(ctx, opts)`.
@@ -622,11 +636,13 @@ Opt-in multi-step checklists. Pass `Plan: mantyx.PlanAuto()` or `Plan: mantyx.Pl
 | `(*Client).ResumeSession(ctx, id, tools)`                         | `(*Session, error)`              |
 | `(*Client).ListSessions(ctx, ListSessionsOptions)`                | `(SessionListResult, error)`     |
 | `(*Client).GetSessionEvents(ctx, id, GetSessionEventsOptions)`    | `([]RunEvent, error)`            |
+| `(*Client).GetSessionEventsPage(ctx, id, SessionEventsPageOptions)` | `(SessionEventsPage, error)`    |
 | `(*Session).Send(ctx, prompt, ...SendOption)`                     | `(*RunResult, error)`            |
 | `(*Session).RunPlan(ctx, prompt, steps, brief, ...SendOption)`  | `(*RunResult, error)` (plan-only)|
 | `(*Session).Stream(ctx, prompt)`                                  | `(<-chan RunEvent, error)`       |
 | `(*Session).History(ctx)`                                         | `([]Message, error)`             |
 | `(*Session).Events(ctx, GetSessionEventsOptions)`                 | `([]RunEvent, error)`            |
+| `(*Session).EventsPage(ctx, SessionEventsPageOptions)`            | `(SessionEventsPage, error)`     |
 | `(*Session).End(ctx)`                                             | `error`                          |
 | `(*Client).CancelRun(ctx, runID)`                                 | `error`                          |
 

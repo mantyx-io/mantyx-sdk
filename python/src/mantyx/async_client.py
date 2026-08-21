@@ -45,6 +45,7 @@ from .client import (
     RunModelInfo,
     RunResult,
     RunTokenUsage,
+    SessionEventsPage,
     SessionInfo,
     SessionListResult,
     _coerce_eval_tools,
@@ -66,6 +67,7 @@ from .client import (
     _parse_run_tokens,
     _parse_run_turns,
     _parse_session_events,
+    _parse_session_events_page,
     _parse_session_info,
     _parse_session_list,
     _parse_structured_output_info,
@@ -611,6 +613,7 @@ class AsyncMantyxClient:
         status: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+        cursor: str | None = None,
     ) -> SessionListResult:
         """List the workspace's sessions, most-recently-used first.
 
@@ -627,6 +630,8 @@ class AsyncMantyxClient:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
+        if cursor is not None:
+            params["cursor"] = cursor
         body = await self._request("GET", "/agent-sessions", params=params) or {}
         return _parse_session_list(body)
 
@@ -656,6 +661,25 @@ class AsyncMantyxClient:
             or {}
         )
         return _parse_session_events(body)
+
+    async def get_session_events_page(
+        self,
+        session_id: str,
+        *,
+        last_messages: int = 100,
+        before_seq: int | None = None,
+    ) -> SessionEventsPage:
+        """Fetch one bounded page and follow ``next_before_seq`` for older events."""
+        params: dict[str, Any] = {"lastMessages": last_messages}
+        if before_seq is not None:
+            params["beforeSeq"] = before_seq
+        body = (
+            await self._request(
+                "GET", f"/agent-sessions/{_quote(session_id)}/events", params=params
+            )
+            or {}
+        )
+        return _parse_session_events_page(body)
 
     # ------------------------------------------------------------ Internals
 
@@ -1215,6 +1239,16 @@ class AsyncAgentSession:
     ) -> list[RunEvent]:
         """Replay this session's conversation as realtime-style event frames."""
         return await self.client.get_session_events(self.id, full=full, last_messages=last_messages)
+
+    async def events_page(
+        self, *, last_messages: int = 100, before_seq: int | None = None
+    ) -> SessionEventsPage:
+        """Return one bounded page of replay frames."""
+        return await self.client.get_session_events_page(
+            self.id,
+            last_messages=last_messages,
+            before_seq=before_seq,
+        )
 
     async def end(self) -> None:
         try:

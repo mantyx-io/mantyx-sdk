@@ -88,6 +88,28 @@ async def test_async_stream_agent(
 
 
 @pytest.mark.asyncio
+async def test_async_session_paging(
+    async_mantyx_client: AsyncMantyxClient, mock_server: MockServer
+) -> None:
+    first = await async_mantyx_client.create_session(system_prompt="x")
+    await first.send("one")
+    await first.send("three")
+    await async_mantyx_client.create_session(system_prompt="x")
+
+    sessions = await async_mantyx_client.list_sessions(limit=1)
+    assert sessions.next_cursor
+    next_sessions = await async_mantyx_client.list_sessions(limit=1, cursor=sessions.next_cursor)
+    assert len(next_sessions.sessions) == 1
+
+    newest = await first.events_page(last_messages=2)
+    assert [event.seq for event in newest.events] == [3, 4]
+    assert newest.next_before_seq == 3
+    older = await first.events_page(before_seq=newest.next_before_seq)
+    assert [event.seq for event in older.events] == [1, 2]
+    assert older.truncated is False
+
+
+@pytest.mark.asyncio
 async def test_async_local_tool(
     async_mantyx_client: AsyncMantyxClient, mock_server: MockServer
 ) -> None:

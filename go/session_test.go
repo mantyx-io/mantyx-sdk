@@ -113,6 +113,25 @@ func TestListSessions_FiltersByMetadata(t *testing.T) {
 	if all.Total != 2 {
 		t.Fatalf("expected 2 sessions, got %d", all.Total)
 	}
+	firstPage, err := client.ListSessions(ctx, ListSessionsOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListSessions first page: %v", err)
+	}
+	if len(firstPage.Sessions) != 1 || firstPage.NextCursor == "" {
+		t.Fatalf("unexpected first page: %#v", firstPage)
+	}
+	secondPage, err := client.ListSessions(ctx, ListSessionsOptions{
+		Limit:  1,
+		Cursor: firstPage.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("ListSessions second page: %v", err)
+	}
+	if len(secondPage.Sessions) != 1 ||
+		secondPage.Sessions[0].SessionID == firstPage.Sessions[0].SessionID ||
+		secondPage.NextCursor != "" {
+		t.Fatalf("unexpected second page: %#v", secondPage)
+	}
 
 	filtered, err := client.ListSessions(ctx, ListSessionsOptions{
 		Metadata: map[string]string{"customer": "acme"},
@@ -194,6 +213,26 @@ func TestGetSessionEvents_ReplaysFrames(t *testing.T) {
 	}
 	if len(lastTwo) != 2 || lastTwo[0].Seq != 3 || lastTwo[1].Seq != 4 {
 		t.Fatalf("unexpected lastMessages slice: %#v", lastTwo)
+	}
+
+	newestPage, err := session.EventsPage(ctx, SessionEventsPageOptions{LastMessages: 2})
+	if err != nil {
+		t.Fatalf("EventsPage newest: %v", err)
+	}
+	if len(newestPage.Events) != 2 || newestPage.NextBeforeSeq != 3 || !newestPage.Truncated {
+		t.Fatalf("unexpected newest page: %#v", newestPage)
+	}
+	olderPage, err := session.EventsPage(ctx, SessionEventsPageOptions{
+		BeforeSeq: newestPage.NextBeforeSeq,
+	})
+	if err != nil {
+		t.Fatalf("EventsPage older: %v", err)
+	}
+	if len(olderPage.Events) != 2 ||
+		olderPage.Events[0].Seq != 1 ||
+		olderPage.NextBeforeSeq != 0 ||
+		olderPage.Truncated {
+		t.Fatalf("unexpected older page: %#v", olderPage)
 	}
 }
 

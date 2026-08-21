@@ -624,13 +624,25 @@ export class MockServer {
       const matched = [...this.sessions.values()].filter((s) =>
         filters.every((f) => f && s.metadata[f.key] === f.value),
       );
+      const cursor = url.searchParams.get("cursor");
+      const cursorIndex = cursor
+        ? matched.findIndex((session) => session.id === cursor)
+        : -1;
+      const offset = cursor
+        ? Math.max(0, cursorIndex + 1)
+        : Number(url.searchParams.get("offset") ?? "0") || 0;
+      const limit = Number(url.searchParams.get("limit") ?? "50") || 50;
+      const page = matched.slice(offset, offset + limit);
+      const nextCursor =
+        offset + page.length < matched.length ? page.at(-1)?.id ?? null : null;
       res.setHeader("Content-Type", "application/json");
       res.end(
         JSON.stringify({
           total: matched.length,
-          limit: 50,
-          offset: 0,
-          sessions: matched.map((s) => ({
+          limit,
+          offset: cursor ? 0 : offset,
+          nextCursor,
+          sessions: page.map((s) => ({
             sessionId: s.id,
             creationDate: s.createdAt,
             lastInteractionDate: s.createdAt,
@@ -654,12 +666,17 @@ export class MockServer {
       const full =
         url.searchParams.get("full") === "1" ||
         url.searchParams.get("full") === "true";
-      let selected = all;
+      const beforeSeq = Number(url.searchParams.get("beforeSeq") ?? "");
+      const candidates =
+        !full && Number.isFinite(beforeSeq) && beforeSeq > 0
+          ? all.slice(0, beforeSeq - 1)
+          : all;
+      let selected = full ? all : candidates;
       const lastMessages = Number(url.searchParams.get("lastMessages") ?? "");
       if (!full && Number.isFinite(lastMessages) && lastMessages > 0) {
-        selected = all.slice(-lastMessages);
+        selected = candidates.slice(-lastMessages);
       }
-      const startIndex = all.length - selected.length;
+      const startIndex = candidates.length - selected.length;
       const events = selected.map((m, i) => {
         const seq = startIndex + i + 1;
         if (m.role === "assistant") {
@@ -670,9 +687,16 @@ export class MockServer {
         }
         return { seq, type: "message", role: m.role, text: m.content };
       });
+      const firstSeq = events[0]?.seq;
       res.setHeader("Content-Type", "application/json");
       res.end(
-        JSON.stringify({ sessionId: session.id, total: all.length, events }),
+        JSON.stringify({
+          sessionId: session.id,
+          total: all.length,
+          events,
+          nextBeforeSeq: firstSeq != null && firstSeq > 1 ? firstSeq : null,
+          truncated: firstSeq != null && firstSeq > 1,
+        }),
       );
       return;
     }

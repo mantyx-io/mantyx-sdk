@@ -76,6 +76,19 @@ describe("AgentSession", () => {
     const all = await client.listSessions();
     expect(all.total).toBe(2);
 
+    const firstPage = await client.listSessions({ limit: 1 });
+    expect(firstPage.sessions).toHaveLength(1);
+    expect(firstPage.nextCursor).toBeTruthy();
+    const secondPage = await client.listSessions({
+      limit: 1,
+      cursor: firstPage.nextCursor!,
+    });
+    expect(secondPage.sessions).toHaveLength(1);
+    expect(secondPage.sessions[0]?.sessionId).not.toBe(
+      firstPage.sessions[0]?.sessionId,
+    );
+    expect(secondPage.nextCursor).toBeNull();
+
     const filtered = await client.listSessions({
       metadata: { customer: "acme" },
     });
@@ -119,5 +132,20 @@ describe("AgentSession", () => {
       { seq: 3, type: "user_message", text: "three" },
       { seq: 4, type: "assistant_message", text: "four" },
     ]);
+
+    const newestPage = await session.eventsPage({ lastMessages: 2 });
+    expect(newestPage.events).toEqual(lastTwo);
+    expect(newestPage.nextBeforeSeq).toBe(3);
+    expect(newestPage.truncated).toBe(true);
+
+    const olderPage = await session.eventsPage({
+      beforeSeq: newestPage.nextBeforeSeq!,
+    });
+    expect(olderPage.events).toEqual([
+      { seq: 1, type: "user_message", text: "one" },
+      { seq: 2, type: "assistant_message", text: "two" },
+    ]);
+    expect(olderPage.nextBeforeSeq).toBeNull();
+    expect(olderPage.truncated).toBe(false);
   });
 });

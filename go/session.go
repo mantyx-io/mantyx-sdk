@@ -239,6 +239,11 @@ func (s *Session) Events(ctx context.Context, opts GetSessionEventsOptions) ([]R
 	return s.client.GetSessionEvents(ctx, s.ID, opts)
 }
 
+// EventsPage returns one bounded page of replay frames.
+func (s *Session) EventsPage(ctx context.Context, opts SessionEventsPageOptions) (SessionEventsPage, error) {
+	return s.client.GetSessionEventsPage(ctx, s.ID, opts)
+}
+
 // End marks the session terminal and closes any MCP transports the SDK
 // opened on the session's behalf.
 func (s *Session) End(ctx context.Context) error {

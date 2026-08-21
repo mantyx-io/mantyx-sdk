@@ -260,7 +260,9 @@ result = client.list_sessions(
     metadata={"customer": "acme"},
     status="active",  # optional: "active" | "ended"
     limit=50,  # optional pagination
-    offset=0,
+)
+next_page = (
+    client.list_sessions(limit=50, cursor=result.next_cursor) if result.next_cursor else None
 )
 for s in result.sessions:
     # s.session_id, s.creation_date, s.last_interaction_date, s.summary, s.metadata, s.status
@@ -272,9 +274,21 @@ events = client.get_session_events(result.sessions[0].session_id)
 
 # Or fetch only the most recent turns:
 recent = client.get_session_events(result.sessions[0].session_id, last_messages=10)
+
+# For bounded backward paging, use the page response metadata:
+page = client.get_session_events_page(result.sessions[0].session_id)
+older = (
+    client.get_session_events_page(
+        result.sessions[0].session_id,
+        before_seq=page.next_before_seq,
+    )
+    if page.next_before_seq
+    else None
+)
 ```
 
-`AsyncMantyxClient` exposes `await client.list_sessions(...)` and `await client.get_session_events(...)`; an `AgentSession` also offers `session.events(...)`.
+`AsyncMantyxClient` exposes awaitable equivalents; session handles also offer
+`events(...)` and `events_page(...)`.
 
 ## API reference
 
@@ -310,8 +324,9 @@ Opt-in multi-step checklists. Pass `plan=True` or `plan={"steps": [...], "brief"
 | `stream_agent(...)`                             | `Iterator[RunEvent]`                 |
 | `create_session(...)`                           | `AgentSession`                       |
 | `resume_session(session_id, *, tools=None)`     | `AgentSession`                       |
-| `list_sessions(*, metadata=None, status=None, limit=None, offset=None)` | `SessionListResult`                  |
+| `list_sessions(*, metadata=None, status=None, limit=None, offset=None, cursor=None)` | `SessionListResult`                  |
 | `get_session_events(session_id, *, full=False, last_messages=None)` | `list[RunEvent]`                     |
+| `get_session_events_page(session_id, *, last_messages=100, before_seq=None)` | `SessionEventsPage`              |
 | `end_session(session_id)`                       | `None`                               |
 | `cancel_run(run_id)`                            | `None`                               |
 

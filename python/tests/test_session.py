@@ -51,6 +51,14 @@ def test_list_sessions_filters_by_metadata(
     all_sessions = mantyx_client.list_sessions()
     assert all_sessions.total == 2
 
+    first_page = mantyx_client.list_sessions(limit=1)
+    assert len(first_page.sessions) == 1
+    assert first_page.next_cursor
+    second_page = mantyx_client.list_sessions(limit=1, cursor=first_page.next_cursor)
+    assert len(second_page.sessions) == 1
+    assert second_page.sessions[0].session_id != first_page.sessions[0].session_id
+    assert second_page.next_cursor is None
+
     filtered = mantyx_client.list_sessions(metadata={"customer": "acme"})
     assert filtered.total == 1
     assert filtered.sessions[0].metadata == {"customer": "acme", "env": "prod"}
@@ -81,3 +89,19 @@ def test_get_session_events_replays_frames(
         (3, "user_message", "three"),
         (4, "assistant_message", "echo:three"),
     ]
+
+    newest_page = session.events_page(last_messages=2)
+    assert [(e.seq, e.type, e.text) for e in newest_page.events] == [
+        (3, "user_message", "three"),
+        (4, "assistant_message", "echo:three"),
+    ]
+    assert newest_page.next_before_seq == 3
+    assert newest_page.truncated is True
+
+    older_page = session.events_page(before_seq=newest_page.next_before_seq)
+    assert [(e.seq, e.type, e.text) for e in older_page.events] == [
+        (1, "user_message", "one"),
+        (2, "assistant_message", "echo:one"),
+    ]
+    assert older_page.next_before_seq is None
+    assert older_page.truncated is False

@@ -472,6 +472,18 @@ class MockServer:
             matched = [
                 (sid, s) for sid, s in items if all(s["metadata"].get(k) == v for k, v in filters)
             ]
+            cursor = q.get("cursor")
+            offset = 0
+            if cursor is not None:
+                offset = next(
+                    (i + 1 for i, (sid, _) in enumerate(matched) if sid == cursor),
+                    0,
+                )
+            elif q.get("offset"):
+                offset = int(q.get("offset") or "0")
+            limit = int(q.get("limit") or "50")
+            page = matched[offset : offset + limit]
+            next_cursor = page[-1][0] if offset + len(page) < len(matched) and page else None
             sessions = [
                 {
                     "sessionId": sid,
@@ -483,11 +495,17 @@ class MockServer:
                     "metadata": s["metadata"],
                     "status": "active",
                 }
-                for sid, s in matched
+                for sid, s in page
             ]
             return httpx.Response(
                 200,
-                json={"total": len(sessions), "limit": 50, "offset": 0, "sessions": sessions},
+                json={
+                    "total": len(matched),
+                    "limit": limit,
+                    "offset": 0 if cursor is not None else offset,
+                    "nextCursor": next_cursor,
+                    "sessions": sessions,
+                },
             )
         # GET /agent-sessions/:id/events — replay as realtime-style frames
         if len(rest) == 2 and rest[1] == "events" and method == "GET":
@@ -498,15 +516,23 @@ class MockServer:
             all_messages = session["messages"]
             q = request.url.params
             full = q.get("full") in ("1", "true")
-            selected = all_messages
+            candidates = all_messages
+            if not full and q.get("beforeSeq"):
+                try:
+                    before_seq = int(q.get("beforeSeq") or "0")
+                    if before_seq > 0:
+                        candidates = all_messages[: before_seq - 1]
+                except ValueError:
+                    pass
+            selected = all_messages if full else candidates
             if not full and q.get("lastMessages"):
                 try:
                     n = int(q.get("lastMessages") or "0")
                     if n > 0:
-                        selected = all_messages[-n:]
+                        selected = candidates[-n:]
                 except ValueError:
                     pass
-            start_index = len(all_messages) - len(selected)
+            start_index = len(candidates) - len(selected)
             events = []
             for i, m in enumerate(selected):
                 seq = start_index + i + 1
@@ -519,7 +545,14 @@ class MockServer:
                         {"seq": seq, "type": "message", "role": m["role"], "text": m["content"]}
                     )
             return httpx.Response(
-                200, json={"sessionId": rest[0], "total": len(all_messages), "events": events}
+                200,
+                json={
+                    "sessionId": rest[0],
+                    "total": len(all_messages),
+                    "events": events,
+                    "nextBeforeSeq": events[0]["seq"] if events and events[0]["seq"] > 1 else None,
+                    "truncated": bool(events and events[0]["seq"] > 1),
+                },
             )
         if len(rest) == 1 and method == "GET":
             with self.lock:
