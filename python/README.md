@@ -262,9 +262,7 @@ result = client.list_sessions(
     limit=50,  # optional pagination
 )
 next_page = (
-    client.list_sessions(limit=50, cursor=result.next_cursor)
-    if result.next_cursor
-    else None
+    client.list_sessions(limit=50, cursor=result.next_cursor) if result.next_cursor else None
 )
 for s in result.sessions:
     # s.session_id, s.creation_date, s.last_interaction_date, s.summary, s.metadata, s.status
